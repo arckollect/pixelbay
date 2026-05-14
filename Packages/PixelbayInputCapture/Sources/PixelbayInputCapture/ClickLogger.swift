@@ -60,6 +60,11 @@ public actor ClickLogger {
     /// want deterministic mark counts and by callers that don't want the
     /// auto-trigger).
     private var gestureDetector: CircleGestureDetector?
+    /// Second optional motion gesture: rapid back-and-forth shake / wiggle
+    /// also emits a `ZoomMark` — parallels macOS's "shake to find cursor"
+    /// pattern. Like `gestureDetector`, runs on post-normalisation coords
+    /// so thresholds are in `[0…1]` units. Nil disables the shake path.
+    private var shakeDetector: ShakeGestureDetector?
     private var phase: Phase = .idle
     private var clicks: [ClickEvent] = []
     private var moves: [MouseMove] = []
@@ -70,12 +75,14 @@ public actor ClickLogger {
         source: ClickEventSource = .live,
         moveDecimationInterval: TimeInterval = 1.0 / 30.0,
         displayPointsBounds: CGRect? = nil,
-        gestureDetector: CircleGestureDetector? = nil
+        gestureDetector: CircleGestureDetector? = nil,
+        shakeDetector: ShakeGestureDetector? = nil
     ) {
         self.source = source
         self.moveDecimationInterval = moveDecimationInterval
         self.displayPointsBounds = displayPointsBounds
         self.gestureDetector = gestureDetector
+        self.shakeDetector = shakeDetector
     }
 
     public func start() throws {
@@ -135,6 +142,28 @@ public actor ClickLogger {
         let normalised = normalize(move)
         moves.append(normalised)
         feedGestureDetector(normalised)
+        feedShakeDetector(normalised)
+    }
+
+    private func feedShakeDetector(_ move: MouseMove) {
+        guard var detector = shakeDetector else { return }
+        let detection = detector.ingest(
+            ShakeGestureDetector.Sample(
+                timestamp: move.timestamp,
+                x: move.x,
+                y: move.y
+            )
+        )
+        shakeDetector = detector
+        guard let detection else { return }
+        marks.append(
+            ZoomMark(
+                timestamp: detection.timestamp,
+                x: detection.x,
+                y: detection.y
+            )
+        )
+        log.info("shake gesture mark logged at (\(detection.x, format: .fixed(precision: 3)), \(detection.y, format: .fixed(precision: 3))) reversals=\(detection.reversals)")
     }
 
     private func feedGestureDetector(_ move: MouseMove) {

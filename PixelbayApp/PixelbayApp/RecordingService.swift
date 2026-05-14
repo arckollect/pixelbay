@@ -127,15 +127,19 @@ final class RecordingService {
             // failure here (Accessibility not granted, tap creation refused)
             // does NOT fail the recording — we just skip the sidecar.
             if request.logClicks {
-                // Default gesture detector is enabled when click logging is
-                // on: drawing a small circle with the cursor mid-recording
-                // logs a ZoomMark, same effect as the ⌃⌘Z hotkey but without
-                // having to reach for the keyboard (slice #11.e). Defaults
-                // are tuned conservatively (≤30% residual, ≥270° sweep,
-                // 1s cooldown) so accidental loops don't trigger zooms.
+                // Default gesture detectors are enabled when click logging
+                // is on: drawing a small circle (slice #11.e) OR rapidly
+                // shaking the cursor (slice #11.g, "shake to find cursor"
+                // muscle-memory) mid-recording logs a ZoomMark, same effect
+                // as the ⌃⌘Z hotkey but without reaching for the keyboard.
+                // Defaults are tuned conservatively (circle: ≤30% residual /
+                // ≥270° sweep; shake: ≥4 axis reversals / 4-25% screen amp /
+                // 0.4s window) so accidental motion doesn't trigger zooms;
+                // both share a 1s cooldown after firing.
                 let logger = ClickLogger(
                     displayPointsBounds: request.displayPointsBounds,
-                    gestureDetector: CircleGestureDetector()
+                    gestureDetector: CircleGestureDetector(),
+                    shakeDetector: ShakeGestureDetector()
                 )
                 do {
                     try await logger.start()
