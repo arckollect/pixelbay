@@ -1,0 +1,35 @@
+# Xcode
+build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+
+# AppCode / JetBrains
+.idea/
+
+# Editor backups
+*~
+*.swp
+
+# Local AI-assistant session state
+.claude/
+
+# Per-developer signing config (Team ID lives here, never in pbxproj).
+# Copy Local.xcconfig.template → Local.xcconfig and fill in your Team ID.
+Local.xcconfig

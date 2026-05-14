@@ -1,0 +1,141 @@
+#include <metal_stdlib>
+using namespace metal;
+
+// Compositor shaders. Phase 1 had one textured-quad pass with optional
+// rounded-corner alpha masking; Phase 3a adds a background pass and a
+// circle-mask branch for talking-head cam framing.
+//
+// Coordinate conventions:
+//   - Vertex input: clip-space positions in [-1, +1].
+//   - Texture coordinates: [0, 1] with origin top-left (matches CVPixelBuffer
+//     orientation when Metal textures are created from CVMetalTextureCache).
+//   - The CPU-side pipeline emits a triangle strip whose destination rectangle
+//     is already mapped to clip space.
+
+struct VertexIn {
+    float2 position [[attribute(0)]];
+    float2 texCoord [[attribute(1)]];
+};
+
+struct VertexOut {
+    float4 position [[position]];
+    float2 texCoord;
+    float2 layerLocal; // 0..1 inside the layer's own rect, used for SDF mask
+};
+
+// Uniforms shared across passes. Layer-local rect normalisation happens on
+// the CPU side (vertex inputs).
+struct LayerUniforms {
+    float2 outputSizePx;        // total framebuffer in pixels
+    float2 layerSizePx;         // this layer's rect in pixels
+    float cornerRadiusPx;       // 0 disables rounded-rect masking
+    float isCircle;             // 1 → mask to inscribed circle (overrides cornerRadius)
+    float opacity;              // Phase 3b talking-head crossfade — multiplies final alpha
+    float _pad0;
+};
+
+// Phase 3a background pass.
+struct BackgroundUniforms {
+    float4 topColor;
+    float4 bottomColor;
+    float isGradient;
+    float _pad0;
+    float _pad1;
+    float _pad2;
+};
+
+struct BackgroundVertexOut {
+    float4 position [[position]];
+    float2 uv;
+};
+
+vertex VertexOut layerVertex(VertexIn in [[stage_in]]) {
+    VertexOut out;
+    out.position = float4(in.position, 0.0, 1.0);
+    out.texCoord = in.texCoord;
+    out.layerLocal = in.texCoord; // texCoord doubles as layer-local UV
+    return out;
+}
+
+// Full-screen triangle generated from vertex ID. Covers [-1, +1]^2 with one
+// triangle (no vertex buffer required).
+vertex BackgroundVertexOut backgroundVertex(uint vid [[vertex_id]]) {
+    float2 uv = float2((vid << 1) & 2, vid & 2);
+    BackgroundVertexOut out;
+    out.position = float4(uv * 2.0 - 1.0, 0.0, 1.0);
+    out.uv = float2(uv.x, 1.0 - uv.y); // flip y so v=0 is top
+    return out;
+}
+
+fragment float4 backgroundFragment(
+    BackgroundVertexOut in [[stage_in]],
+    constant BackgroundUniforms &u [[buffer(0)]]
+) {
+    if (u.isGradient > 0.5) {
+        return mix(u.topColor, u.bottomColor, in.uv.y);
+    }
+    return u.topColor;
+}
+
+// Rounded-rectangle SDF.
+static inline float sdRoundedBox(float2 p, float2 halfSize, float r) {
+    float2 q = abs(p) - halfSize + r;
+    return length(max(q, float2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+static inline float sdCircle(float2 p, float r) {
+    return length(p) - r;
+}
+
+// Layer alpha mask. 1 = fully inside, 0 = fully outside, ~1px AA transition.
+// Picks circle vs rounded-rect based on the `isCircle` flag.
+static inline float layerAlphaMask(VertexOut in, constant LayerUniforms &u) {
+    float2 layerPx = (in.layerLocal - 0.5) * u.layerSizePx;
+    float d;
+    if (u.isCircle > 0.5) {
+        float r = min(u.layerSizePx.x, u.layerSizePx.y) * 0.5;
+        d = sdCircle(layerPx, r);
+    } else if (u.cornerRadiusPx > 0.5) {
+        d = sdRoundedBox(layerPx, u.layerSizePx * 0.5, u.cornerRadiusPx);
+    } else {
+        return 1.0;
+    }
+    return saturate(0.5 - d);
+}
+
+// BGRA fragment: simple sample, optional alpha mask.
+fragment float4 bgraFragment(
+    VertexOut in [[stage_in]],
+    texture2d<float, access::sample> tex [[texture(0)]],
+    constant LayerUniforms &u [[buffer(0)]]
+) {
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float4 c = tex.sample(s, in.texCoord);
+    c.a *= layerAlphaMask(in, u) * u.opacity;
+    return c;
+}
+
+// NV12 fragment: samples Y (R8) + CbCr (RG8), converts BT.709 limited-range
+// → sRGB. Matches what SCStream / AVCaptureVideoDataOutput deliver after
+// HANDOFF iter-9 settled on NV12 / videoRange / sRGB color space.
+fragment float4 nv12Fragment(
+    VertexOut in [[stage_in]],
+    texture2d<float, access::sample> yPlane [[texture(0)]],
+    texture2d<float, access::sample> cbcrPlane [[texture(1)]],
+    constant LayerUniforms &u [[buffer(0)]]
+) {
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float y = yPlane.sample(s, in.texCoord).r;
+    float2 cbcr = cbcrPlane.sample(s, in.texCoord).rg;
+
+    float yLin = (y - 16.0/255.0) * (255.0/219.0);
+    float cb = cbcr.r - 0.5;
+    float cr = cbcr.g - 0.5;
+    float r = yLin + 1.5748 * cr;
+    float g = yLin - 0.1873 * cb - 0.4681 * cr;
+    float b = yLin + 1.8556 * cb;
+    float4 c = float4(saturate(r), saturate(g), saturate(b), 1.0);
+
+    c.a *= layerAlphaMask(in, u) * u.opacity;
+    return c;
+}

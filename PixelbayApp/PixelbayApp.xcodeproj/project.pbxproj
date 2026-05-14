@@ -1,0 +1,537 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		E4A579C92FA57E1D00AD0E16 /* PixelbayCore in Frameworks */ = {isa = PBXBuildFile; productRef = E4A579C82FA57E1D00AD0E16 /* PixelbayCore */; };
+		E4A579CC2FA57E5800AD0E16 /* PixelbayPermissions in Frameworks */ = {isa = PBXBuildFile; productRef = E4A579CB2FA57E5800AD0E16 /* PixelbayPermissions */; };
+		E4A57AD02FA5800100AD0E16 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57AD22FA5800100AD0E16 /* Sparkle */; };
+		E4A57AD32FA5800200AD0E16 /* KeyboardShortcuts in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57AD52FA5800200AD0E16 /* KeyboardShortcuts */; };
+		E4A57AE22FA5810000AD0E16 /* PixelbayCapture in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57AE12FA5810000AD0E16 /* PixelbayCapture */; };
+		E4A57AE52FA5810000AD0E16 /* PixelbayRecording in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57AE42FA5810000AD0E16 /* PixelbayRecording */; };
+		E4A57BF02FB0000000AD0E16 /* PixelbayCompositor in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57BF22FB0000000AD0E16 /* PixelbayCompositor */; };
+		E4A57BF32FB0000000AD0E16 /* PixelbayPlayback in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57BF52FB0000000AD0E16 /* PixelbayPlayback */; };
+		E4A57C002FB0000000AD0E16 /* PixelbayInputCapture in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57C022FB0000000AD0E16 /* PixelbayInputCapture */; };
+		E4A57C102FB0000000AD0E16 /* PixelbayEditor in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57C122FB0000000AD0E16 /* PixelbayEditor */; };
+		E4A57C202FB0000000AD0E16 /* PixelbayTimelineUI in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57C222FB0000000AD0E16 /* PixelbayTimelineUI */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		E4A579B02FA5653A00AD0E16 /* PixelbayApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PixelbayApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E4A57D012FC0000000AD0E16 /* Local.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Local.xcconfig; path = ../Local.xcconfig; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		E4A579CD2FA57FBC00AD0E16 /* Exceptions for "PixelbayApp" folder in "PixelbayApp" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = E4A579AF2FA5653900AD0E16 /* PixelbayApp */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		E4A579B22FA5653A00AD0E16 /* PixelbayApp */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				E4A579CD2FA57FBC00AD0E16 /* Exceptions for "PixelbayApp" folder in "PixelbayApp" target */,
+			);
+			path = PixelbayApp;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		E4A579AD2FA5653900AD0E16 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E4A579C92FA57E1D00AD0E16 /* PixelbayCore in Frameworks */,
+				E4A579CC2FA57E5800AD0E16 /* PixelbayPermissions in Frameworks */,
+				E4A57AE22FA5810000AD0E16 /* PixelbayCapture in Frameworks */,
+				E4A57AE52FA5810000AD0E16 /* PixelbayRecording in Frameworks */,
+				E4A57BF02FB0000000AD0E16 /* PixelbayCompositor in Frameworks */,
+				E4A57BF32FB0000000AD0E16 /* PixelbayPlayback in Frameworks */,
+				E4A57C002FB0000000AD0E16 /* PixelbayInputCapture in Frameworks */,
+				E4A57C102FB0000000AD0E16 /* PixelbayEditor in Frameworks */,
+				E4A57C202FB0000000AD0E16 /* PixelbayTimelineUI in Frameworks */,
+				E4A57AD02FA5800100AD0E16 /* Sparkle in Frameworks */,
+				E4A57AD32FA5800200AD0E16 /* KeyboardShortcuts in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		E4A579A72FA5653900AD0E16 = {
+			isa = PBXGroup;
+			children = (
+				E4A57D012FC0000000AD0E16 /* Local.xcconfig */,
+				E4A579B22FA5653A00AD0E16 /* PixelbayApp */,
+				E4A579B12FA5653A00AD0E16 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E4A579B12FA5653A00AD0E16 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				E4A579B02FA5653A00AD0E16 /* PixelbayApp.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		E4A579AF2FA5653900AD0E16 /* PixelbayApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E4A579BB2FA5653B00AD0E16 /* Build configuration list for PBXNativeTarget "PixelbayApp" */;
+			buildPhases = (
+				E4A579AC2FA5653900AD0E16 /* Sources */,
+				E4A579AD2FA5653900AD0E16 /* Frameworks */,
+				E4A579AE2FA5653900AD0E16 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				E4A579B22FA5653A00AD0E16 /* PixelbayApp */,
+			);
+			name = PixelbayApp;
+			packageProductDependencies = (
+				E4A579C82FA57E1D00AD0E16 /* PixelbayCore */,
+				E4A579CB2FA57E5800AD0E16 /* PixelbayPermissions */,
+				E4A57AE12FA5810000AD0E16 /* PixelbayCapture */,
+				E4A57AE42FA5810000AD0E16 /* PixelbayRecording */,
+				E4A57BF22FB0000000AD0E16 /* PixelbayCompositor */,
+				E4A57BF52FB0000000AD0E16 /* PixelbayPlayback */,
+				E4A57C022FB0000000AD0E16 /* PixelbayInputCapture */,
+				E4A57C122FB0000000AD0E16 /* PixelbayEditor */,
+				E4A57C222FB0000000AD0E16 /* PixelbayTimelineUI */,
+				E4A57AD22FA5800100AD0E16 /* Sparkle */,
+				E4A57AD52FA5800200AD0E16 /* KeyboardShortcuts */,
+			);
+			productName = PixelbayApp;
+			productReference = E4A579B02FA5653A00AD0E16 /* PixelbayApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E4A579A82FA5653900AD0E16 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2640;
+				LastUpgradeCheck = 2640;
+				TargetAttributes = {
+					E4A579AF2FA5653900AD0E16 = {
+						CreatedOnToolsVersion = 26.4;
+					};
+				};
+			};
+			buildConfigurationList = E4A579AB2FA5653900AD0E16 /* Build configuration list for PBXProject "PixelbayApp" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = E4A579A72FA5653900AD0E16;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				E4A579C72FA57E1D00AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayCore" */,
+				E4A579CA2FA57E5800AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayPermissions" */,
+				E4A57AE02FA5810000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayCapture" */,
+				E4A57AE32FA5810000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayRecording" */,
+				E4A57BF12FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayCompositor" */,
+				E4A57BF42FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayPlayback" */,
+				E4A57C012FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayInputCapture" */,
+				E4A57C112FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayEditor" */,
+				E4A57C212FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayTimelineUI" */,
+				E4A57AD12FA5800100AD0E16 /* XCRemoteSwiftPackageReference "Sparkle" */,
+				E4A57AD42FA5800200AD0E16 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = E4A579B12FA5653A00AD0E16 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E4A579AF2FA5653900AD0E16 /* PixelbayApp */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		E4A579AE2FA5653900AD0E16 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		E4A579AC2FA5653900AD0E16 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		E4A579B92FA5653B00AD0E16 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = E4A57D012FC0000000AD0E16 /* Local.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.4;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		E4A579BA2FA5653B00AD0E16 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = E4A57D012FC0000000AD0E16 /* Local.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.4;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		E4A579BC2FA5653B00AD0E16 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = E4A57D012FC0000000AD0E16 /* Local.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				AUTOMATION_APPLE_EVENTS = NO;
+				CODE_SIGN_ENTITLEMENTS = PixelbayApp/Pixelbay.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = YES;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = PixelbayApp/Info.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.pixelbay.PixelbayApp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
+				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
+				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
+				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
+				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
+				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		E4A579BD2FA5653B00AD0E16 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = E4A57D012FC0000000AD0E16 /* Local.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				AUTOMATION_APPLE_EVENTS = NO;
+				CODE_SIGN_ENTITLEMENTS = PixelbayApp/Pixelbay.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = YES;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = PixelbayApp/Info.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.pixelbay.PixelbayApp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
+				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
+				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
+				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
+				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
+				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		E4A579AB2FA5653900AD0E16 /* Build configuration list for PBXProject "PixelbayApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E4A579B92FA5653B00AD0E16 /* Debug */,
+				E4A579BA2FA5653B00AD0E16 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E4A579BB2FA5653B00AD0E16 /* Build configuration list for PBXNativeTarget "PixelbayApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E4A579BC2FA5653B00AD0E16 /* Debug */,
+				E4A579BD2FA5653B00AD0E16 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		E4A579C72FA57E1D00AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/PixelbayCore;
+		};
+		E4A579CA2FA57E5800AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayPermissions" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/PixelbayPermissions;
+		};
+		E4A57AE02FA5810000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayCapture" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/PixelbayCapture;
+		};
+		E4A57AE32FA5810000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayRecording" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/PixelbayRecording;
+		};
+		E4A57BF12FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayCompositor" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/PixelbayCompositor;
+		};
+		E4A57BF42FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayPlayback" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/PixelbayPlayback;
+		};
+		E4A57C012FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayInputCapture" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/PixelbayInputCapture;
+		};
+		E4A57C112FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayEditor" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/PixelbayEditor;
+		};
+		E4A57C212FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayTimelineUI" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/PixelbayTimelineUI;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		E4A57AD12FA5800100AD0E16 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.6.0;
+			};
+		};
+		E4A57AD42FA5800200AD0E16 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sindresorhus/KeyboardShortcuts";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		E4A579C82FA57E1D00AD0E16 /* PixelbayCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PixelbayCore;
+		};
+		E4A579CB2FA57E5800AD0E16 /* PixelbayPermissions */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PixelbayPermissions;
+		};
+		E4A57AD22FA5800100AD0E16 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E4A57AD12FA5800100AD0E16 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+		E4A57AD52FA5800200AD0E16 /* KeyboardShortcuts */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E4A57AD42FA5800200AD0E16 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */;
+			productName = KeyboardShortcuts;
+		};
+		E4A57AE12FA5810000AD0E16 /* PixelbayCapture */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PixelbayCapture;
+		};
+		E4A57AE42FA5810000AD0E16 /* PixelbayRecording */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PixelbayRecording;
+		};
+		E4A57BF22FB0000000AD0E16 /* PixelbayCompositor */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PixelbayCompositor;
+		};
+		E4A57BF52FB0000000AD0E16 /* PixelbayPlayback */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PixelbayPlayback;
+		};
+		E4A57C022FB0000000AD0E16 /* PixelbayInputCapture */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PixelbayInputCapture;
+		};
+		E4A57C122FB0000000AD0E16 /* PixelbayEditor */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PixelbayEditor;
+		};
+		E4A57C222FB0000000AD0E16 /* PixelbayTimelineUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PixelbayTimelineUI;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = E4A579A82FA5653900AD0E16 /* Project object */;
+}

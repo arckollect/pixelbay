@@ -1,0 +1,343 @@
+import Foundation
+
+// Bumped on any breaking change to project.json. A Migrator must be registered
+// for every adjacent version pair (n -> n+1) in MigrationRegistry.
+//
+// v1 → v2 (Phase 3a, 2026-05-12): adds `layout: LayoutPreset` to Project for
+// cam position / cam shape / background. Migrator fills the default that
+// preserves Phase 1 behavior (bottom-right PiP, 12pt rounded rectangle, no
+// background). See `LayoutPreset.phase1Default`.
+//
+// v2 → v3 (Phase 3b, 2026-05-12): adds `effects: [EffectKeyframe]` to
+// Project — time-ranged auto-zoom / talking-head swap segments rendered by
+// the compositor on top of the base layout. Empty array preserves prior
+// visual output. See `EffectKeyframe`.
+public let currentSchemaVersion: Int = 3
+
+// Bumped on any breaking change to the .pixelbay directory layout itself
+// (e.g. renaming the media/ folder, splitting sidecars into a new subdirectory).
+// Tracked separately because directory restructures are harder to migrate than JSON edits.
+public let currentBundleVersion: Int = 1
+
+public struct ProjectID: Hashable, Codable, Sendable, RawRepresentable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static func generate() -> ProjectID { ProjectID(rawValue: UUID().uuidString) }
+}
+
+public struct TrackID: Hashable, Codable, Sendable, RawRepresentable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static func generate() -> TrackID { TrackID(rawValue: UUID().uuidString) }
+}
+
+public struct ClipID: Hashable, Codable, Sendable, RawRepresentable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static func generate() -> ClipID { ClipID(rawValue: UUID().uuidString) }
+}
+
+public struct MediaAssetID: Hashable, Codable, Sendable, RawRepresentable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static func generate() -> MediaAssetID { MediaAssetID(rawValue: UUID().uuidString) }
+}
+
+// Time is stored as rational (numerator/denominator) seconds so we can round-trip
+// to/from CMTime without floating-point drift. Editor invariants depend on exact equality.
+public struct RationalTime: Hashable, Codable, Sendable {
+    public let value: Int64
+    public let timescale: Int32
+
+    public init(value: Int64, timescale: Int32) {
+        self.value = value
+        self.timescale = timescale
+    }
+
+    public static let zero = RationalTime(value: 0, timescale: 600)
+
+    public var seconds: Double { Double(value) / Double(timescale) }
+
+    public static func seconds(_ s: Double, timescale: Int32 = 600) -> RationalTime {
+        RationalTime(value: Int64((s * Double(timescale)).rounded()), timescale: timescale)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case value
+        case timescale
+    }
+}
+
+public struct TimeRange: Hashable, Codable, Sendable {
+    public let start: RationalTime
+    public let duration: RationalTime
+
+    public init(start: RationalTime, duration: RationalTime) {
+        self.start = start
+        self.duration = duration
+    }
+
+    public var end: RationalTime {
+        // Both rationals are normalized at write time elsewhere; for end we just
+        // assume matching timescales (true for everything we generate).
+        precondition(start.timescale == duration.timescale,
+                     "Mixed timescales not supported in TimeRange.end")
+        return RationalTime(value: start.value + duration.value, timescale: start.timescale)
+    }
+
+    /// Half-open overlap test. Two ranges overlap iff each one starts before
+    /// the other ends. Adjacent ranges (`a.end == b.start`) are NOT
+    /// overlapping — matches `EffectKeyframe.strength(at:)` which returns 0
+    /// at the keyframe's `end` time (the half-open `[start, end)` interval),
+    /// so a fresh keyframe can pick up exactly when the previous one expires.
+    public func overlaps(_ other: TimeRange) -> Bool {
+        start.seconds < other.end.seconds
+            && other.start.seconds < end.seconds
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case start
+        case duration
+    }
+}
+
+public enum CaptureSourceKind: String, Codable, Sendable {
+    case display
+    case window
+    case area
+    case device      // Continuity Camera / external capture device
+    case webcam
+    case microphone
+    case systemAudio
+    case voiceover   // recorded inside the editor
+    case imported    // user-imported file
+}
+
+public struct MediaAsset: Codable, Sendable, Identifiable {
+    public let id: MediaAssetID
+    public var kind: CaptureSourceKind
+    // Path relative to the project bundle root, e.g. "media/screen-2026-05-01-001.mov".
+    // Storing relative paths keeps projects portable across machines.
+    public var relativePath: String
+    // Absolute time (seconds since recording session epoch) when this asset began,
+    // so multiple parallel recordings can be aligned in the editor.
+    public var captureStart: RationalTime?
+    public var nativeDuration: RationalTime
+    public var extras: [String: JSONValue]
+
+    public init(
+        id: MediaAssetID = .generate(),
+        kind: CaptureSourceKind,
+        relativePath: String,
+        captureStart: RationalTime? = nil,
+        nativeDuration: RationalTime,
+        extras: [String: JSONValue] = [:]
+    ) {
+        self.id = id
+        self.kind = kind
+        self.relativePath = relativePath
+        self.captureStart = captureStart
+        self.nativeDuration = nativeDuration
+        self.extras = extras
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case relativePath
+        case captureStart
+        case nativeDuration
+        case extras
+    }
+}
+
+// A clip is a non-destructive slice into a MediaAsset.
+//
+// sourceRange  = which part of the underlying file this clip refers to
+// timelineRange = where this clip sits in the project timeline
+//
+// Trimming the in-point shrinks sourceRange.start; dragging the edge back out
+// later expands sourceRange.start, recovering material that was previously
+// trimmed. The underlying file is never modified.
+public struct Clip: Codable, Sendable, Identifiable, Equatable {
+    public let id: ClipID
+    public var assetID: MediaAssetID
+    public var sourceRange: TimeRange
+    public var timelineRange: TimeRange
+    public var volume: Double            // 0.0...1.0+ (Phase 2)
+    public var speed: Double             // 1.0 = realtime (Phase 2)
+    public var enabled: Bool
+    public var extras: [String: JSONValue]
+
+    public init(
+        id: ClipID = .generate(),
+        assetID: MediaAssetID,
+        sourceRange: TimeRange,
+        timelineRange: TimeRange,
+        volume: Double = 1.0,
+        speed: Double = 1.0,
+        enabled: Bool = true,
+        extras: [String: JSONValue] = [:]
+    ) {
+        self.id = id
+        self.assetID = assetID
+        self.sourceRange = sourceRange
+        self.timelineRange = timelineRange
+        self.volume = volume
+        self.speed = speed
+        self.enabled = enabled
+        self.extras = extras
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case assetID
+        case sourceRange
+        case timelineRange
+        case volume
+        case speed
+        case enabled
+        case extras
+    }
+}
+
+public enum TrackKind: String, Codable, Sendable {
+    case screen
+    case webcam
+    case microphone
+    case systemAudio
+    case voiceover
+    case overlay     // text, images
+    case effects     // zoom keyframes, blur masks (Phase 3)
+}
+
+// Tracks are independent from day 1 in the schema even though Phase 1 always
+// presents them as a grouped recording. Phase 2 exposes ungrouping in the UI
+// without a schema migration.
+public struct Track: Codable, Sendable, Identifiable, Equatable {
+    public let id: TrackID
+    public var kind: TrackKind
+    public var name: String
+    public var clips: [Clip]
+    public var muted: Bool
+    public var hidden: Bool
+    public var extras: [String: JSONValue]
+
+    public init(
+        id: TrackID = .generate(),
+        kind: TrackKind,
+        name: String,
+        clips: [Clip] = [],
+        muted: Bool = false,
+        hidden: Bool = false,
+        extras: [String: JSONValue] = [:]
+    ) {
+        self.id = id
+        self.kind = kind
+        self.name = name
+        self.clips = clips
+        self.muted = muted
+        self.hidden = hidden
+        self.extras = extras
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case name
+        case clips
+        case muted
+        case hidden
+        case extras
+    }
+}
+
+// Represents which screen-recording asset is "active" at a given timeline
+// position. Phase 1 always has a single entry; Phase 4's mid-recording
+// window-swap creates multiple entries pointing at parallel SCStream files.
+public struct SourceSegment: Codable, Sendable {
+    public var assetID: MediaAssetID
+    public var timelineRange: TimeRange
+    public var extras: [String: JSONValue]
+
+    public init(
+        assetID: MediaAssetID,
+        timelineRange: TimeRange,
+        extras: [String: JSONValue] = [:]
+    ) {
+        self.assetID = assetID
+        self.timelineRange = timelineRange
+        self.extras = extras
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case assetID
+        case timelineRange
+        case extras
+    }
+}
+
+public struct Project: Codable, Sendable, Identifiable {
+    public var schemaVersion: Int
+    public var bundleVersion: Int
+    public let id: ProjectID
+    public var name: String
+    public var createdAt: Date
+    public var modifiedAt: Date
+    public var assets: [MediaAsset]
+    public var tracks: [Track]
+    // Active source-segment timeline: drives which screen recording is on screen
+    // when at a given playhead position. Empty in pure-import projects.
+    public var sourceSegments: [SourceSegment]
+    // Phase 3a — controls cam position / shape, background, and screen padding.
+    // Migrated in from v1 with `LayoutPreset.phase1Default` (preserves the old
+    // "bottom-right PiP, 12pt rounded rectangle, no background" look).
+    public var layout: LayoutPreset
+    // Phase 3b — auto-zoom + talking-head swap keyframes. Empty array =
+    // legacy compositing (base layout only, no per-frame effects).
+    public var effects: [EffectKeyframe]
+    public var extras: [String: JSONValue]
+
+    public init(
+        schemaVersion: Int = currentSchemaVersion,
+        bundleVersion: Int = currentBundleVersion,
+        id: ProjectID = .generate(),
+        name: String,
+        createdAt: Date = Date(),
+        modifiedAt: Date = Date(),
+        assets: [MediaAsset] = [],
+        tracks: [Track] = [],
+        sourceSegments: [SourceSegment] = [],
+        layout: LayoutPreset = .phase1Default,
+        effects: [EffectKeyframe] = [],
+        extras: [String: JSONValue] = [:]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.bundleVersion = bundleVersion
+        self.id = id
+        self.name = name
+        self.createdAt = createdAt
+        self.modifiedAt = modifiedAt
+        self.assets = assets
+        self.tracks = tracks
+        self.sourceSegments = sourceSegments
+        self.layout = layout
+        self.effects = effects
+        self.extras = extras
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case bundleVersion
+        case id
+        case name
+        case createdAt
+        case modifiedAt
+        case assets
+        case tracks
+        case sourceSegments
+        case layout
+        case effects
+        case extras
+    }
+}

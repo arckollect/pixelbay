@@ -1,0 +1,6 @@
+// Local.xcconfig.template — tracked. Copy to Local.xcconfig (gitignored)
+// and replace YOUR_TEAM_ID_HERE with your 10-char Apple Developer Team ID
+// (visible at developer.apple.com → Membership). The pbxproj resolves
+// DEVELOPMENT_TEAM from this file at build time so the signing identity
+// never lands in source control.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID_HERE
