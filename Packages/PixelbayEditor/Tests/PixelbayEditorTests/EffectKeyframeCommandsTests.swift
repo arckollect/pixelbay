@@ -510,11 +510,32 @@ final class EffectKeyframeCommandsTests: XCTestCase {
 
     func test_generateManualZooms_skipsMarksThatDontFitTimeline() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
-        // Mark at t=0.1 with default lookahead 0.7 → start would be negative.
+        // Manual marks start AT mark.timelineTime (no lookahead — the zoom
+        // responds AFTER the gesture). Default range duration = easeIn 0.7 +
+        // hold 1.8 + easeOut 0.5 = 3.0s. With timelineDuration 5.0, a mark
+        // at t=3.0 (range [3.0, 6.0)) overshoots; a mark at t=1.5 (range
+        // [1.5, 4.5)) fits.
         _ = try GenerateManualZoomsCommand(
-            marks: [AutoZoomClick(timelineTime: 0.1), AutoZoomClick(timelineTime: 5.0)]
+            marks: [AutoZoomClick(timelineTime: 1.5), AutoZoomClick(timelineTime: 3.0)],
+            timelineDuration: 5.0
         ).apply(to: &project)
-        XCTAssertEqual(project.effects.count, 1, "negative-start marks are skipped")
+        XCTAssertEqual(project.effects.count, 1, "overshoot-end marks are skipped")
+        XCTAssertEqual(project.effects[0].timelineRange.start.seconds, 1.5, accuracy: 1e-9)
+    }
+
+    func test_generateManualZooms_zoomStartsAtMarkTimestamp_notBefore() throws {
+        var (project, _) = EditorFixture.minimalSingleClip()
+        // Critical timing contract for gesture-emitted marks: the gesture
+        // motion already happened ~0.4-0.5s before the mark timestamp, so
+        // the zoom ramp must NOT overlap with it. Range starts AT the mark.
+        _ = try GenerateManualZoomsCommand(
+            marks: [AutoZoomClick(timelineTime: 4.0)]
+        ).apply(to: &project)
+        XCTAssertEqual(project.effects.count, 1)
+        XCTAssertEqual(project.effects[0].timelineRange.start.seconds, 4.0, accuracy: 1e-9,
+                       "manual zoom starts at the mark, not before")
+        // Range end = 4.0 + 0.7 (easeIn) + 1.8 (hold) + 0.5 (easeOut) = 7.0.
+        XCTAssertEqual(project.effects[0].timelineRange.end.seconds, 7.0, accuracy: 1e-9)
     }
 
     // MARK: - Zoom-keyframe non-overlap hardening (slice #11.f)

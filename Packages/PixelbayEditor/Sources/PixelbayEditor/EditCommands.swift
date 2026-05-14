@@ -947,7 +947,13 @@ public struct GenerateManualZoomsCommand: EditCommand {
         let sortedMarks = marks.sorted { $0.timelineTime < $1.timelineTime }
         var generated: [EffectKeyframe] = []
         for mark in sortedMarks {
-            let start = mark.timelineTime - lookahead
+            // Manual marks (⌃⌘Z hotkey, circle gesture, shake gesture) place
+            // the zoom range to BEGIN at the mark timestamp rather than peak
+            // at it — the user has already gestured / pressed, so the zoom
+            // should respond AFTER the input, not ramp up across the gesture
+            // motion itself. (Auto-zoom uses lookahead because a click is a
+            // single-instant event with no preceding motion to overlap.)
+            let start = mark.timelineTime
             if start < 0 { continue }
             if let timelineDuration, start + totalDuration > timelineDuration {
                 continue
