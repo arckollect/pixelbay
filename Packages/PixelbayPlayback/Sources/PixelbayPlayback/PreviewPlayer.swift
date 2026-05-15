@@ -76,7 +76,8 @@ public final class PreviewPlayer {
         project: Project,
         bundleURL: URL,
         wallpaperSource: WallpaperSource? = nil,
-        cursorTrajectory: [MouseTrajectorySample]? = nil
+        cursorTrajectory: [MouseTrajectorySample]? = nil,
+        cursorSprite: CursorSpriteData? = nil
     ) async {
         // Preserve playback continuity across reloads (Phase-2 edits
         // bump the document's revision counter; ProjectView re-keys the
@@ -91,7 +92,8 @@ public final class PreviewPlayer {
                 project: project,
                 bundleURL: bundleURL,
                 wallpaperSource: wallpaperSource,
-                cursorTrajectory: cursorTrajectory
+                cursorTrajectory: cursorTrajectory,
+                cursorSprite: cursorSprite
             )
             install(preview: preview)
             // Restore playhead within the new duration. If the new

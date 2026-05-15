@@ -26,6 +26,16 @@ final class SCStreamBridge: NSObject, SCStreamDelegate, SCStreamOutput, @uncheck
     private let onFirstSample: @Sendable (RationalTime) -> Void
     private let lock = NSLock()
     private var firstSampleObserved = false
+    /// Most recent `.complete` screen sample buffer. SCStream emits
+    /// `.idle` / `.blank` heartbeats at the configured rate when the
+    /// display is static — those carry no fresh pixels (and the H.264
+    /// encoder rejects them) so we re-emit a copy of THIS buffer with
+    /// the heartbeat's PTS instead, keeping the recorded stream at
+    /// constant 60 Hz. Without this, `showsCursor = false` caused ~24%
+    /// of frame intervals to exceed 50 ms (visible as "missing frames"
+    /// on playback). Accessed only from the SCStream sample-handler
+    /// queue (this bridge's serial DispatchQueue), so no lock needed.
+    private var lastCompleteScreenSampleBuffer: CMSampleBuffer?
 
     init(
         sink: (any CaptureSink)?,
@@ -50,26 +60,47 @@ final class SCStreamBridge: NSObject, SCStreamDelegate, SCStreamOutput, @uncheck
             return
         }
         let track: CaptureTrack
+        let forwarded: CMSampleBuffer
         switch type {
         case .screen:
             // SCStream stamps every screen sample with an SCStreamFrameInfo
             // status attachment. `.complete` carries fresh pixel data; the
             // other statuses (`.idle`, `.blank`, `.suspended`, `.started`,
-            // `.stopped`) are heartbeat / no-change markers whose image
-            // buffers do not contain a freshly rendered frame. The H.264
-            // encoder accepts the first batch of `.complete` frames during
-            // initial activity, then rejects the first `.idle` that lands
-            // when the screen quiets down — manifesting as
-            // AVFoundationErrorDomain -11800 / NSOSStatus -16122 on
-            // `input.append(_:)` and the writer transitioning to .failed
-            // with every subsequent sample also failing (HANDOFF §3.16
-            // iter #11). Filter to `.complete` here so only real frames
-            // reach the writer.
-            if !Self.isCompleteFrame(sampleBuffer) {
-                return
+            // `.stopped`) are heartbeat / no-change markers — the image
+            // buffer is stale or empty, and the H.264 encoder rejects them
+            // outright (AVFoundationErrorDomain -11800 / NSOSStatus
+            // -16122 on `input.append(_:)`, writer transitions to .failed
+            // with every subsequent sample also failing — HANDOFF §3.16
+            // iter #11). We can't forward heartbeats as-is, but we CAN
+            // re-emit a copy of the last `.complete` buffer carrying the
+            // heartbeat's PTS — the encoder accepts that because the
+            // image data is from a frame it already accepted, and the
+            // emitted stream stays at the configured constant rate even
+            // when the display is static (e.g., `showsCursor = false`
+            // means cursor motion alone no longer triggers content
+            // refreshes, and without re-emission ~24% of frame intervals
+            // exceeded 50 ms — visible as "missing frames" on playback).
+            if Self.isCompleteFrame(sampleBuffer) {
+                lastCompleteScreenSampleBuffer = sampleBuffer
+                track = .screenVideo
+                forwarded = sampleBuffer
+            } else {
+                guard let last = lastCompleteScreenSampleBuffer else {
+                    // No `.complete` frame to clone from yet — drop the
+                    // heartbeat. The first real frame will arrive shortly
+                    // and seed the cache.
+                    return
+                }
+                let heartbeatPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                guard let copy = Self.copyBuffer(last, withPresentationTimeStamp: heartbeatPTS) else {
+                    return
+                }
+                track = .screenVideo
+                forwarded = copy
             }
-            track = .screenVideo
-        case .audio: track = .screenAudio
+        case .audio:
+            track = .screenAudio
+            forwarded = sampleBuffer
         case .microphone:
             // SCStream gained a microphone output type in macOS 15. We
             // capture mic via AVCaptureSession, never SCStream — if this
@@ -88,11 +119,45 @@ final class SCStreamBridge: NSObject, SCStreamDelegate, SCStreamOutput, @uncheck
         if shouldFire {
             // SCStream stamps PTS with the host clock by default — no
             // CMSyncConvertTime hop needed (HANDOFF §6.5).
-            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            let pts = CMSampleBufferGetPresentationTimeStamp(forwarded)
             log.info("SCStreamBridge first sample track=\(String(describing: track), privacy: .public) pts=\(pts.value)/\(pts.timescale) sinkAvailable=\(self.sink != nil)")
             onFirstSample(RationalTime(value: pts.value, timescale: pts.timescale))
         }
-        sink?.append(sampleBuffer, on: track)
+        sink?.append(forwarded, on: track)
+    }
+
+    /// Build a copy of `buffer` with its presentation timestamp replaced
+    /// by `newPTS`. The underlying CVImageBuffer is shared, so this is a
+    /// cheap operation (no pixel copy) — we just rebind a different
+    /// CMSampleTimingInfo onto the same image data. Duration is preserved
+    /// from the original buffer when valid, otherwise falls back to a
+    /// 1/60 s default to match the configured capture rate.
+    private static func copyBuffer(_ buffer: CMSampleBuffer, withPresentationTimeStamp newPTS: CMTime) -> CMSampleBuffer? {
+        let originalDuration = CMSampleBufferGetDuration(buffer)
+        let duration: CMTime
+        if originalDuration.isValid && originalDuration.value > 0 {
+            duration = originalDuration
+        } else {
+            duration = CMTime(value: 1, timescale: 60)
+        }
+        var timing = CMSampleTimingInfo(
+            duration: duration,
+            presentationTimeStamp: newPTS,
+            decodeTimeStamp: .invalid
+        )
+        var copy: CMSampleBuffer?
+        let status = CMSampleBufferCreateCopyWithNewTiming(
+            allocator: kCFAllocatorDefault,
+            sampleBuffer: buffer,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleBufferOut: &copy
+        )
+        guard status == noErr else {
+            log.error("CMSampleBufferCreateCopyWithNewTiming failed status=\(status)")
+            return nil
+        }
+        return copy
     }
 
     static func isCompleteFrame(_ sampleBuffer: CMSampleBuffer) -> Bool {

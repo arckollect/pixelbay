@@ -35,9 +35,14 @@ public actor ClickLogger {
     }
 
     private let source: ClickEventSource
-    /// Minimum host-clock seconds between consecutive emitted moves. Native
-    /// CGEventTap mouse-move rates often exceed 60 Hz; we keep the sidecar
-    /// small by dropping samples that arrive faster than this threshold.
+    /// Minimum host-clock seconds between consecutive emitted moves.
+    /// Default 1/120 s — slightly above the 60 fps preview / export
+    /// frame rate so every rendered frame has at least one fresh sample
+    /// inside its Catmull-Rom interpolation window. Older builds used
+    /// 1/30 s, which left ~half the rendered frames interpolating across
+    /// a 33 ms gap and read as a choppy cursor at the default 3.25×
+    /// sprite scale. Sidecar size grows ~4× at native rates but is still
+    /// negligible (text JSON, ~50 bytes/sample).
     private let moveDecimationInterval: TimeInterval
     /// Recorded display's **bounds in global points** (origin + size in the
     /// same coordinate space `CGEvent.location` reports). When set, the logger
@@ -73,7 +78,7 @@ public actor ClickLogger {
 
     public init(
         source: ClickEventSource = .live,
-        moveDecimationInterval: TimeInterval = 1.0 / 30.0,
+        moveDecimationInterval: TimeInterval = 1.0 / 120.0,
         displayPointsBounds: CGRect? = nil,
         gestureDetector: CircleGestureDetector? = nil,
         shakeDetector: ShakeGestureDetector? = nil

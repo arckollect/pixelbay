@@ -219,14 +219,22 @@ final class EffectKeyframeTests: XCTestCase {
             "layout": Migrator1To2.defaultLayoutJSON()
         ]
         let migrated = try MigrationRegistry.standard.migrate(v2)
-        XCTAssertEqual(migrated["schemaVersion"] as? Int, 3)
+        // `MigrationRegistry.standard` chains all registered migrators
+        // (v2→v3→v4 here) — the test originally asserted == 3, but bumping
+        // currentSchemaVersion past 3 means the chain runs further. Assert
+        // against `currentSchemaVersion` so future bumps don't re-break
+        // this test.
+        XCTAssertEqual(migrated["schemaVersion"] as? Int, currentSchemaVersion)
         let effects = migrated["effects"] as? [Any]
         XCTAssertNotNil(effects)
         XCTAssertEqual(effects?.count, 0)
     }
 
     func test_migrator_v1ToV3_chainsCleanly() throws {
-        // Whole chain: v1 → v2 (adds layout) → v3 (adds effects).
+        // Whole chain: v1 → v2 (adds layout) → v3 (adds effects) → v4
+        // (adds cursorSettings). Asserts the chain advances all the way
+        // to `currentSchemaVersion` and that fields stamped along the way
+        // are present.
         let v1: [String: Any] = [
             "schemaVersion": 1,
             "bundleVersion": 1,
@@ -240,14 +248,14 @@ final class EffectKeyframeTests: XCTestCase {
             "extras": [:]
         ]
         let migrated = try MigrationRegistry.standard.migrate(v1)
-        XCTAssertEqual(migrated["schemaVersion"] as? Int, 3)
+        XCTAssertEqual(migrated["schemaVersion"] as? Int, currentSchemaVersion)
         XCTAssertNotNil(migrated["layout"])
         XCTAssertNotNil(migrated["effects"])
         let data = try JSONSerialization.data(withJSONObject: migrated, options: .sortedKeys)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let project = try decoder.decode(Project.self, from: data)
-        XCTAssertEqual(project.schemaVersion, 3)
+        XCTAssertEqual(project.schemaVersion, currentSchemaVersion)
         XCTAssertEqual(project.layout, .phase1Default)
         XCTAssertTrue(project.effects.isEmpty)
     }

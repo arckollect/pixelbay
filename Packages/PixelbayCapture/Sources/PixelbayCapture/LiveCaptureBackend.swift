@@ -129,7 +129,16 @@ public actor LiveCaptureBackend: CaptureBackend {
         config.capturesAudio = plan.includeSystemAudio
         config.excludesCurrentProcessAudio = true
         config.queueDepth = 6
-        log.info("SCStreamConfiguration native=\(nativeWidth)x\(nativeHeight) capped=\(config.width)x\(config.height) (downscale=\(downscale)) pixelFormat=NV12-videoRange")
+        // Phase 3c — suppress the OS cursor in captured frames so the
+        // compositor can draw its own scalable cursor sprite on top using
+        // the mouse-trajectory sidecar. The asset is stamped
+        // `cursorRenderedSynthetically=true` at save time
+        // (RecordingService); legacy recordings (this flag was always-on
+        // before this change) keep the OS cursor baked in and the
+        // compositor skips the synthetic pass for them, avoiding a double
+        // cursor.
+        config.showsCursor = false
+        log.info("SCStreamConfiguration native=\(nativeWidth)x\(nativeHeight) capped=\(config.width)x\(config.height) (downscale=\(downscale)) pixelFormat=NV12-videoRange showsCursor=false")
         let excludedApps: [SCRunningApplication]
         if plan.excludedBundleIdentifiers.isEmpty {
             excludedApps = []

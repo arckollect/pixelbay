@@ -53,6 +53,7 @@ public struct MigrationRegistry: Sendable {
     public static let standard: MigrationRegistry = MigrationRegistry(migrators: [
         Migrator1To2(),
         Migrator2To3(),
+        Migrator3To4(),
     ])
 
     public func migrate(_ raw: [String: Any]) throws -> [String: Any] {

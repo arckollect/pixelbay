@@ -12,7 +12,17 @@ import Foundation
 // Project — time-ranged auto-zoom / talking-head swap segments rendered by
 // the compositor on top of the base layout. Empty array preserves prior
 // visual output. See `EffectKeyframe`.
-public let currentSchemaVersion: Int = 3
+//
+// v3 → v4 (Phase 3c, 2026-05-14): adds `cursorSettings: CursorSettings` to
+// Project. The screen capture path stops baking the OS cursor into recorded
+// frames (`SCStreamConfiguration.showsCursor = false`) and the compositor
+// draws a synthetic cursor sprite at a user-adjustable scale on top of the
+// screen layer using the existing mouse-trajectory sidecar. The migrator
+// stamps `CursorSettings.default` on old projects; legacy assets still have
+// their OS cursor baked in, so the compositor only renders synthetic cursor
+// when the screen `MediaAsset.cursorRenderedSynthetically` flag is set
+// (stored in `extras`, no MediaAsset schema bump needed).
+public let currentSchemaVersion: Int = 4
 
 // Bumped on any breaking change to the .pixelbay directory layout itself
 // (e.g. renaming the media/ folder, splitting sidecars into a new subdirectory).
@@ -296,6 +306,13 @@ public struct Project: Codable, Sendable, Identifiable {
     // Phase 3b — auto-zoom + talking-head swap keyframes. Empty array =
     // legacy compositing (base layout only, no per-frame effects).
     public var effects: [EffectKeyframe]
+    // Phase 3c — synthetic cursor settings (size, on/off). Defaults preserve
+    // the new "render synthetic cursor at 3.25× scale" behavior for fresh
+    // projects; the v3→v4 migrator stamps the same default onto old projects
+    // and the compositor gates on per-asset `cursorRenderedSynthetically` so
+    // legacy recordings (cursor baked into screen frames) skip the synthetic
+    // pass and avoid a double cursor.
+    public var cursorSettings: CursorSettings
     public var extras: [String: JSONValue]
 
     public init(
@@ -310,6 +327,7 @@ public struct Project: Codable, Sendable, Identifiable {
         sourceSegments: [SourceSegment] = [],
         layout: LayoutPreset = .phase1Default,
         effects: [EffectKeyframe] = [],
+        cursorSettings: CursorSettings = .default,
         extras: [String: JSONValue] = [:]
     ) {
         self.schemaVersion = schemaVersion
@@ -323,6 +341,7 @@ public struct Project: Codable, Sendable, Identifiable {
         self.sourceSegments = sourceSegments
         self.layout = layout
         self.effects = effects
+        self.cursorSettings = cursorSettings
         self.extras = extras
     }
 
@@ -338,6 +357,7 @@ public struct Project: Codable, Sendable, Identifiable {
         case sourceSegments
         case layout
         case effects
+        case cursorSettings
         case extras
     }
 }

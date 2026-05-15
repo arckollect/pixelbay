@@ -942,11 +942,23 @@ public struct GenerateManualZoomsCommand: EditCommand {
 
     @discardableResult
     public func apply(to project: inout Project) throws -> any EditCommand {
+        // Replace-manual-on-regenerate: pressing the gestures button a second
+        // time wipes and rebuilds. Mirrors the click-button's regen idempotency
+        // (`GenerateAutoZoomFromClicksCommand.apply`). Without this, the
+        // occupied-range fence below would skip every new mark because the
+        // previous run's keyframes still cover the same timestamps.
+        let previousManualKeyframes = project.effects.filter { kf in
+            kf.kind == .zoom && kf.origin == .manualHotkey
+        }
+        let previousManualIDs = Set(previousManualKeyframes.map(\.id))
+        if !previousManualIDs.isEmpty {
+            project.effects.removeAll { previousManualIDs.contains($0.id) }
+        }
+
         let totalDuration = lookahead + holdDuration + easeOutDuration
-        // Pre-compute ranges occupied by existing zoom keyframes (both
-        // auto and manual) — new marks must not overlap any of them. Two
-        // ⌃⌘Z presses 0.3s apart, or a hotkey landing inside an existing
-        // auto-cluster, are the common cases this guards against.
+        // Fence against any remaining zoom keyframes (auto-from-clicks after
+        // the manual-wipe above). New marks landing inside an auto cluster
+        // are dropped rather than fighting the compositor's single-winner rule.
         var occupiedRanges: [TimeRange] = project.effects
             .filter { $0.kind == .zoom }
             .map(\.timelineRange)
@@ -990,7 +1002,11 @@ public struct GenerateManualZoomsCommand: EditCommand {
         if !generated.isEmpty {
             project.effects.append(contentsOf: generated)
         }
-        return _RemoveEffectKeyframesByIDCommand(keyframeIDs: generated.map(\.id))
+        return _SwapEffectKeyframesCommand(
+            displayName: "Undo Generate Zooms from Gestures",
+            keyframesToRemove: generated,
+            keyframesToInsert: previousManualKeyframes
+        )
     }
 }
 
@@ -1015,6 +1031,29 @@ public struct SetLayoutPresetCommand: EditCommand {
         let previous = project.layout
         project.layout = newLayout
         return SetLayoutPresetCommand(newLayout: previous)
+    }
+}
+
+// MARK: - SetCursorSettings (Phase 3c)
+
+/// Replaces `Project.cursorSettings` wholesale with a new `CursorSettings`.
+/// Mirrors `SetLayoutPresetCommand`: the LayoutInspector applies one per
+/// user interaction with the cursor-size slider (committed on
+/// `onEditingChanged: false`, not per slider-drag tick, so the undo stack
+/// gets one entry per release rather than dozens).
+public struct SetCursorSettingsCommand: EditCommand {
+    public let displayName = "Change Cursor"
+    public let newSettings: CursorSettings
+
+    public init(newSettings: CursorSettings) {
+        self.newSettings = newSettings
+    }
+
+    @discardableResult
+    public func apply(to project: inout Project) throws -> any EditCommand {
+        let previous = project.cursorSettings
+        project.cursorSettings = newSettings
+        return SetCursorSettingsCommand(newSettings: previous)
     }
 }
 

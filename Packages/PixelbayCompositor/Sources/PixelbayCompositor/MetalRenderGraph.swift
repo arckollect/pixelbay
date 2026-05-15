@@ -46,7 +46,17 @@ public final class MetalRenderGraph: @unchecked Sendable {
     private let bgraPipelineState: MTLRenderPipelineState
     private let nv12PipelineState: MTLRenderPipelineState
     private let backgroundPipelineState: MTLRenderPipelineState
+    private let cursorPipelineState: MTLRenderPipelineState
     private let textureCache: CVMetalTextureCache
+
+    // Cursor sprite texture cache — keyed by CGImage identity. The app
+    // target hands us the same CGImage every frame (built once from
+    // NSCursor.arrow), so we upload to GPU on first sight and reuse the
+    // resulting MTLTexture for every subsequent draw. Cleared when the
+    // identity changes (e.g. user customised their cursor mid-edit).
+    private var cursorSpriteIdentity: ObjectIdentifier?
+    private var cursorSpriteTexture: MTLTexture?
+    private lazy var cursorTextureLoader: MTKTextureLoader = MTKTextureLoader(device: device)
 
     public init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -89,6 +99,9 @@ public final class MetalRenderGraph: @unchecked Sendable {
         }
         guard let backgroundVertex = library.makeFunction(name: "backgroundVertex") else {
             throw SetupError.shaderLibraryUnavailable("backgroundVertex function missing")
+        }
+        guard let cursorFragment = library.makeFunction(name: "cursorFragment") else {
+            throw SetupError.shaderLibraryUnavailable("cursorFragment function missing")
         }
 
         let vertexDescriptor = MTLVertexDescriptor()
@@ -157,6 +170,29 @@ public final class MetalRenderGraph: @unchecked Sendable {
             throw SetupError.pipelineStateFailed("background: \(error)")
         }
 
+        // Cursor pass: same vertex format + blending as bgra, but routes
+        // through `cursorFragment` so we can tap the sprite multiple times
+        // along the velocity vector for motion blur.
+        let cursorDescriptor = MTLRenderPipelineDescriptor()
+        cursorDescriptor.label = "Pixelbay.cursor"
+        cursorDescriptor.vertexFunction = vertexFunction
+        cursorDescriptor.fragmentFunction = cursorFragment
+        cursorDescriptor.vertexDescriptor = vertexDescriptor
+        cursorDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        cursorDescriptor.colorAttachments[0].isBlendingEnabled = true
+        cursorDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        cursorDescriptor.colorAttachments[0].alphaBlendOperation = .add
+        cursorDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        cursorDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        cursorDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        cursorDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+        do {
+            self.cursorPipelineState = try device.makeRenderPipelineState(descriptor: cursorDescriptor)
+        } catch {
+            throw SetupError.pipelineStateFailed("cursor: \(error)")
+        }
+
         var textureCacheRef: CVMetalTextureCache?
         let cacheStatus = CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCacheRef)
         guard cacheStatus == kCVReturnSuccess, let textureCache = textureCacheRef else {
@@ -169,22 +205,51 @@ public final class MetalRenderGraph: @unchecked Sendable {
     // Render the ResolvedLayout into `destination`, sourcing pixels from
     // `sources`. `destination` must be a BGRA CVPixelBuffer matching the
     // layout's outputSize. Missing layers (e.g. webcam disabled) are skipped.
+    //
+    // `cursorSprite` + `cursorState` together drive the Phase 3c synthetic
+    // cursor pass. Both nil = no cursor (legacy assets, cursor disabled,
+    // or no trajectory available at this frame). The cursor pass runs
+    // AFTER the screen and BEFORE the webcam so the cursor always appears
+    // above the screen content but below the talking-head cam — matches
+    // the layer order convention for screencast tools (cursor is part of
+    // the "screen story", cam is the presenter).
+    //
+    // `completion` fires on a Metal-internal thread once the GPU has
+    // finished executing this frame's command buffer. The caller is
+    // expected to call `request.finish(withComposedVideoFrame:)` (or its
+    // equivalent) from inside the handler — synchronously returning from
+    // `render` would leave the destination buffer in an indeterminate
+    // state. The earlier `waitUntilCompleted` design serialized CPU and
+    // GPU on this serial render queue, capping throughput at 1/(cpu+gpu)
+    // per frame; the async-commit design pipelines them, so CPU encoding
+    // of frame N+1 overlaps with GPU work on frame N.
     public func render(
         layout: ResolvedLayout,
         sources: [LayerKind: CVPixelBuffer],
-        destination: CVPixelBuffer
+        destination: CVPixelBuffer,
+        cursorSprite: CursorSpriteData? = nil,
+        cursorState: CursorRenderState? = nil,
+        completion: @escaping @Sendable () -> Void
     ) throws {
         guard let screen = sources[.screen] else {
             throw RenderError.missingScreenLayer
         }
-        guard let destinationTexture = makeBGRATexture(from: destination, usage: .renderTarget) else {
+        guard let destinationPair = makeBGRATexture(from: destination, usage: .renderTarget) else {
             throw RenderError.textureCreationFailed("destination BGRA")
         }
         guard let commandBuffer = queue.makeCommandBuffer() else {
             throw RenderError.renderEncoderUnavailable
         }
+
+        // CVMetalTexture refs the command buffer's MTLTextures are
+        // backed by — keep them alive until the GPU finishes (captured
+        // by the completed handler below). Without this, the cache may
+        // evict an in-flight CVMetalTexture between commit and GPU
+        // completion, leaving the encoder reading freed memory.
+        var cvTextureRefs: [CVMetalTexture] = [destinationPair.0]
+
         let renderPass = MTLRenderPassDescriptor()
-        renderPass.colorAttachments[0].texture = destinationTexture
+        renderPass.colorAttachments[0].texture = destinationPair.1
         renderPass.colorAttachments[0].loadAction = .clear
         renderPass.colorAttachments[0].storeAction = .store
         renderPass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
@@ -204,8 +269,21 @@ public final class MetalRenderGraph: @unchecked Sendable {
             outputSize: layout.outputSize,
             cornerRadiusPx: layout.screenCornerRadius,
             isCircle: false,
-            opacity: 1.0
+            opacity: 1.0,
+            radialBlurStrength: layout.screenZoomBlurStrength,
+            radialBlurCenterUV: layout.screenZoomBlurCenterUV,
+            cvTextureRefs: &cvTextureRefs
         )
+
+        if let cursorSprite, let cursorState {
+            drawCursor(
+                encoder: encoder,
+                sprite: cursorSprite,
+                state: cursorState,
+                screen: layout.screen,
+                outputSize: layout.outputSize
+            )
+        }
 
         if let webcamRect = layout.webcam, let webcam = sources[.webcam] {
             let isCircle = layout.webcamShape == .circle
@@ -222,13 +300,37 @@ public final class MetalRenderGraph: @unchecked Sendable {
                 outputSize: layout.outputSize,
                 cornerRadiusPx: radius,
                 isCircle: isCircle,
-                opacity: layout.webcamOpacity
+                opacity: layout.webcamOpacity,
+                cvTextureRefs: &cvTextureRefs
             )
         }
 
         encoder.endEncoding()
+        // Capture refs by value into the closure so they survive past
+        // `render()`'s return. The closure fires on Metal's internal
+        // queue when the GPU finishes — `cvTextureRefs` is released
+        // there, not on the render queue, which is what lets the
+        // render queue process frame N+1's CPU encoding while frame N
+        // is still on the GPU. CVMetalTexture is a CF type that isn't
+        // formally Sendable, but we treat each element as immutable
+        // for the closure's lifetime; the wrapper makes that explicit
+        // for Swift 6's checked-Sendable closure analysis.
+        let heldRefs = SendableTextureRefs(refs: cvTextureRefs)
+        commandBuffer.addCompletedHandler { _ in
+            _ = heldRefs
+            completion()
+        }
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+    }
+
+    /// Holds CVMetalTexture refs across an `addCompletedHandler` boundary
+    /// so they outlive `render()` and keep their backing CVPixelBuffer
+    /// alive until the GPU finishes. The `@unchecked` is safe because
+    /// each ref is treated as immutable — the wrapper has no public API
+    /// to mutate the underlying array, and the closure that owns it
+    /// only reads it (and then releases when the closure deallocates).
+    private struct SendableTextureRefs: @unchecked Sendable {
+        let refs: [CVMetalTexture]
     }
 
     // MARK: - Background pass
@@ -275,6 +377,21 @@ public final class MetalRenderGraph: @unchecked Sendable {
         var isCircle: Float
         var opacity: Float
         var pad0: Float = 0
+        var radialBlurCenterUV: SIMD2<Float> = SIMD2(0.5, 0.5)
+        var radialBlurStrength: Float = 0
+        var pad1: Float = 0
+    }
+
+    /// Cursor-specific uniforms. Adds a velocity offset (in cursor-UV space)
+    /// that the shader uses to sample multiple taps along the motion vector
+    /// for a soft motion-blur look. Zero offset collapses the kernel back to
+    /// a single sample, so a stationary cursor renders crisp.
+    private struct CursorUniforms {
+        var outputSizePx: SIMD2<Float>
+        var layerSizePx: SIMD2<Float>
+        var blurOffsetUV: SIMD2<Float>
+        var opacity: Float
+        var pad0: Float = 0
     }
 
     private func drawLayer(
@@ -284,7 +401,10 @@ public final class MetalRenderGraph: @unchecked Sendable {
         outputSize: CGSize,
         cornerRadiusPx: CGFloat,
         isCircle: Bool,
-        opacity: Float
+        opacity: Float,
+        radialBlurStrength: Float = 0,
+        radialBlurCenterUV: SIMD2<Float> = SIMD2(0.5, 0.5),
+        cvTextureRefs: inout [CVMetalTexture]
     ) throws {
         let vertices = makeQuadVertices(rect: destinationRect, outputSize: outputSize)
         encoder.setVertexBytes(vertices, length: MemoryLayout<Vertex>.stride * vertices.count, index: 0)
@@ -294,28 +414,33 @@ public final class MetalRenderGraph: @unchecked Sendable {
             layerSizePx: SIMD2(Float(destinationRect.size.width), Float(destinationRect.size.height)),
             cornerRadiusPx: Float(cornerRadiusPx),
             isCircle: isCircle ? 1 : 0,
-            opacity: max(0, min(1, opacity))
+            opacity: max(0, min(1, opacity)),
+            radialBlurCenterUV: radialBlurCenterUV,
+            radialBlurStrength: max(0, min(1, radialBlurStrength))
         )
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerUniforms>.stride, index: 0)
 
         let pixelFormat = CVPixelBufferGetPixelFormatType(source)
         switch pixelFormat {
         case kCVPixelFormatType_32BGRA:
-            guard let bgraTexture = makeBGRATexture(from: source, usage: .shaderRead) else {
+            guard let pair = makeBGRATexture(from: source, usage: .shaderRead) else {
                 throw RenderError.textureCreationFailed("BGRA source")
             }
+            cvTextureRefs.append(pair.0)
             encoder.setRenderPipelineState(bgraPipelineState)
-            encoder.setFragmentTexture(bgraTexture, index: 0)
+            encoder.setFragmentTexture(pair.1, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 
         case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
              kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
-            guard let (yTex, cbcrTex) = makeNV12Textures(from: source) else {
+            guard let pair = makeNV12Textures(from: source) else {
                 throw RenderError.textureCreationFailed("NV12 source")
             }
+            cvTextureRefs.append(pair.yRef)
+            cvTextureRefs.append(pair.cbcrRef)
             encoder.setRenderPipelineState(nv12PipelineState)
-            encoder.setFragmentTexture(yTex, index: 0)
-            encoder.setFragmentTexture(cbcrTex, index: 1)
+            encoder.setFragmentTexture(pair.yTexture, index: 0)
+            encoder.setFragmentTexture(pair.cbcrTexture, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 
         default:
@@ -325,6 +450,122 @@ public final class MetalRenderGraph: @unchecked Sendable {
             // sees the missing layer and can investigate.
             log.error("unsupported source pixel format=\(String(format: "%08x", pixelFormat), privacy: .public) — skipping layer")
         }
+    }
+
+    // MARK: - Cursor pass (Phase 3c)
+
+    /// Base output-height fraction the cursor occupies at `scale = 1.0`.
+    /// At 1080p output a scale-1.0 cursor renders ~32 px tall; the
+    /// `CursorSettings.default.scale` of 3.25 yields ~104 px — visibly
+    /// larger than the OS cursor (~16 px on standard DPI) so a viewer
+    /// can track it without straining at typical screencast playback
+    /// sizes. Cursor aspect ratio is preserved from `pointSize`, so a
+    /// taller/wider sprite scales proportionally.
+    private static let cursorBaseFractionOfOutputHeight: CGFloat = 32.0 / 1080.0
+
+    private func drawCursor(
+        encoder: MTLRenderCommandEncoder,
+        sprite: CursorSpriteData,
+        state: CursorRenderState,
+        screen: LayerRect,
+        outputSize: CGSize
+    ) {
+        // Cursor position in output pixels: anchor at the screen rect (so
+        // zoom transforms move the cursor automatically, since the screen
+        // rect has already been zoomed by EffectEvaluator) using the
+        // recorded normalised fraction as the content coordinate inside
+        // that rect.
+        let cursorX = screen.minX + CGFloat(state.xFractionInScreen) * screen.size.width
+        let cursorY = screen.minY + CGFloat(state.yFractionInScreen) * screen.size.height
+
+        // Cursor size in output pixels — keep the sprite's intrinsic
+        // aspect ratio so the arrow doesn't squash on non-square sprites.
+        let pointSize = sprite.pointSize
+        guard pointSize.width > 0, pointSize.height > 0 else { return }
+        let scale = max(0.0, CGFloat(state.scale))
+        let heightPx = scale * Self.cursorBaseFractionOfOutputHeight * outputSize.height
+        let widthPx = heightPx * (pointSize.width / pointSize.height)
+        guard widthPx > 0.5, heightPx > 0.5 else { return }
+
+        // Hot-spot offset, in output pixels. NSCursor.hotSpot is in image
+        // points (top-left origin); convert to a fraction of pointSize
+        // first, then multiply by the rendered size so the hot spot lands
+        // exactly on (cursorX, cursorY) regardless of scale.
+        let hotSpotFractionX = sprite.hotSpot.x / pointSize.width
+        let hotSpotFractionY = sprite.hotSpot.y / pointSize.height
+        let originX = cursorX - hotSpotFractionX * widthPx
+        let originY = cursorY - hotSpotFractionY * heightPx
+
+        let rect = LayerRect(
+            origin: CGPoint(x: originX, y: originY),
+            size: CGSize(width: widthPx, height: heightPx)
+        )
+
+        // Upload sprite to GPU on first sight (or when identity changes).
+        // CGImage is a CF type — `ObjectIdentifier` of the bridged class
+        // gives a stable identity for the lifetime of the CGImage.
+        let identity = ObjectIdentifier(sprite.cgImage)
+        if cursorSpriteIdentity != identity || cursorSpriteTexture == nil {
+            do {
+                cursorSpriteTexture = try cursorTextureLoader.newTexture(
+                    cgImage: sprite.cgImage,
+                    options: [
+                        .SRGB: false,
+                        .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue)
+                    ]
+                )
+                cursorSpriteIdentity = identity
+            } catch {
+                log.error("cursor texture upload failed: \(String(describing: error), privacy: .public)")
+                cursorSpriteTexture = nil
+                cursorSpriteIdentity = nil
+                return
+            }
+        }
+        guard let texture = cursorSpriteTexture else { return }
+
+        let vertices = makeQuadVertices(rect: rect, outputSize: outputSize)
+        encoder.setVertexBytes(vertices, length: MemoryLayout<Vertex>.stride * vertices.count, index: 0)
+
+        // Convert cursor velocity (screen-content fraction per second) into
+        // a blur offset in cursor-UV space. The chain:
+        //   velocity * shutterTime          → fraction of screen-content traversed during the shutter
+        //   * screen.size.width / widthPx   → fraction of the cursor sprite width that maps to
+        //
+        // `shutterTime` is the synthetic motion-blur exposure window. 1/60 s
+        // matches one render-frame at 60 fps, so the trail length lines up
+        // with what the eye expects from genuine inter-frame motion. Was
+        // 1/30 s originally, dropped to 1/60 after user feedback that fast
+        // sweeps "looked blurred / smeared" — the longer shutter pushed the
+        // kernel into its ±0.5 UV clamp on extreme motion, so the sprite
+        // read as a wash rather than a tracked cursor with a trail. The
+        // kernel is now clamped tighter (±0.3 UV) so even at saturation
+        // the cursor sprite remains visually identifiable, not a smear.
+        let shutterTime: CGFloat = 1.0 / 60.0
+        let traversedXContent = CGFloat(state.velocityXFractionPerSecond) * shutterTime * screen.size.width
+        let traversedYContent = CGFloat(state.velocityYFractionPerSecond) * shutterTime * screen.size.height
+        let blurOffsetUVX = clampUV(Float(traversedXContent / widthPx))
+        let blurOffsetUVY = clampUV(Float(traversedYContent / heightPx))
+
+        var uniforms = CursorUniforms(
+            outputSizePx: SIMD2(Float(outputSize.width), Float(outputSize.height)),
+            layerSizePx: SIMD2(Float(widthPx), Float(heightPx)),
+            blurOffsetUV: SIMD2(blurOffsetUVX, blurOffsetUVY),
+            opacity: 1.0
+        )
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<CursorUniforms>.stride, index: 0)
+        encoder.setRenderPipelineState(cursorPipelineState)
+        encoder.setFragmentTexture(texture, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+
+    private func clampUV(_ v: Float) -> Float {
+        // ±0.3 of the cursor sprite UV — keeps the sprite recognisable
+        // even when motion saturates the kernel. The taps still stay
+        // inside `address::clamp_to_edge` territory, so no wrap-side
+        // garbage leaks in. Was ±0.5 originally; tightened with the
+        // shutter shortening so fast sweeps streak instead of smearing.
+        max(-0.3, min(0.3, v))
     }
 
     // Triangle-strip quad covering destinationRect in clip space (-1..+1).
@@ -350,7 +591,12 @@ public final class MetalRenderGraph: @unchecked Sendable {
         ]
     }
 
-    private func makeBGRATexture(from buffer: CVPixelBuffer, usage: MTLTextureUsage) -> MTLTexture? {
+    // Returns the CVMetalTexture ref alongside the MTLTexture so the
+    // caller can keep the bridge alive until the GPU command buffer
+    // completes — without this, the cache may evict an in-flight ref
+    // and leave the encoder reading freed memory under the async-commit
+    // path.
+    private func makeBGRATexture(from buffer: CVPixelBuffer, usage: MTLTextureUsage) -> (CVMetalTexture, MTLTexture)? {
         let width = CVPixelBufferGetWidth(buffer)
         let height = CVPixelBufferGetHeight(buffer)
         var textureRef: CVMetalTexture?
@@ -365,14 +611,22 @@ public final class MetalRenderGraph: @unchecked Sendable {
             0,
             &textureRef
         )
-        guard status == kCVReturnSuccess, let textureRef else {
+        guard status == kCVReturnSuccess, let textureRef,
+              let mtl = CVMetalTextureGetTexture(textureRef) else {
             log.error("BGRA texture create failed status=\(status)")
             return nil
         }
-        return CVMetalTextureGetTexture(textureRef)
+        return (textureRef, mtl)
     }
 
-    private func makeNV12Textures(from buffer: CVPixelBuffer) -> (MTLTexture, MTLTexture)? {
+    private struct NV12TexturePair {
+        let yRef: CVMetalTexture
+        let cbcrRef: CVMetalTexture
+        let yTexture: MTLTexture
+        let cbcrTexture: MTLTexture
+    }
+
+    private func makeNV12Textures(from buffer: CVPixelBuffer) -> NV12TexturePair? {
         let width = CVPixelBufferGetWidth(buffer)
         let height = CVPixelBufferGetHeight(buffer)
         var yRef: CVMetalTexture?
@@ -406,12 +660,17 @@ public final class MetalRenderGraph: @unchecked Sendable {
             log.error("NV12 texture create failed yStatus=\(yStatus) cbcrStatus=\(cbcrStatus)")
             return nil
         }
-        return (yTex, cbcrTex)
+        return NV12TexturePair(yRef: yRef, cbcrRef: cbcrRef, yTexture: yTex, cbcrTexture: cbcrTex)
     }
 
-    // Periodic flush to release back any CVMetalTextureCache references that
-    // are no longer in flight. Caller (PixelbayVideoCompositor) calls this
-    // after each frame.
+    // Periodic flush to release CVMetalTextureCache references that are
+    // no longer in flight. Under the async-commit path this is NOT
+    // called per-frame anymore (the completion-handler closure pins refs
+    // for the in-flight frame; the cache recycles older entries on its
+    // own). Kept on the public surface in case a caller wants explicit
+    // control during teardown — invoking it while a frame is in flight
+    // is safe because the closure's strong refs keep that frame's
+    // CVMetalTextures alive past the flush.
     public func flushTextureCache() {
         CVMetalTextureCacheFlush(textureCache, 0)
     }
@@ -441,7 +700,41 @@ public final class MetalRenderGraph: @unchecked Sendable {
         float isCircle;
         float opacity;
         float _pad0;
+        float2 radialBlurCenterUV;
+        float radialBlurStrength;
+        float _pad1;
     };
+
+    // Radial multi-tap sampler used by the screen layer. 7 symmetric taps
+    // along (uv - center), each scaled by the layer's radialBlurStrength.
+    // strength = 0 short-circuits to a single sample so non-screen layers
+    // (and the screen layer at hold/idle) stay perfectly crisp.
+    static inline float4 radialBlurSample(
+        texture2d<float, access::sample> tex,
+        sampler s,
+        float2 uv,
+        float2 centerUV,
+        float strength
+    ) {
+        if (strength <= 0.0001) {
+            return tex.sample(s, uv);
+        }
+        float2 dir = uv - centerUV;
+        const int N = 7;
+        const float weights[7] = {1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.0};
+        const float weightSum = 16.0;
+        float4 acc = float4(0.0);
+        for (int i = 0; i < N; ++i) {
+            float u_i = (float(i) - 3.0) / 3.0; // [-1, 1]
+            float2 sampleUV = uv + dir * (strength * u_i);
+            // clamp_to_edge sampler keeps off-texture taps inside [0,1], but
+            // we still want to avoid pulling color from far outside the
+            // visible region, so cheap clamp here as well.
+            sampleUV = clamp(sampleUV, float2(0.0), float2(1.0));
+            acc += tex.sample(s, sampleUV) * weights[i];
+        }
+        return acc / weightSum;
+    }
 
     struct BackgroundUniforms {
         float4 topColor;
@@ -514,9 +807,56 @@ public final class MetalRenderGraph: @unchecked Sendable {
         constant LayerUniforms &u [[buffer(0)]]
     ) {
         constexpr sampler s(address::clamp_to_edge, filter::linear);
-        float4 c = tex.sample(s, in.texCoord);
+        float4 c = radialBlurSample(tex, s, in.texCoord, u.radialBlurCenterUV, u.radialBlurStrength);
         c.a *= layerAlphaMask(in, u) * u.opacity;
         return c;
+    }
+
+    struct CursorUniforms {
+        float2 outputSizePx;
+        float2 layerSizePx;
+        float2 blurOffsetUV;
+        float opacity;
+        float _pad0;
+    };
+
+    // Cursor pass. Multi-tap motion blur aligned to the velocity vector:
+    // a stationary cursor (blurOffsetUV == 0) reduces to a single sample,
+    // which is bit-identical to the old bgraFragment-on-cursor path. A
+    // fast-moving cursor reads as a soft streak along the motion vector.
+    // 9 taps with triangular weighting — cheap (one sprite is tiny) and
+    // enough to avoid step-banding at moderate kernel sizes.
+    fragment float4 cursorFragment(
+        VertexOut in [[stage_in]],
+        texture2d<float, access::sample> tex [[texture(0)]],
+        constant CursorUniforms &u [[buffer(0)]]
+    ) {
+        constexpr sampler s(address::clamp_to_edge, filter::linear);
+        float2 offset = u.blurOffsetUV;
+        // Cheap escape hatch: if velocity is small enough that the kernel
+        // collapses below a third of a texel, skip the taps entirely.
+        float minPx = min(u.layerSizePx.x, u.layerSizePx.y);
+        if (length(offset) * minPx < 0.33) {
+            float4 c = tex.sample(s, in.texCoord);
+            c.a *= u.opacity;
+            return c;
+        }
+        // 9 symmetric taps at i ∈ {-4..+4}/4, triangular weights 1,2,3,4,5,4,3,2,1.
+        // Symmetric around the cursor position so the rendered cursor stays
+        // anchored to its reported (x,y) rather than drifting in the motion
+        // direction.
+        const int N = 9;
+        const float weights[9] = {1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0};
+        float weightSum = 25.0; // 1+2+3+4+5+4+3+2+1
+        float4 acc = float4(0.0);
+        for (int i = 0; i < N; ++i) {
+            float u_i = (float(i) - 4.0) / 4.0; // [-1, 1]
+            float2 uv = in.texCoord + offset * u_i;
+            acc += tex.sample(s, uv) * weights[i];
+        }
+        acc /= weightSum;
+        acc.a *= u.opacity;
+        return acc;
     }
 
     fragment float4 nv12Fragment(
@@ -526,8 +866,15 @@ public final class MetalRenderGraph: @unchecked Sendable {
         constant LayerUniforms &u [[buffer(0)]]
     ) {
         constexpr sampler s(address::clamp_to_edge, filter::linear);
-        float y = yPlane.sample(s, in.texCoord).r;
-        float2 cbcr = cbcrPlane.sample(s, in.texCoord).rg;
+        // NV12 lives on two planes — radial blur on each plane independently
+        // and then YCbCr→RGB on the averaged result. Sampling YCbCr first
+        // and then averaging the RGB conversions would amplify quantisation
+        // error around chroma boundaries; averaging in YCbCr space is
+        // exactly the right place since both planes share the same UV.
+        float4 yAcc = radialBlurSample(yPlane, s, in.texCoord, u.radialBlurCenterUV, u.radialBlurStrength);
+        float4 cbcrAcc = radialBlurSample(cbcrPlane, s, in.texCoord, u.radialBlurCenterUV, u.radialBlurStrength);
+        float y = yAcc.r;
+        float2 cbcr = cbcrAcc.rg;
 
         float yLin = (y - 16.0/255.0) * (255.0/219.0);
         float cb = cbcr.r - 0.5;

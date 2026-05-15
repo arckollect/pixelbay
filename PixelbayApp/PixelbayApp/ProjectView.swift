@@ -76,7 +76,8 @@ struct ProjectView: View {
                 project: document.project,
                 bundleURL: document.bundleURL,
                 wallpaperSource: .live,
-                cursorTrajectory: cursorTrajectory
+                cursorTrajectory: cursorTrajectory,
+                cursorSprite: SystemCursorSprite.make()
             )
             editingName = document.project.name
             if selectedClipID == nil {
@@ -326,9 +327,16 @@ struct ProjectView: View {
     // MARK: - Layout inspector (Phase 3a)
 
     private var layoutInspector: some View {
-        LayoutInspector(layout: document.project.layout) { newLayout in
-            Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
-        }
+        LayoutInspector(
+            layout: document.project.layout,
+            cursorSettings: document.project.cursorSettings,
+            onChange: { newLayout in
+                Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
+            },
+            onCursorChange: { newCursor in
+                Task { await document.apply(SetCursorSettingsCommand(newSettings: newCursor)) }
+            }
+        )
     }
 
     // MARK: - Effects inspector (Phase 3b)

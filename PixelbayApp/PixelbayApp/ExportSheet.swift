@@ -187,7 +187,8 @@ struct ExportSheet: View {
                 project: project,
                 bundleURL: bundle.url,
                 wallpaperSource: .live,
-                cursorTrajectory: cursorTrajectory
+                cursorTrajectory: cursorTrajectory,
+                cursorSprite: SystemCursorSprite.make()
             )
             await exporter.export(
                 composition: preview.composition,

@@ -86,6 +86,11 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
     private var cancelled = false
     private let renderGraph: MetalRenderGraph?
 
+    /// Half-window for the cursor-velocity finite difference. Matches the
+    /// `ClickLogger.moveDecimationInterval` default (1/120s) so each side
+    /// of the bracket is one decimated sample away on a typical recording.
+    private static let cursorVelocityHalfWindow: Double = 1.0 / 120.0
+
     private func handle(request: AVAsynchronousVideoCompositionRequest) {
         if cancelled {
             request.finishCancelledRequest()
@@ -127,24 +132,149 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
             return
         }
 
+        // Phase 3c — resolve the synthetic cursor's per-frame state, if
+        // enabled. All three of (sprite, settings.isEnabled, non-empty
+        // trajectory) must be present for the pass to run; otherwise we
+        // pass nil and the render graph skips it. The trajectory's
+        // timelineTime is in the same composition-time domain as
+        // `request.compositionTime`, so we sample directly.
+        let cursorState: CursorRenderState?
+        if let sprite = instruction.cursorSprite,
+           let cursorSettings = instruction.cursorSettings,
+           cursorSettings.isEnabled,
+           !instruction.cursorTrajectory.isEmpty {
+            let t = CMTimeGetSeconds(request.compositionTime)
+            let position = sampleCursorTrajectory(instruction.cursorTrajectory, at: t)
+            // Velocity via centred finite difference. dt = 1/120s gives a
+            // bracket that's tight enough not to over-smooth quick direction
+            // changes but wide enough that two adjacent trajectory samples
+            // (recorded at 1/120s decimation) usually bracket it on each side.
+            let dt = Self.cursorVelocityHalfWindow
+            let prior = sampleCursorTrajectory(instruction.cursorTrajectory, at: t - dt)
+            let next = sampleCursorTrajectory(instruction.cursorTrajectory, at: t + dt)
+            let vx = (next.x - prior.x) / (2 * dt)
+            let vy = (next.y - prior.y) / (2 * dt)
+            cursorState = CursorRenderState(
+                xFractionInScreen: position.x,
+                yFractionInScreen: position.y,
+                scale: cursorSettings.scale,
+                velocityXFractionPerSecond: vx,
+                velocityYFractionPerSecond: vy
+            )
+            _ = sprite // keep clarity; sprite is forwarded below
+        } else {
+            cursorState = nil
+        }
+
         if let renderGraph {
             do {
+                // Wrap the request + destination so they can ride along
+                // into the @Sendable completion closure. Neither
+                // AVAsynchronousVideoCompositionRequest nor CVPixelBuffer
+                // is formally Sendable, but for the closure's purpose
+                // (read-only finish call, then closure deallocates) the
+                // @unchecked wrapper is sound.
+                let bridge = AsyncRequestBridge(request: request, destination: destination)
                 try renderGraph.render(
                     layout: layout,
                     sources: sources,
-                    destination: destination
+                    destination: destination,
+                    cursorSprite: cursorState != nil ? instruction.cursorSprite : nil,
+                    cursorState: cursorState,
+                    completion: {
+                        // Called on Metal's internal queue once the GPU
+                        // finishes — calling request.finish here (rather
+                        // than after `commandBuffer.waitUntilCompleted`)
+                        // is what lets the render queue start frame N+1's
+                        // CPU encoding while frame N is still on the GPU.
+                        bridge.request.finish(withComposedVideoFrame: bridge.destination)
+                    }
                 )
-                renderGraph.flushTextureCache()
             } catch {
                 log.error("render() failed: \(String(describing: error), privacy: .public)")
-                // Fall through to passthrough.
+                // Fall through to passthrough — synchronous, finish now.
                 passthroughScreen(into: destination, sources: sources)
+                request.finish(withComposedVideoFrame: destination)
             }
         } else {
             passthroughScreen(into: destination, sources: sources)
+            request.finish(withComposedVideoFrame: destination)
         }
+    }
 
-        request.finish(withComposedVideoFrame: destination)
+    /// Bridges the non-Sendable `AVAsynchronousVideoCompositionRequest`
+    /// and `CVPixelBuffer` across the async commit completion handler.
+    /// AVFoundation's request finishing API is documented as safe to
+    /// call from any thread; the destination buffer is only read by
+    /// AVFoundation after `finish` is called.
+    private struct AsyncRequestBridge: @unchecked Sendable {
+        let request: AVAsynchronousVideoCompositionRequest
+        let destination: CVPixelBuffer
+    }
+
+    // Phase 3c — sample the master cursor trajectory at the given
+    // composition-time. Non-uniform Catmull-Rom (Barry-Goldman recursive
+    // Lagrange form) across the bracketing samples so velocity stays
+    // continuous AND correctly weighted when the time spacing between
+    // captured samples varies — which it always does, because CGEventTap
+    // delivers events at the system-native rate and macOS coalesces
+    // during fast cursor sweeps (a sweep across the screen can drop the
+    // effective sample rate from ~120 Hz to 30 Hz mid-motion). The
+    // earlier *uniform* Catmull-Rom assumed equal spacing in the t
+    // parameter and produced a velocity overshoot at every sample whose
+    // neighbour spacing changed — exactly the "looks like frames are
+    // skipped" stutter the user reported during fast moves.
+    //
+    // Falls back to linear when only ≤ 2 samples bracket the lookup
+    // (no outer neighbours to parameterise the cubic). The cursor
+    // sprite path does NOT pre-smooth the trajectory upstream — EMA
+    // introduces visible lag at typical capture rates; the proper
+    // non-uniform interp is what actually makes the motion read as
+    // smooth without trailing the input. Out-of-range lookups clamp
+    // to the first / last sample (no extrapolation).
+    //
+    // Linear scan is acceptable for v1: at 120 Hz, a 10-minute
+    // recording is ~72k samples and per-frame O(n) is ~4 M
+    // comparisons / sec at 60 fps. If profiles ever say otherwise,
+    // switch to a binary search or keep a per-stream cursor index
+    // between frames.
+    private func sampleCursorTrajectory(
+        _ samples: [MouseTrajectorySample],
+        at t: Double
+    ) -> (x: Double, y: Double) {
+        guard let first = samples.first else { return (0.5, 0.5) }
+        if t <= first.timelineTime {
+            return (first.centerX, first.centerY)
+        }
+        let last = samples[samples.count - 1]
+        if t >= last.timelineTime {
+            return (last.centerX, last.centerY)
+        }
+        for i in 1..<samples.count {
+            let b = samples[i]
+            if t <= b.timelineTime {
+                let a = samples[i - 1]
+                let span = b.timelineTime - a.timelineTime
+                if span <= 0 { return (b.centerX, b.centerY) }
+                if samples.count <= 2 {
+                    let u = (t - a.timelineTime) / span
+                    return (
+                        a.centerX + (b.centerX - a.centerX) * u,
+                        a.centerY + (b.centerY - a.centerY) * u
+                    )
+                }
+                let p0 = (i - 2) >= 0 ? samples[i - 2] : a
+                let p3 = (i + 1) < samples.count ? samples[i + 1] : b
+                return nonUniformCatmullRom2D(
+                    p0t: p0.timelineTime, p0x: p0.centerX, p0y: p0.centerY,
+                    p1t: a.timelineTime, p1x: a.centerX, p1y: a.centerY,
+                    p2t: b.timelineTime, p2x: b.centerX, p2y: b.centerY,
+                    p3t: p3.timelineTime, p3x: p3.centerX, p3y: p3.centerY,
+                    at: t
+                )
+            }
+        }
+        return (last.centerX, last.centerY)
     }
 
     // Last-resort: copy the screen layer's pixels into the destination buffer
@@ -224,17 +354,32 @@ public final class PixelbayCompositionInstruction: NSObject, AVVideoCompositionI
     // these per startRequest using request.compositionTime as the
     // playhead t.
     public let effects: [EffectKeyframe]
+    // Phase 3c — synthetic cursor pass inputs.
+    //
+    // All three are required together: empty trajectory, nil sprite, or
+    // `cursorSettings.isEnabled == false` each disable the pass
+    // independently. The compositor samples `cursorTrajectory` at
+    // `request.compositionTime` to derive the per-frame cursor position.
+    public let cursorSprite: CursorSpriteData?
+    public let cursorSettings: CursorSettings?
+    public let cursorTrajectory: [MouseTrajectorySample]
 
     public init(
         timeRange: CMTimeRange,
         layout: ResolvedLayout,
         layerMapping: [CMPersistentTrackID: LayerKind],
-        effects: [EffectKeyframe] = []
+        effects: [EffectKeyframe] = [],
+        cursorSprite: CursorSpriteData? = nil,
+        cursorSettings: CursorSettings? = nil,
+        cursorTrajectory: [MouseTrajectorySample] = []
     ) {
         self.timeRange = timeRange
         self.layout = layout
         self.layerMapping = layerMapping
         self.effects = effects
+        self.cursorSprite = cursorSprite
+        self.cursorSettings = cursorSettings
+        self.cursorTrajectory = cursorTrajectory
         super.init()
     }
 }

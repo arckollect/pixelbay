@@ -134,7 +134,8 @@ struct PostCaptureView: View {
                 project: project,
                 bundleURL: bundle.url,
                 wallpaperSource: .live,
-                cursorTrajectory: cursorTrajectory
+                cursorTrajectory: cursorTrajectory,
+                cursorSprite: SystemCursorSprite.make()
             )
         } catch {
             await MainActor.run {

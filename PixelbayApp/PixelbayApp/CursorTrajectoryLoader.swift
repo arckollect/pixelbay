@@ -51,7 +51,16 @@ enum CursorTrajectoryLoader {
                 from: sidecar,
                 screenPixelSize: naturalSize
             )
-            return master.isEmpty ? nil : master
+            // Defensive sort: ClickLogger dispatches each move through
+            // `Task { await self.recordMove }`, and Swift's actor scheduler
+            // does not guarantee FIFO enqueue order. The compositor walks
+            // the trajectory left-to-right assuming sorted timelineTime and
+            // would otherwise pick the wrong bracketing pair on an
+            // out-of-order sample, producing visible mis-tracking. O(n log
+            // n) one-time cost on load is well below the cost of a single
+            // composition build.
+            let sorted = master.sorted { $0.timelineTime < $1.timelineTime }
+            return sorted.isEmpty ? nil : sorted
         } catch {
             return nil
         }

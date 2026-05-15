@@ -265,12 +265,21 @@ final class RecordingService {
         // skipping the track here means a recording can be saved but never
         // previewed or exported. Phase 2 onwards mutates these tracks via
         // EditCommands; Phase 1 just plumbs them in 1:1 with the assets.
-        let screenAsset = MediaAsset(
+        var screenAsset = MediaAsset(
             kind: .display,
             relativePath: relativePath(of: summary.outputs.screenURL, in: bundle),
             captureStart: summary.captureStart,
             nativeDuration: summary.screenDuration ?? .zero
         )
+        // Phase 3c — flag every new screen recording as synthetic-cursor
+        // ready. LiveCaptureBackend hard-codes
+        // `SCStreamConfiguration.showsCursor = false`, so the OS cursor is
+        // NOT baked into the recorded frames. The compositor checks this
+        // flag before drawing the synthetic cursor pass; legacy assets
+        // (saved before this change) don't carry the flag, so they keep
+        // their baked-in OS cursor and the compositor skips the pass for
+        // them.
+        screenAsset.cursorRenderedSynthetically = true
         project.assets.append(screenAsset)
         appendTrack(for: screenAsset, name: "Screen", kind: .screen, into: &project)
 

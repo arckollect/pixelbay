@@ -30,7 +30,8 @@ struct EffectsInspector: View {
     let onApply: (any EditCommand) -> Void
     let onSeek: (RationalTime) -> Void
 
-    @State private var isGenerating: Bool = false
+    @State private var isGeneratingClicks: Bool = false
+    @State private var isGeneratingGestures: Bool = false
     @State private var lastError: String?
     /// Drag-preview value for the zoom-factor slider. Mirrors the
     /// previewVolumes/previewSpeeds pattern in `ProjectView` — non-nil
@@ -50,7 +51,8 @@ struct EffectsInspector: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Effects").font(.headline)
-            generateButton
+            generateClicksButton
+            generateGesturesButton
             if let lastError {
                 Text(lastError)
                     .font(.caption)
@@ -65,11 +67,13 @@ struct EffectsInspector: View {
         }
     }
 
-    private var generateButton: some View {
+    private var anyGenerating: Bool { isGeneratingClicks || isGeneratingGestures }
+
+    private var generateClicksButton: some View {
         Button {
-            Task { await generateAutoZoom() }
+            Task { await generateAutoZoomFromClicks() }
         } label: {
-            if isGenerating {
+            if isGeneratingClicks {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
                     Text("Generating…")
@@ -78,8 +82,25 @@ struct EffectsInspector: View {
                 Label("Generate Auto-Zoom from Clicks", systemImage: "magnifyingglass.circle")
             }
         }
-        .disabled(isGenerating || !canGenerate)
+        .disabled(anyGenerating || !canGenerate)
         .help(disabledReason ?? "Insert one zoom keyframe per logged click.")
+    }
+
+    private var generateGesturesButton: some View {
+        Button {
+            Task { await generateZoomsFromGestures() }
+        } label: {
+            if isGeneratingGestures {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Generating…")
+                }
+            } else {
+                Label("Generate Zooms from Gestures", systemImage: "hand.draw")
+            }
+        }
+        .disabled(anyGenerating || !canGenerate)
+        .help(disabledReason ?? "Insert one zoom keyframe per recorded shake / circle / ⌃⌘Z mark.")
     }
 
     @ViewBuilder
@@ -296,29 +317,21 @@ struct EffectsInspector: View {
         return nil
     }
 
-    private func generateAutoZoom() async {
+    private func generateAutoZoomFromClicks() async {
         guard let asset = screenAsset, let url = sidecarURL else { return }
-        isGenerating = true
+        isGeneratingClicks = true
         lastError = nil
-        defer { isGenerating = false }
+        defer { isGeneratingClicks = false }
         do {
-            let sidecar = try ClicksSidecarStore.read(from: url)
-            let assetURL = bundleURL.appendingPathComponent(asset.relativePath)
-            let avAsset = AVURLAsset(url: assetURL)
-            let videoTracks = try await avAsset.loadTracks(withMediaType: .video)
-            guard let firstTrack = videoTracks.first else {
-                lastError = "Screen recording has no video track."
-                return
-            }
-            let naturalSize = try await firstTrack.load(.naturalSize)
-
+            let (sidecar, naturalSize) = try await loadSidecarAndSize(asset: asset, sidecarURL: url)
             let trajectory = AutoZoomService.mouseTrajectory(
                 from: sidecar,
                 screenPixelSize: naturalSize
             )
             let optionalTrajectory: [MouseTrajectorySample]? = trajectory.isEmpty ? nil : trajectory
 
-            // Auto trigger 1: filtered clicks (drop fast-movement clicks).
+            // Filtered clicks (drop fast-movement clicks) + deceleration transitions.
+            // The command's cluster pass dedupes the merged stream.
             let rawClicks = AutoZoomService.autoZoomClicks(
                 from: sidecar,
                 screenPixelSize: naturalSize
@@ -327,40 +340,69 @@ struct EffectsInspector: View {
                 rawClicks,
                 masterTrajectory: optionalTrajectory
             )
-            // Auto trigger 2: cursor deceleration transitions.
             let decelClicks = AutoZoomService.decelerationZooms(from: optionalTrajectory)
-            // Merge both trigger streams; the command's cluster pass dedupes.
             let autoClicks = (filteredClicks + decelClicks).sorted { $0.timelineTime < $1.timelineTime }
 
-            // Manual marks: user-stated, bypass filter/cluster entirely.
-            let marks = AutoZoomService.zoomMarks(from: sidecar, screenPixelSize: naturalSize)
-
-            if autoClicks.isEmpty && marks.isEmpty {
-                lastError = "No usable triggers in sidecar (all filtered, before capture start, or sidecar empty)."
+            if autoClicks.isEmpty {
+                lastError = "No usable clicks in sidecar (all filtered or before capture start)."
                 return
             }
-
-            // Manual marks first so they get priority — the user explicitly
-            // said "zoom here." Auto then fences clicks against any manual
-            // ranges via its existing overlap-skip logic. Running auto first
-            // would let auto-clusters occupy the timeline before manual got
-            // a chance, causing GenerateManualZoomsCommand's occupied-range
-            // check to drop gesture marks whose ramp overlaps a cluster.
-            if !marks.isEmpty {
-                onApply(GenerateManualZoomsCommand(
-                    marks: marks,
-                    mouseTrajectory: optionalTrajectory
-                ))
-            }
-            if !autoClicks.isEmpty {
-                onApply(GenerateAutoZoomFromClicksCommand(
-                    clicks: autoClicks,
-                    mouseTrajectory: optionalTrajectory
-                ))
-            }
+            onApply(GenerateAutoZoomFromClicksCommand(
+                clicks: autoClicks,
+                mouseTrajectory: optionalTrajectory
+            ))
         } catch {
             lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
+    }
+
+    private func generateZoomsFromGestures() async {
+        guard let asset = screenAsset, let url = sidecarURL else { return }
+        isGeneratingGestures = true
+        lastError = nil
+        defer { isGeneratingGestures = false }
+        do {
+            let (sidecar, naturalSize) = try await loadSidecarAndSize(asset: asset, sidecarURL: url)
+            let trajectory = AutoZoomService.mouseTrajectory(
+                from: sidecar,
+                screenPixelSize: naturalSize
+            )
+            let optionalTrajectory: [MouseTrajectorySample]? = trajectory.isEmpty ? nil : trajectory
+
+            // Marks bundle: ⌃⌘Z hotkey + circle gesture + shake gesture. All are
+            // user-stated "zoom here" events, so they share one button.
+            let marks = AutoZoomService.zoomMarks(from: sidecar, screenPixelSize: naturalSize)
+
+            if marks.isEmpty {
+                lastError = "No gesture marks in sidecar (record with gesture detection enabled)."
+                return
+            }
+            onApply(GenerateManualZoomsCommand(
+                marks: marks,
+                mouseTrajectory: optionalTrajectory
+            ))
+        } catch {
+            lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    private func loadSidecarAndSize(
+        asset: MediaAsset,
+        sidecarURL: URL
+    ) async throws -> (ClicksSidecar, CGSize) {
+        let sidecar = try ClicksSidecarStore.read(from: sidecarURL)
+        let assetURL = bundleURL.appendingPathComponent(asset.relativePath)
+        let avAsset = AVURLAsset(url: assetURL)
+        let videoTracks = try await avAsset.loadTracks(withMediaType: .video)
+        guard let firstTrack = videoTracks.first else {
+            throw NSError(
+                domain: "EffectsInspector",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Screen recording has no video track."]
+            )
+        }
+        let naturalSize = try await firstTrack.load(.naturalSize)
+        return (sidecar, naturalSize)
     }
 
     // MARK: - Formatting

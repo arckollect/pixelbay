@@ -82,7 +82,8 @@ public enum PreviewCompositionBuilder {
         project: Project,
         bundleURL: URL,
         wallpaperSource: WallpaperSource? = nil,
-        cursorTrajectory: [MouseTrajectorySample]? = nil
+        cursorTrajectory: [MouseTrajectorySample]? = nil,
+        cursorSprite: CursorSpriteData? = nil
     ) async throws -> PreviewComposition {
         let composition = AVMutableComposition()
 
@@ -155,13 +156,39 @@ public enum PreviewCompositionBuilder {
             to: project.effects,
             cursorTrajectory: cursorTrajectory
         )
+        // Phase 3c — only enable the synthetic cursor pass when the screen
+        // asset was captured with `showsCursor = false` (flagged via
+        // `MediaAsset.cursorRenderedSynthetically`). Legacy recordings
+        // have the OS cursor baked in, so drawing on top would produce a
+        // double cursor; we keep `cursorTrajectoryForRender` empty in
+        // that case and the compositor skips the pass.
+        let cursorSyntheticallyRendered = project.assets.contains { asset in
+            asset.kind == .display && asset.cursorRenderedSynthetically
+        }
+        let cursorTrajectoryForRender: [MouseTrajectorySample]
+        if cursorSyntheticallyRendered, let master = cursorTrajectory, !master.isEmpty {
+            // No EMA here. The auto-zoom path uses smoothed() because a
+            // 1.6× zoom amplifies sub-sample velocity discontinuities; the
+            // sprite renders 1:1 against the screen rect so amplification
+            // doesn't apply, and EMA at α=0.22 over 30/60 Hz samples adds
+            // ~50–120 ms of steady-state lag — the cursor visibly trails
+            // the actual motion. The compositor's Catmull-Rom interp
+            // already gives C¹ continuity across sample boundaries, which
+            // is what we actually need.
+            cursorTrajectoryForRender = master
+        } else {
+            cursorTrajectoryForRender = []
+        }
         let videoComposition = makeVideoComposition(
             duration: duration,
             outputSize: outputSize,
             layoutPreset: resolvedPreset,
             effects: effects,
             screenTrackID: screenTrackID,
-            webcamTrackID: webcamTrackID
+            webcamTrackID: webcamTrackID,
+            cursorSprite: cursorSyntheticallyRendered ? cursorSprite : nil,
+            cursorSettings: cursorSyntheticallyRendered ? project.cursorSettings : nil,
+            cursorTrajectory: cursorTrajectoryForRender
         )
         let audioMix: AVAudioMix?
         if audioMixInputParams.isEmpty {
@@ -358,7 +385,10 @@ public enum PreviewCompositionBuilder {
         layoutPreset: LayoutPreset,
         effects: [EffectKeyframe],
         screenTrackID: CMPersistentTrackID,
-        webcamTrackID: CMPersistentTrackID?
+        webcamTrackID: CMPersistentTrackID?,
+        cursorSprite: CursorSpriteData?,
+        cursorSettings: CursorSettings?,
+        cursorTrajectory: [MouseTrajectorySample]
     ) -> AVMutableVideoComposition {
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = outputSize
@@ -378,7 +408,10 @@ public enum PreviewCompositionBuilder {
             timeRange: CMTimeRange(start: .zero, duration: duration),
             layout: layout,
             layerMapping: layerMapping,
-            effects: effects
+            effects: effects,
+            cursorSprite: cursorSprite,
+            cursorSettings: cursorSettings,
+            cursorTrajectory: cursorTrajectory
         )
         videoComposition.instructions = [instruction]
         return videoComposition
