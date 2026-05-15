@@ -918,8 +918,14 @@ public struct GenerateManualZoomsCommand: EditCommand {
 
     public init(
         marks: [AutoZoomClick],
-        lookahead: Double = 0.7,
-        holdDuration: Double = 1.8,
+        // Manual zoom defaults are snappier than auto-zoom defaults because
+        // the user has already gestured/keyed — they want immediate response
+        // and a brief hold, not the 3.0s arc auto-zoom uses for clicks. With
+        // gesture-start anchoring (`Detection.timestamp` = window[0]), the
+        // 0.3s ease-in covers the gesture motion itself, hold is just long
+        // enough to register the focal point, then ease-out releases.
+        lookahead: Double = 0.3,
+        holdDuration: Double = 0.6,
         easeOutDuration: Double = 0.5,
         zoomFactor: Double = 1.6,
         timelineDuration: Double? = nil,

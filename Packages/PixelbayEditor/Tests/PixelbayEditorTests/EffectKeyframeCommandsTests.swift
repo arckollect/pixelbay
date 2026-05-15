@@ -510,32 +510,32 @@ final class EffectKeyframeCommandsTests: XCTestCase {
 
     func test_generateManualZooms_skipsMarksThatDontFitTimeline() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
-        // Manual marks start AT mark.timelineTime (no lookahead — the zoom
-        // responds AFTER the gesture). Default range duration = easeIn 0.7 +
-        // hold 1.8 + easeOut 0.5 = 3.0s. With timelineDuration 5.0, a mark
-        // at t=3.0 (range [3.0, 6.0)) overshoots; a mark at t=1.5 (range
-        // [1.5, 4.5)) fits.
+        // Manual marks start AT mark.timelineTime. Default range duration =
+        // easeIn 0.3 + hold 0.6 + easeOut 0.5 = 1.4s. With timelineDuration
+        // 2.0, a mark at t=1.5 (range [1.5, 2.9)) overshoots; a mark at
+        // t=0.5 (range [0.5, 1.9)) fits.
         _ = try GenerateManualZoomsCommand(
-            marks: [AutoZoomClick(timelineTime: 1.5), AutoZoomClick(timelineTime: 3.0)],
-            timelineDuration: 5.0
+            marks: [AutoZoomClick(timelineTime: 0.5), AutoZoomClick(timelineTime: 1.5)],
+            timelineDuration: 2.0
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1, "overshoot-end marks are skipped")
-        XCTAssertEqual(project.effects[0].timelineRange.start.seconds, 1.5, accuracy: 1e-9)
+        XCTAssertEqual(project.effects[0].timelineRange.start.seconds, 0.5, accuracy: 1e-9)
     }
 
     func test_generateManualZooms_zoomStartsAtMarkTimestamp_notBefore() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
-        // Critical timing contract for gesture-emitted marks: the gesture
-        // motion already happened ~0.4-0.5s before the mark timestamp, so
-        // the zoom ramp must NOT overlap with it. Range starts AT the mark.
+        // Timing contract for gesture-emitted marks: detector emits the
+        // gesture-START timestamp (window[0]), so range.start = gesture
+        // start. Zoom ramps in across the gesture motion (~0.3s easeIn),
+        // brief hold (0.6s), ease-out (0.5s) — total 1.4s response.
         _ = try GenerateManualZoomsCommand(
             marks: [AutoZoomClick(timelineTime: 4.0)]
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1)
         XCTAssertEqual(project.effects[0].timelineRange.start.seconds, 4.0, accuracy: 1e-9,
-                       "manual zoom starts at the mark, not before")
-        // Range end = 4.0 + 0.7 (easeIn) + 1.8 (hold) + 0.5 (easeOut) = 7.0.
-        XCTAssertEqual(project.effects[0].timelineRange.end.seconds, 7.0, accuracy: 1e-9)
+                       "manual zoom starts at the mark (= gesture start)")
+        // Range end = 4.0 + 0.3 (easeIn) + 0.6 (hold) + 0.5 (easeOut) = 5.4.
+        XCTAssertEqual(project.effects[0].timelineRange.end.seconds, 5.4, accuracy: 1e-9)
     }
 
     // MARK: - Zoom-keyframe non-overlap hardening (slice #11.f)

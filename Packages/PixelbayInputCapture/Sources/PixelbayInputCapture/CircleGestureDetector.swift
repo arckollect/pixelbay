@@ -35,10 +35,12 @@ public struct CircleGestureDetector: Sendable {
     }
 
     public struct Detection: Sendable, Equatable {
-        /// Timestamp of the sample that completed the gesture (matches the
-        /// last ingested sample's timestamp). ClickLogger uses this verbatim
-        /// for the emitted ZoomMark so timeline alignment matches mouse-move
-        /// alignment exactly.
+        /// Timestamp of the FIRST sample currently in the detector's sliding
+        /// window at detection time — approximately when the user began the
+        /// gesture motion. ClickLogger uses this verbatim for the emitted
+        /// ZoomMark so the editor can place the zoom range to BEGIN with the
+        /// gesture (zoom ramps in across the motion) rather than after it
+        /// completes (zoom would feel disconnected from the input).
         public var timestamp: Double
         public var x: Double
         public var y: Double
@@ -122,10 +124,16 @@ public struct CircleGestureDetector: Sendable {
         let sweep = Self.signedAngleSweep(window, cx: fit.cx, cy: fit.cy)
         guard abs(sweep) >= minAngleSweepRadians else { return nil }
 
+        // Anchor the emitted timestamp at the gesture's BEGINNING (oldest
+        // sample currently in the window) rather than its end, so the editor
+        // can place the zoom to ramp in across the gesture motion. The
+        // window has slid to contain only the gesture-recent samples, so
+        // window.first ≈ gesture-start within the ingest cadence.
+        let gestureStart = window.first?.timestamp ?? sample.timestamp
         lastFiredAt = sample.timestamp
         window.removeAll(keepingCapacity: true)
         return Detection(
-            timestamp: sample.timestamp,
+            timestamp: gestureStart,
             x: fit.cx,
             y: fit.cy,
             radius: fit.radius

@@ -44,10 +44,12 @@ public struct ShakeGestureDetector: Sendable {
     }
 
     public struct Detection: Sendable, Equatable {
-        /// Timestamp of the sample that completed the gesture (matches the
-        /// last ingested sample's timestamp). `ClickLogger` uses this verbatim
-        /// for the emitted `ZoomMark` so timeline alignment matches the
-        /// click / move / circle-gesture paths exactly.
+        /// Timestamp of the FIRST sample currently in the detector's sliding
+        /// window at detection time — approximately when the user began the
+        /// shake motion. `ClickLogger` uses this verbatim for the emitted
+        /// `ZoomMark` so the editor can place the zoom range to begin with
+        /// the gesture (zoom ramps in across the shake) rather than after
+        /// it completes.
         public var timestamp: Double
         public var x: Double
         public var y: Double
@@ -128,10 +130,15 @@ public struct ShakeGestureDetector: Sendable {
         )
         guard reversals >= minReversals else { return nil }
 
+        // Anchor the emitted timestamp at the gesture's BEGINNING (oldest
+        // sample currently in the window) rather than its end, so the editor
+        // can place the zoom to ramp in across the shake motion. window.first
+        // ≈ shake-start within the ingest cadence.
+        let gestureStart = window.first?.timestamp ?? sample.timestamp
         lastFiredAt = sample.timestamp
         window.removeAll(keepingCapacity: true)
         return Detection(
-            timestamp: sample.timestamp,
+            timestamp: gestureStart,
             x: sample.x,
             y: sample.y,
             reversals: reversals

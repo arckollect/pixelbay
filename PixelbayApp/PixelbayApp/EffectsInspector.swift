@@ -340,15 +340,21 @@ struct EffectsInspector: View {
                 return
             }
 
-            if !autoClicks.isEmpty {
-                onApply(GenerateAutoZoomFromClicksCommand(
-                    clicks: autoClicks,
-                    mouseTrajectory: optionalTrajectory
-                ))
-            }
+            // Manual marks first so they get priority — the user explicitly
+            // said "zoom here." Auto then fences clicks against any manual
+            // ranges via its existing overlap-skip logic. Running auto first
+            // would let auto-clusters occupy the timeline before manual got
+            // a chance, causing GenerateManualZoomsCommand's occupied-range
+            // check to drop gesture marks whose ramp overlaps a cluster.
             if !marks.isEmpty {
                 onApply(GenerateManualZoomsCommand(
                     marks: marks,
+                    mouseTrajectory: optionalTrajectory
+                ))
+            }
+            if !autoClicks.isEmpty {
+                onApply(GenerateAutoZoomFromClicksCommand(
+                    clicks: autoClicks,
                     mouseTrajectory: optionalTrajectory
                 ))
             }
