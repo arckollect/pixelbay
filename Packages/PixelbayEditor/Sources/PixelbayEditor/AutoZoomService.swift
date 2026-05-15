@@ -210,7 +210,12 @@ public enum AutoZoomService {
         _ clicks: [AutoZoomClick],
         masterTrajectory: [MouseTrajectorySample]?,
         dwellWindow: Double = 0.25,
-        maxVelocity: Double = 0.10
+        // 0.50 norm-units/s = half the screen width per second. Ordinary
+        // "moving toward a button I want to click" motion is 0.2-0.8; only
+        // "ripping the cursor through menus" exceeds 0.50 sustained. The
+        // original 0.10 threshold dropped most real clicks because typical
+        // pointing motion exceeds 10% screen-width/s in the approach phase.
+        maxVelocity: Double = 0.50
     ) -> [AutoZoomClick] {
         guard let trajectory = masterTrajectory, trajectory.count >= 2 else {
             return clicks
