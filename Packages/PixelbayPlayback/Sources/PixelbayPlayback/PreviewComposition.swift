@@ -339,7 +339,13 @@ public enum PreviewCompositionBuilder {
     /// keyframe's trajectory is cleared to nil so the evaluator falls
     /// back to the static (centerX, centerY) instead of locking to a
     /// stale single sample.
-    private static func applyCursorTrajectory(
+    // Exposed `internal` (no `private`) so `ApplyCursorTrajectoryTests` can
+    // exercise the pinned-skip contract without going through the full
+    // AVMutableComposition build path. The helper is still a static, no-state
+    // utility — only the access level changed. Lives on
+    // `PreviewCompositionBuilder` (the enum), not on `PreviewComposition`
+    // (the value type returned by build).
+    static func applyCursorTrajectory(
         to effects: [EffectKeyframe],
         cursorTrajectory: [MouseTrajectorySample]?
     ) -> [EffectKeyframe] {
@@ -349,6 +355,13 @@ public enum PreviewCompositionBuilder {
         let smoothed = MouseTrajectory.smoothed(master)
         return effects.map { kf -> EffectKeyframe in
             guard kf.kind == .zoom else { return kf }
+            // Pinned keyframes opt out of trajectory re-slicing. Without this,
+            // gesture-sourced marks (shake / circle) silently re-acquire
+            // cursor-tracking at every composition build — the editor command
+            // sets trajectory: nil, but this pass would otherwise overwrite
+            // it with a fresh windowed slice of the master cursor path,
+            // re-enabling the jitter the pinned mode exists to prevent.
+            if kf.anchorMode == .pinned { return kf }
             let slice = MouseTrajectory.window(smoothed, timelineRange: kf.timelineRange)
             var next = kf
             next.trajectory = slice.isEmpty ? nil : slice

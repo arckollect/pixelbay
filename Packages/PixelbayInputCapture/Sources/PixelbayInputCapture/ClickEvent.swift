@@ -51,6 +51,19 @@ public struct MouseMove: Codable, Sendable, Equatable {
     }
 }
 
+/// Where a `ZoomMark` came from. Tags the input pathway so the editor can
+/// apply different policies per source — specifically, gesture-sourced marks
+/// (shake / circle) get a STATIC zoom anchor at the gesture region, while
+/// hotkey marks continue to follow the cursor trajectory. Optional on
+/// `ZoomMark` for back-compat with v4 sidecars written before this tag
+/// existed; missing-on-decode is treated as `.hotkey` (the only source that
+/// existed at v4).
+public enum ZoomMarkSource: String, Codable, Sendable, Equatable, CaseIterable {
+    case hotkey
+    case shakeGesture
+    case circleGesture
+}
+
 // User-stated zoom anchor logged by pressing the "Mark Zoom Point" global
 // hotkey during a recording session. Shape mirrors `MouseMove` because the
 // editor treats marks as user-supplied AutoZoomClicks (no clustering, no
@@ -60,11 +73,30 @@ public struct ZoomMark: Codable, Sendable, Equatable {
     public var timestamp: Double
     public var x: Double
     public var y: Double
+    /// Pathway that produced this mark. Optional for back-compat with v4
+    /// sidecars; absent → treat as `.hotkey`.
+    public var source: ZoomMarkSource?
 
-    public init(timestamp: Double, x: Double, y: Double) {
+    public init(timestamp: Double, x: Double, y: Double, source: ZoomMarkSource? = nil) {
         self.timestamp = timestamp
         self.x = x
         self.y = y
+        self.source = source
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case timestamp
+        case x
+        case y
+        case source
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.timestamp = try c.decode(Double.self, forKey: .timestamp)
+        self.x = try c.decode(Double.self, forKey: .x)
+        self.y = try c.decode(Double.self, forKey: .y)
+        self.source = try c.decodeIfPresent(ZoomMarkSource.self, forKey: .source)
     }
 }
 

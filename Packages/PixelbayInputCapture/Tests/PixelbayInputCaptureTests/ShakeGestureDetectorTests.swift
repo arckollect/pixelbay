@@ -45,6 +45,33 @@ final class ShakeGestureDetectorTests: XCTestCase {
         XCTAssertNotNil(detection)
     }
 
+    func test_detector_anchorsAtMeanOfWindow_notLatestSample() {
+        // Shake symmetric around (0.5, 0.5). The window mean should also be
+        // ~0.5/0.5 even when the LAST sample sits at one extreme (-amp). If
+        // the detector emitted the latest sample instead of the mean, the
+        // anchor would land at 0.5 - 0.04 = 0.46 on the horizontal axis.
+        var detector = ShakeGestureDetector()
+        let samples = wiggleSamples(
+            centerX: 0.5,
+            centerY: 0.5,
+            amplitude: 0.04,
+            axis: .horizontal,
+            reversals: 5,
+            samplesPerLeg: 3,
+            startTime: 1.0,
+            legDuration: 0.06
+        )
+        let detection = drive(&detector, samples: samples)
+        let fired = try? XCTUnwrap(detection)
+        XCTAssertNotNil(fired)
+        if let fired {
+            XCTAssertEqual(fired.x, 0.5, accuracy: 0.015, "horizontal anchor sits at shake midpoint")
+            XCTAssertEqual(fired.y, 0.5, accuracy: 0.001, "vertical anchor unaffected by horizontal shake")
+            // Sanity: NOT the latest sample (-amp on the principal axis).
+            XCTAssertGreaterThan(fired.x, 0.5 - 0.03, "anchor should not be near the latest-sample extreme")
+        }
+    }
+
     // MARK: - Negative cases
 
     func test_detector_doesNotEmit_onLinearMotion() {

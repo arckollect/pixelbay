@@ -1,5 +1,6 @@
 import Foundation
 import PixelbayCore
+import PixelbayInputCapture
 
 // Phase 2 v0.1 starter set — three commands covering trim and per-clip
 // volume. The remaining op vocabulary (split, remove, insert, move,
@@ -570,11 +571,25 @@ public struct AutoZoomClick: Sendable, Equatable {
     public var timelineTime: Double
     public var centerX: Double       // 0..1 normalized to screen layer
     public var centerY: Double       // 0..1 normalized to screen layer
+    /// Mirrors `ZoomMark.source` for manual marks routed through
+    /// `GenerateManualZoomsCommand`. Nil for click-sourced auto-zoom (which
+    /// has no equivalent source distinction). When set to `.shakeGesture` or
+    /// `.circleGesture`, the manual-zoom command emits the keyframe with
+    /// `trajectory: nil` so the zoom holds a STATIC anchor on
+    /// `(centerX, centerY)` instead of following the cursor through hold +
+    /// ease-out (which otherwise jitters with every post-gesture micro-move).
+    public var source: ZoomMarkSource?
 
-    public init(timelineTime: Double, centerX: Double = 0.5, centerY: Double = 0.5) {
+    public init(
+        timelineTime: Double,
+        centerX: Double = 0.5,
+        centerY: Double = 0.5,
+        source: ZoomMarkSource? = nil
+    ) {
         self.timelineTime = timelineTime
         self.centerX = centerX
         self.centerY = centerY
+        self.source = source
     }
 }
 
@@ -983,9 +998,39 @@ public struct GenerateManualZoomsCommand: EditCommand {
             if occupiedRanges.contains(where: { $0.overlaps(range) }) {
                 continue
             }
-            let slice = mouseTrajectory.map {
-                AutoZoomService.trajectoryWindow($0, timelineRange: range)
+            // Gesture-sourced marks (shake / circle) want a STATIC zoom
+            // anchor: the user motioned to highlight a region, then expects
+            // the zoom to lock there even if the cursor wanders. Following
+            // the trajectory makes every post-gesture micro-move push the
+            // zoom around — exactly the jitter the cursor-shake feature is
+            // supposed to avoid. Hotkey marks keep trajectory-follow so a
+            // user pressing ⌃⌘Z mid-motion still gets cursor-tracking.
+            //
+            // Back-compat for v4 sidecars written before the `source` tag
+            // existed (mark.source == nil): pre-tag marks were dominantly
+            // gesture-sourced in real usage, and the user-visible jitter bug
+            // this fix exists to address shows up on exactly those recordings.
+            // So treat nil as gesture-equivalent → static anchor. The price
+            // is that legacy hotkey-only marks lose trajectory-follow on
+            // pre-tag sidecars; an acceptable trade given the alternative is
+            // every old gesture recording still jitters until re-recorded.
+            let staticAnchor: Bool
+            switch mark.source {
+            case .shakeGesture, .circleGesture, .none: staticAnchor = true
+            case .hotkey: staticAnchor = false
             }
+            let slice: [ZoomTrajectorySample]? = staticAnchor
+                ? nil
+                : mouseTrajectory.map {
+                    AutoZoomService.trajectoryWindow($0, timelineRange: range)
+                }
+            // anchorMode: .pinned is the load-bearing part for gesture marks.
+            // Setting trajectory: nil alone is NOT enough — at composition
+            // build time, `PreviewComposition.applyCursorTrajectory` re-slices
+            // the master cursor trajectory onto every zoom keyframe and
+            // overwrites the nil. `.pinned` is the signal that survives that
+            // step: applyCursorTrajectory + EffectEvaluator.zoomCenter both
+            // honour it and keep the static (centerX, centerY) in effect.
             generated.append(EffectKeyframe(
                 kind: .zoom,
                 timelineRange: range,
@@ -995,7 +1040,8 @@ public struct GenerateManualZoomsCommand: EditCommand {
                 easeIn: .seconds(lookahead),
                 easeOut: .seconds(easeOutDuration),
                 trajectory: slice,
-                origin: .manualHotkey
+                origin: .manualHotkey,
+                anchorMode: staticAnchor ? .pinned : .followCursor
             ))
             occupiedRanges.append(range)
         }

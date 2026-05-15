@@ -181,17 +181,19 @@ public enum AutoZoomService {
                 return AutoZoomClick(
                     timelineTime: timelineTime,
                     centerX: clamp01(mark.x),
-                    centerY: clamp01(mark.y)
+                    centerY: clamp01(mark.y),
+                    source: mark.source
                 )
             }
             if hasValidSize {
                 return AutoZoomClick(
                     timelineTime: timelineTime,
                     centerX: clamp01(mark.x / Double(screenPixelSize.width)),
-                    centerY: clamp01(mark.y / Double(screenPixelSize.height))
+                    centerY: clamp01(mark.y / Double(screenPixelSize.height)),
+                    source: mark.source
                 )
             }
-            return AutoZoomClick(timelineTime: timelineTime)
+            return AutoZoomClick(timelineTime: timelineTime, source: mark.source)
         }
     }
 

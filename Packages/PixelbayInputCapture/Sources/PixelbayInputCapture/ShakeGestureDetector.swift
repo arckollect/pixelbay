@@ -21,10 +21,12 @@ import Foundation
 //      false-positive). Each leg is by induction ≥ `minLegLength` as well.
 //   4. Gate detection on: principal range ∈ [`minAmplitude`, `maxAmplitude`]
 //      and reversal count ≥ `minReversals`.
-//   5. On fire: emit the latest sample's coords as the ZoomMark anchor
-//      (the cursor location *after* the shake — where the user wants to
-//      focus), start a cooldown, and clear the window so the next gesture
-//      has to fully rebuild it.
+//   5. On fire: emit the MEAN of the window samples as the ZoomMark anchor
+//      — the geometric center of the shake oscillation, i.e. the "general
+//      section" the user wiggled in. (Earlier revs emitted the latest sample,
+//      which lands at one extreme of the side-to-side motion and made the
+//      static-anchor zoom feel off-center.) Then start a cooldown and clear
+//      the window so the next gesture has to fully rebuild it.
 //
 // Defaults are tuned for "back-forth-back-forth-back in ~400ms within a
 // ~5-15% screen-width band" — fast enough to be deliberate, large enough
@@ -51,6 +53,9 @@ public struct ShakeGestureDetector: Sendable {
         /// the gesture (zoom ramps in across the shake) rather than after
         /// it completes.
         public var timestamp: Double
+        /// Arithmetic mean of the shake-window samples — the geometric center
+        /// of the oscillation, used as the STATIC zoom anchor by the editor
+        /// (trajectory-follow is disabled for shake-sourced marks).
         public var x: Double
         public var y: Double
         public var reversals: Int
@@ -135,12 +140,21 @@ public struct ShakeGestureDetector: Sendable {
         // can place the zoom to ramp in across the shake motion. window.first
         // ≈ shake-start within the ingest cadence.
         let gestureStart = window.first?.timestamp ?? sample.timestamp
+        // Anchor (x, y) at the MEAN of the shake window. With trajectory-
+        // follow disabled for shake marks (handled in the editor), the
+        // emitted (x, y) is the static zoom centre; the mean puts it in the
+        // middle of the side-to-side oscillation, which is where the user
+        // gestured around. Using the latest sample would land at one extreme.
+        var sumX = 0.0, sumY = 0.0
+        for s in window { sumX += s.x; sumY += s.y }
+        let meanX = sumX / Double(window.count)
+        let meanY = sumY / Double(window.count)
         lastFiredAt = sample.timestamp
         window.removeAll(keepingCapacity: true)
         return Detection(
             timestamp: gestureStart,
-            x: sample.x,
-            y: sample.y,
+            x: meanX,
+            y: meanY,
             reversals: reversals
         )
     }

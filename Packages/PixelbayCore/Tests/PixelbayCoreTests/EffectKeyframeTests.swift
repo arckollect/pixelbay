@@ -110,6 +110,41 @@ final class EffectKeyframeTests: XCTestCase {
         XCTAssertEqual(decoded.origin, .manualHotkey)
     }
 
+    func test_keyframe_anchorMode_roundTripsThroughCodable() throws {
+        for mode in ZoomAnchorMode.allCases {
+            let kf = EffectKeyframe(
+                kind: .zoom,
+                timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2)),
+                anchorMode: mode
+            )
+            let data = try JSONEncoder().encode(kf)
+            let decoded = try JSONDecoder().decode(EffectKeyframe.self, from: data)
+            XCTAssertEqual(decoded.anchorMode, mode, "anchorMode \(mode) must survive JSON round-trip")
+        }
+    }
+
+    func test_keyframe_anchorModeDefaultsToFollowCursorOnDecodeWhenMissing() throws {
+        // Legacy fixture without the `anchorMode` field — pre-2026-05-15
+        // projects must decode with .followCursor so existing zoom keyframes
+        // keep their cursor-tracking behaviour.
+        let json = """
+        {
+            "id": "kf-1",
+            "kind": "zoom",
+            "timelineRange": {"start": {"value": 0, "timescale": 600}, "duration": {"value": 1200, "timescale": 600}},
+            "zoomFactor": 1.5,
+            "centerX": 0.5,
+            "centerY": 0.5,
+            "easeIn": {"value": 120, "timescale": 600},
+            "easeOut": {"value": 120, "timescale": 600},
+            "origin": "auto",
+            "extras": {}
+        }
+        """
+        let decoded = try JSONDecoder().decode(EffectKeyframe.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.anchorMode, .followCursor)
+    }
+
     func test_project_defaultsToEmptyEffects() {
         let project = Project(name: "default")
         XCTAssertTrue(project.effects.isEmpty)

@@ -129,7 +129,7 @@ public actor ClickLogger {
     /// running so a hotkey press outside the recording session can't crash.
     public func recordMark(at timestamp: Double, x: Double, y: Double) {
         guard phase == .running else { return }
-        marks.append(normalize(ZoomMark(timestamp: timestamp, x: x, y: y)))
+        marks.append(normalize(ZoomMark(timestamp: timestamp, x: x, y: y, source: .hotkey)))
     }
 
     private func recordClick(_ event: ClickEvent) {
@@ -165,7 +165,8 @@ public actor ClickLogger {
             ZoomMark(
                 timestamp: detection.timestamp,
                 x: detection.x,
-                y: detection.y
+                y: detection.y,
+                source: .shakeGesture
             )
         )
         log.info("shake gesture mark logged at (\(detection.x, format: .fixed(precision: 3)), \(detection.y, format: .fixed(precision: 3))) reversals=\(detection.reversals)")
@@ -190,7 +191,8 @@ public actor ClickLogger {
             ZoomMark(
                 timestamp: detection.timestamp,
                 x: detection.x,
-                y: detection.y
+                y: detection.y,
+                source: .circleGesture
             )
         )
         log.info("circle gesture mark logged at (\(detection.x, format: .fixed(precision: 3)), \(detection.y, format: .fixed(precision: 3))) r=\(detection.radius, format: .fixed(precision: 3))")
@@ -232,7 +234,8 @@ public actor ClickLogger {
         return ZoomMark(
             timestamp: mark.timestamp,
             x: clamp01((mark.x - Double(bounds.origin.x)) / Double(bounds.size.width)),
-            y: clamp01((mark.y - Double(bounds.origin.y)) / Double(bounds.size.height))
+            y: clamp01((mark.y - Double(bounds.origin.y)) / Double(bounds.size.height)),
+            source: mark.source
         )
     }
 }

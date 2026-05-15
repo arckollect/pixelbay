@@ -154,6 +154,16 @@ public enum EffectEvaluator {
         for kf: EffectKeyframe,
         atTime t: Double
     ) -> (x: Double, y: Double) {
+        // Pinned keyframes always render at (centerX, centerY), regardless of
+        // whatever `trajectory` happens to hold. Belt-and-braces against any
+        // future code path that writes a trajectory into a pinned keyframe;
+        // the primary defence lives in PreviewComposition.applyCursorTrajectory
+        // (which skips pinned at composition build time), but the contract
+        // belongs in the evaluator too — anyone reading this code should be
+        // able to see the static-centre guarantee at the point it's rendered.
+        if kf.anchorMode == .pinned {
+            return (kf.centerX, kf.centerY)
+        }
         guard let trajectory = kf.trajectory, !trajectory.isEmpty else {
             return (kf.centerX, kf.centerY)
         }

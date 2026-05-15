@@ -202,6 +202,32 @@ final class ClickLoggerTests: XCTestCase {
         XCTAssertEqual(decoded, mark)
     }
 
+    func test_zoomMark_codable_preservesSource() throws {
+        // The whole gesture-static-anchor fix hangs on the editor seeing
+        // mark.source == .shakeGesture / .circleGesture after a sidecar round-
+        // trip. If the synthesised encoder dropped the field we'd silently
+        // fall through to the gesture-equivalent default — same observable
+        // behaviour, but worth proving the wire layer is doing what we think.
+        for source in ZoomMarkSource.allCases {
+            let mark = ZoomMark(timestamp: 1.0, x: 0.4, y: 0.6, source: source)
+            let data = try JSONEncoder().encode(mark)
+            let decoded = try JSONDecoder().decode(ZoomMark.self, from: data)
+            XCTAssertEqual(decoded.source, source, "source \(source) must survive JSON round-trip")
+            XCTAssertEqual(decoded, mark)
+        }
+    }
+
+    func test_zoomMark_codable_v4SidecarWithoutSource_decodesAsNil() throws {
+        // Hand-written v4 JSON predates the `source` field. The decoder must
+        // tolerate the missing key and produce source = nil (which the
+        // editor's GenerateManualZoomsCommand then routes through the
+        // gesture-equivalent static-anchor path for back-compat).
+        let legacy = #"{"timestamp": 12.5, "x": 0.5, "y": 0.5}"#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(ZoomMark.self, from: legacy)
+        XCTAssertNil(decoded.source)
+        XCTAssertEqual(decoded.timestamp, 12.5)
+    }
+
     func test_sidecar_v4_marksRoundTripThroughJSON() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("clicks-marks-\(UUID().uuidString).json")

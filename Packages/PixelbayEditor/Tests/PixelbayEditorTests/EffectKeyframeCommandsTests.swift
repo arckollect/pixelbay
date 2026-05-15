@@ -1,5 +1,6 @@
 import PixelbayCore
 @testable import PixelbayEditor
+import PixelbayInputCapture
 import XCTest
 
 final class EffectKeyframeCommandsTests: XCTestCase {
@@ -520,6 +521,83 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1, "overshoot-end marks are skipped")
         XCTAssertEqual(project.effects[0].timelineRange.start.seconds, 0.5, accuracy: 1e-9)
+    }
+
+    func test_generateManualZooms_shakeGestureMark_emitsKeyframeWithoutTrajectory() throws {
+        var (project, _) = EditorFixture.minimalSingleClip()
+        let trajectory = (0...20).map {
+            MouseTrajectorySample(
+                timelineTime: 4.0 + Double($0) * 0.1,
+                centerX: 0.5 + Double($0) * 0.01,
+                centerY: 0.5
+            )
+        }
+        _ = try GenerateManualZoomsCommand(
+            marks: [AutoZoomClick(timelineTime: 4.0, source: .shakeGesture)],
+            mouseTrajectory: trajectory
+        ).apply(to: &project)
+        XCTAssertEqual(project.effects.count, 1)
+        XCTAssertNil(project.effects[0].trajectory,
+                     "shake-sourced marks must hold a static anchor — trajectory follow makes the zoom jitter with post-gesture cursor noise")
+        XCTAssertEqual(project.effects[0].anchorMode, .pinned,
+                       "shake marks must set anchorMode=.pinned so PreviewComposition.applyCursorTrajectory can't backfill trajectory at composition build")
+    }
+
+    func test_generateManualZooms_circleGestureMark_emitsKeyframeWithoutTrajectory() throws {
+        var (project, _) = EditorFixture.minimalSingleClip()
+        let trajectory = [
+            MouseTrajectorySample(timelineTime: 4.0, centerX: 0.5, centerY: 0.5),
+            MouseTrajectorySample(timelineTime: 4.5, centerX: 0.6, centerY: 0.5)
+        ]
+        _ = try GenerateManualZoomsCommand(
+            marks: [AutoZoomClick(timelineTime: 4.0, source: .circleGesture)],
+            mouseTrajectory: trajectory
+        ).apply(to: &project)
+        XCTAssertEqual(project.effects.count, 1)
+        XCTAssertNil(project.effects[0].trajectory,
+                     "circle-sourced marks must hold a static anchor for the same reason as shake")
+        XCTAssertEqual(project.effects[0].anchorMode, .pinned)
+    }
+
+    func test_generateManualZooms_hotkeyMark_keepsTrajectoryFollow() throws {
+        var (project, _) = EditorFixture.minimalSingleClip()
+        // Hotkey marks (⌃⌘Z) keep cursor-tracking — the user pressed mid-
+        // motion and expects the zoom to track wherever they're moving.
+        let trajectory = [
+            MouseTrajectorySample(timelineTime: 4.0, centerX: 0.5, centerY: 0.5),
+            MouseTrajectorySample(timelineTime: 4.5, centerX: 0.7, centerY: 0.5)
+        ]
+        _ = try GenerateManualZoomsCommand(
+            marks: [AutoZoomClick(timelineTime: 4.0, source: .hotkey)],
+            mouseTrajectory: trajectory
+        ).apply(to: &project)
+        XCTAssertEqual(project.effects.count, 1)
+        XCTAssertNotNil(project.effects[0].trajectory,
+                        "hotkey marks must continue to follow the cursor trajectory")
+        XCTAssertEqual(project.effects[0].anchorMode, .followCursor,
+                       "hotkey marks must NOT be pinned — applyCursorTrajectory needs to be allowed to re-window the trajectory on drag/trim")
+    }
+
+    func test_generateManualZooms_nilSourceMark_treatedAsGesture_staticAnchor() throws {
+        // Pre-source-tag sidecars (v4) decode marks with source == nil. Real
+        // usage on those recordings is dominantly gesture-sourced (the bug
+        // this whole change addresses showed up on exactly that workflow),
+        // so the back-compat default is static anchor — otherwise every
+        // legacy recording still jitters until re-recorded.
+        var (project, _) = EditorFixture.minimalSingleClip()
+        let trajectory = [
+            MouseTrajectorySample(timelineTime: 4.0, centerX: 0.5, centerY: 0.5),
+            MouseTrajectorySample(timelineTime: 4.5, centerX: 0.7, centerY: 0.5)
+        ]
+        _ = try GenerateManualZoomsCommand(
+            marks: [AutoZoomClick(timelineTime: 4.0, source: nil)],
+            mouseTrajectory: trajectory
+        ).apply(to: &project)
+        XCTAssertEqual(project.effects.count, 1)
+        XCTAssertNil(project.effects[0].trajectory,
+                     "back-compat: nil source (pre-tag v4 sidecars) defaults to gesture-equivalent static anchor")
+        XCTAssertEqual(project.effects[0].anchorMode, .pinned,
+                       "back-compat path must also set anchorMode=.pinned so legacy recordings survive applyCursorTrajectory")
     }
 
     func test_generateManualZooms_zoomStartsAtMarkTimestamp_notBefore() throws {

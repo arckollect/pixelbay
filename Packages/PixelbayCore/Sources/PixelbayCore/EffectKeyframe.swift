@@ -40,6 +40,29 @@ public enum ZoomOrigin: String, Codable, Sendable, CaseIterable {
     case manualHotkey
 }
 
+/// How the per-frame zoom centre is sourced.
+///
+/// `.followCursor` (the historical default): the per-frame centre comes from
+/// `trajectory` when one is present (or is filled in at composition build
+/// time from the master cursor trajectory if absent); falls back to the
+/// static `(centerX, centerY)` only when no trajectory exists.
+///
+/// `.pinned`: the centre is **always** the static `(centerX, centerY)`, even
+/// if `trajectory` is non-nil. Critically, `PreviewComposition.applyCursorTrajectory`
+/// also leaves pinned keyframes alone — it would otherwise re-slice the
+/// master cursor trajectory onto the keyframe at every composition build
+/// (including playback rebuilds) and silently re-enable cursor-tracking on
+/// keyframes the user explicitly wanted region-locked. Used by gesture-
+/// sourced marks (shake / circle) where the gesture's purpose is "zoom on
+/// this region, then stay put."
+///
+/// Decoded as `.followCursor` when missing (legacy projects from before
+/// 2026-05-15).
+public enum ZoomAnchorMode: String, Codable, Sendable, CaseIterable {
+    case followCursor
+    case pinned
+}
+
 /// One waypoint on a zoom keyframe's cursor-tracking trajectory. `t` is
 /// keyframe-local seconds (t=0 at `timelineRange.start`); `x` / `y` are
 /// normalised to the screen layer's local space, same convention as
@@ -90,6 +113,9 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
     /// mouse-move samples.
     public var trajectory: [ZoomTrajectorySample]?
     public var origin: ZoomOrigin
+    /// Selects between cursor-tracking and pinned-static framing. See
+    /// `ZoomAnchorMode`. Defaults to `.followCursor` for back-compat.
+    public var anchorMode: ZoomAnchorMode
     public var extras: [String: JSONValue]
 
     public init(
@@ -103,6 +129,7 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
         easeOut: RationalTime = .seconds(0.2),
         trajectory: [ZoomTrajectorySample]? = nil,
         origin: ZoomOrigin = .auto,
+        anchorMode: ZoomAnchorMode = .followCursor,
         extras: [String: JSONValue] = [:]
     ) {
         self.id = id
@@ -115,6 +142,7 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
         self.easeOut = easeOut
         self.trajectory = trajectory
         self.origin = origin
+        self.anchorMode = anchorMode
         self.extras = extras
     }
 
@@ -174,6 +202,7 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
         case easeOut
         case trajectory
         case origin
+        case anchorMode
         case extras
     }
 
@@ -189,6 +218,7 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
         self.easeOut = try c.decode(RationalTime.self, forKey: .easeOut)
         self.trajectory = try c.decodeIfPresent([ZoomTrajectorySample].self, forKey: .trajectory)
         self.origin = try c.decodeIfPresent(ZoomOrigin.self, forKey: .origin) ?? .auto
+        self.anchorMode = try c.decodeIfPresent(ZoomAnchorMode.self, forKey: .anchorMode) ?? .followCursor
         self.extras = try c.decode([String: JSONValue].self, forKey: .extras)
     }
 }
