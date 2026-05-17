@@ -152,9 +152,28 @@ public enum PreviewCompositionBuilder {
         let duration = maxTimelineEnd
         let outputSize = computeOutputSize(from: screenSize)
         let resolvedPreset = wallpaperSource?.resolve(project.layout) ?? project.layout
+        // Smooth the master cursor trajectory ONCE per composition build,
+        // then feed the same smoothed array to both consumers (cursor
+        // sprite + zoom anchor). The split implementation (raw sprite +
+        // damped anchor) caused the cursor to visibly drift toward the
+        // frame edge during cursor-follow zooms — the camera lagged but
+        // the cursor sprite raced ahead at input speed. Sharing one
+        // smoothed trajectory is the Screen Studio / Loom pattern: the
+        // cursor itself glides AND stays glued to the zoom centre.
+        //
+        // Hoisted above the `cursorSyntheticallyRendered` branch so the
+        // zoom-anchor path still gets damping on legacy bundles (recorded
+        // with the OS cursor baked into the screen frame). Smoothing
+        // applies even when the synthetic sprite is disabled.
+        let smoothedMaster: [MouseTrajectorySample]
+        if let master = cursorTrajectory, !master.isEmpty {
+            smoothedMaster = MouseTrajectory.cameraDamped(master)
+        } else {
+            smoothedMaster = []
+        }
         let effects = applyCursorTrajectory(
             to: project.effects,
-            cursorTrajectory: cursorTrajectory
+            cursorTrajectory: smoothedMaster.isEmpty ? nil : smoothedMaster
         )
         // Phase 3c — only enable the synthetic cursor pass when the screen
         // asset was captured with `showsCursor = false` (flagged via
@@ -165,20 +184,8 @@ public enum PreviewCompositionBuilder {
         let cursorSyntheticallyRendered = project.assets.contains { asset in
             asset.kind == .display && asset.cursorRenderedSynthetically
         }
-        let cursorTrajectoryForRender: [MouseTrajectorySample]
-        if cursorSyntheticallyRendered, let master = cursorTrajectory, !master.isEmpty {
-            // No EMA here. The auto-zoom path uses smoothed() because a
-            // 1.6× zoom amplifies sub-sample velocity discontinuities; the
-            // sprite renders 1:1 against the screen rect so amplification
-            // doesn't apply, and EMA at α=0.22 over 30/60 Hz samples adds
-            // ~50–120 ms of steady-state lag — the cursor visibly trails
-            // the actual motion. The compositor's Catmull-Rom interp
-            // already gives C¹ continuity across sample boundaries, which
-            // is what we actually need.
-            cursorTrajectoryForRender = master
-        } else {
-            cursorTrajectoryForRender = []
-        }
+        let cursorTrajectoryForRender: [MouseTrajectorySample] =
+            cursorSyntheticallyRendered ? smoothedMaster : []
         let videoComposition = makeVideoComposition(
             duration: duration,
             outputSize: outputSize,
@@ -326,12 +333,20 @@ public enum PreviewCompositionBuilder {
     // MARK: - Helpers
 
     /// Replace each `.zoom` keyframe's stored `trajectory` slice with a
-    /// fresh slice taken from the (smoothed) master cursor trajectory
+    /// fresh slice taken from the (pre-smoothed) master cursor trajectory
     /// against the keyframe's CURRENT timeline range. This is what makes
     /// "drag the right edge to extend" actually extend cursor-follow —
     /// the slice baked in at generate-time only covers the original
     /// range, so without re-slicing the evaluator clamps to the last
     /// stored sample for the extended portion.
+    ///
+    /// **Input is assumed pre-smoothed by the caller.** `build()` runs
+    /// `MouseTrajectory.cameraDamped` once at the top and passes the
+    /// result here AND to the cursor sprite render path, so both
+    /// consumers share one filter pass (cursor sprite stays glued to the
+    /// zoom anchor). Re-running damping inside this helper would
+    /// double-filter the zoom-anchor path while leaving the sprite path
+    /// undamped — the bug this contract exists to prevent.
     ///
     /// No-op (returns input unchanged) when `cursorTrajectory` is nil or
     /// empty. Non-zoom keyframes pass through untouched. When a re-slice
@@ -352,7 +367,6 @@ public enum PreviewCompositionBuilder {
         guard let master = cursorTrajectory, !master.isEmpty else {
             return effects
         }
-        let smoothed = MouseTrajectory.smoothed(master)
         return effects.map { kf -> EffectKeyframe in
             guard kf.kind == .zoom else { return kf }
             // Pinned keyframes opt out of trajectory re-slicing. Without this,
@@ -362,7 +376,7 @@ public enum PreviewCompositionBuilder {
             // it with a fresh windowed slice of the master cursor path,
             // re-enabling the jitter the pinned mode exists to prevent.
             if kf.anchorMode == .pinned { return kf }
-            let slice = MouseTrajectory.window(smoothed, timelineRange: kf.timelineRange)
+            let slice = MouseTrajectory.window(master, timelineRange: kf.timelineRange)
             var next = kf
             next.trajectory = slice.isEmpty ? nil : slice
             return next

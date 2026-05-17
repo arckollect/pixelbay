@@ -632,7 +632,7 @@ public struct GenerateAutoZoomFromClicksCommand: EditCommand {
         lookahead: Double = 0.7,
         holdDuration: Double = 1.8,
         easeOutDuration: Double = 0.5,
-        zoomFactor: Double = 1.6,
+        zoomFactor: Double = 2.0,
         timelineDuration: Double? = nil,
         maxClusterDuration: Double = 4.5,
         spatialResetThreshold: Double = 0.30,
@@ -942,7 +942,7 @@ public struct GenerateManualZoomsCommand: EditCommand {
         lookahead: Double = 0.3,
         holdDuration: Double = 0.6,
         easeOutDuration: Double = 0.5,
-        zoomFactor: Double = 1.6,
+        zoomFactor: Double = 2.0,
         timelineDuration: Double? = nil,
         mouseTrajectory: [MouseTrajectorySample]? = nil
     ) {
@@ -1024,6 +1024,16 @@ public struct GenerateManualZoomsCommand: EditCommand {
                 : mouseTrajectory.map {
                     AutoZoomService.trajectoryWindow($0, timelineRange: range)
                 }
+            // Phase 3c: snap pinned (gesture) anchors to a 0.05 norm-unit
+            // grid (20×20 cells). Kills the sub-cell jitter that motivated
+            // the earlier `.pinned + trajectory=nil` defensive patch — gesture
+            // samples come in slightly noisy in space, and rounding to a
+            // visible cell makes back-to-back captures with the same intent
+            // land on the same anchor. Follow-cursor (hotkey) marks are not
+            // snapped — they track the live cursor and quantization would
+            // read as stepped motion.
+            let anchorX = staticAnchor ? (mark.centerX / 0.05).rounded() * 0.05 : mark.centerX
+            let anchorY = staticAnchor ? (mark.centerY / 0.05).rounded() * 0.05 : mark.centerY
             // anchorMode: .pinned is the load-bearing part for gesture marks.
             // Setting trajectory: nil alone is NOT enough — at composition
             // build time, `PreviewComposition.applyCursorTrajectory` re-slices
@@ -1035,8 +1045,8 @@ public struct GenerateManualZoomsCommand: EditCommand {
                 kind: .zoom,
                 timelineRange: range,
                 zoomFactor: zoomFactor,
-                centerX: mark.centerX,
-                centerY: mark.centerY,
+                centerX: anchorX,
+                centerY: anchorY,
                 easeIn: .seconds(lookahead),
                 easeOut: .seconds(easeOutDuration),
                 trajectory: slice,

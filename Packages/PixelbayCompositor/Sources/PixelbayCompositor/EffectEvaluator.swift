@@ -27,12 +27,12 @@ import PixelbayCore
 
 public enum EffectEvaluator {
     /// Global ceiling on the radial-blur strength fed to the screen shader.
-    /// Even at peak mid-ease the kernel only spreads ~2.5 % of the radius —
-    /// just enough to soften the in/out feel without UI text smearing into
-    /// itself. Was 0.06 originally, dropped after user feedback that zoom
-    /// transitions read as "too blurry"; 0.025 keeps the motion-softening
-    /// cue while leaving fine UI strokes legible mid-ease.
-    static let screenZoomBlurMaxStrength: Double = 0.025
+    /// Even at peak mid-ease the kernel only spreads ~1.2 % of the radius —
+    /// just enough to hint at motion without softening UI text. Was 0.06
+    /// originally, then 0.025 — still read as too blurry; halved again
+    /// to 0.012 which is right at the threshold of perceptibility (the
+    /// motion-softening cue is preserved but text edges stay crisp).
+    static let screenZoomBlurMaxStrength: Double = 0.012
 
     public static func apply(
         keyframes: [EffectKeyframe],
@@ -95,6 +95,16 @@ public enum EffectEvaluator {
         return layout
     }
 
+    // Edge-aware framing constants. When the raw anchor sits inside the
+    // 15 % `deadzone` margin, `frameAnchor` blends it toward the screen
+    // centre so the cursor doesn't slide all the way into a corner of the
+    // zoomed frame; a deep-corner anchor additionally backs the zoom factor
+    // off. The hard clamp below stays as a safety net.
+    private static let edgeDeadzone: Double = 0.15
+    private static let edgeBlendStrength: Double = 0.6
+    private static let cornerCutoff: Double = 0.08
+    private static let cornerFactorScale: Double = 0.7
+
     private static func applyZoom(
         _ kf: EffectKeyframe,
         strength: Double,
@@ -102,13 +112,32 @@ public enum EffectEvaluator {
         to layout: ResolvedLayout
     ) -> ResolvedLayout {
         let factorAtFullStrength = max(1.0, kf.zoomFactor)
-        let factor = 1.0 + (factorAtFullStrength - 1.0) * strength
-        guard factor > 1.0001 else { return layout }
+        let baseFactor = 1.0 + (factorAtFullStrength - 1.0) * strength
+        guard baseFactor > 1.0001 else { return layout }
 
         let screen = layout.screen
         let center = zoomCenter(for: kf, atTime: t)
-        let cx = max(0, min(1, center.x))
-        let cy = max(0, min(1, center.y))
+        let rawCx = max(0, min(1, center.x))
+        let rawCy = max(0, min(1, center.y))
+        // Edge-blending is only applied to STATIC anchors (pinned-gesture
+        // marks, single-click auto-zooms with no trajectory). For cursor-
+        // following zooms (trajectory present and not pinned) we must
+        // pass the raw cursor anchor through — the natural clamp below
+        // is what produces the "snap-to-edge" feel where the cursor
+        // stays visible against the viewport edge. Blending the anchor
+        // toward centre when the cursor is near an edge shifts the rect
+        // just inside the clamp, which then renders the cursor sprite
+        // outside the visible viewport entirely (the sprite is anchored
+        // by raw cursor coords against the post-zoom screen rect, so the
+        // blended framing literally moves the cursor off-screen).
+        let isCursorFollow = kf.anchorMode != .pinned
+            && (kf.trajectory?.isEmpty == false)
+        let (cx, cy, factor): (Double, Double, CGFloat)
+        if isCursorFollow {
+            (cx, cy, factor) = (rawCx, rawCy, baseFactor)
+        } else {
+            (cx, cy, factor) = frameAnchor(rawCx: rawCx, rawCy: rawCy, baseFactor: baseFactor)
+        }
 
         let newWidth = screen.size.width * CGFloat(factor)
         let newHeight = screen.size.height * CGFloat(factor)
@@ -132,6 +161,36 @@ public enum EffectEvaluator {
             size: CGSize(width: newWidth, height: newHeight)
         )
         return next
+    }
+
+    /// Edge-aware anchor blending: when the raw anchor sits in the 15 %
+    /// deadzone near an edge, pull it toward the screen centre with strength
+    /// 0.6 at the very edge tapering to 0 at the deadzone boundary. In a
+    /// deep corner (within 8 % on both axes) additionally back the zoom
+    /// factor off by `cornerFactorScale`. Without this, a corner click would
+    /// hit the hard clamp and the cursor would visibly slide to a corner of
+    /// the zoomed frame; with it, the cursor stays near (not exactly at)
+    /// frame centre and the framing feels deliberate.
+    private static func frameAnchor(
+        rawCx: Double,
+        rawCy: Double,
+        baseFactor: CGFloat
+    ) -> (cx: Double, cy: Double, factor: CGFloat) {
+        func axisBlend(_ v: Double) -> Double {
+            let dEdge = min(v, 1 - v)
+            guard dEdge < edgeDeadzone else { return v }
+            let t = dEdge / edgeDeadzone           // 1 at boundary, 0 at edge
+            let pull = edgeBlendStrength * (1 - t) // 0 outside, 0.6 at edge
+            return v + (0.5 - v) * pull
+        }
+        let cx = axisBlend(rawCx)
+        let cy = axisBlend(rawCy)
+        let inCornerX = min(rawCx, 1 - rawCx) < cornerCutoff
+        let inCornerY = min(rawCy, 1 - rawCy) < cornerCutoff
+        let factor = (inCornerX && inCornerY)
+            ? max(1.0, 1.0 + (baseFactor - 1.0) * cornerFactorScale)
+            : baseFactor
+        return (cx, cy, factor)
     }
 
     /// Per-frame zoom centre. When the keyframe carries a non-empty

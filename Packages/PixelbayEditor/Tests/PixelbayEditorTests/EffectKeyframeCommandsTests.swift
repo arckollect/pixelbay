@@ -616,6 +616,38 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         XCTAssertEqual(project.effects[0].timelineRange.end.seconds, 5.4, accuracy: 1e-9)
     }
 
+    func test_generateManualZooms_gestureMark_snapsAnchorToGrid() throws {
+        // Phase 3c: pinned gesture marks snap to a 0.05 norm-unit grid so
+        // sample-time jitter doesn't displace the rect by a few pixels.
+        // 0.523 / 0.05 = 10.46 → round → 10 → 0.50.
+        var (project, _) = EditorFixture.minimalSingleClip()
+        _ = try GenerateManualZoomsCommand(
+            marks: [AutoZoomClick(timelineTime: 4.0, centerX: 0.523, centerY: 0.487,
+                                  source: .shakeGesture)]
+        ).apply(to: &project)
+        XCTAssertEqual(project.effects.count, 1)
+        XCTAssertEqual(project.effects[0].centerX, 0.50, accuracy: 1e-9)
+        XCTAssertEqual(project.effects[0].centerY, 0.50, accuracy: 1e-9)
+    }
+
+    func test_generateManualZooms_hotkeyMark_doesNotSnap() throws {
+        // Hotkey marks track the live cursor — grid-quantization would read
+        // as stepped motion, so they must pass through unmodified.
+        var (project, _) = EditorFixture.minimalSingleClip()
+        let trajectory = [
+            MouseTrajectorySample(timelineTime: 4.0, centerX: 0.523, centerY: 0.487),
+            MouseTrajectorySample(timelineTime: 4.5, centerX: 0.6, centerY: 0.5)
+        ]
+        _ = try GenerateManualZoomsCommand(
+            marks: [AutoZoomClick(timelineTime: 4.0, centerX: 0.523, centerY: 0.487,
+                                  source: .hotkey)],
+            mouseTrajectory: trajectory
+        ).apply(to: &project)
+        XCTAssertEqual(project.effects.count, 1)
+        XCTAssertEqual(project.effects[0].centerX, 0.523, accuracy: 1e-9)
+        XCTAssertEqual(project.effects[0].centerY, 0.487, accuracy: 1e-9)
+    }
+
     // MARK: - Zoom-keyframe non-overlap hardening (slice #11.f)
 
     func test_autoZoom_forcedSplit_truncatesPreviousClusterToAvoidOverlap() throws {

@@ -91,6 +91,14 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
     /// of the bracket is one decimated sample away on a typical recording.
     private static let cursorVelocityHalfWindow: Double = 1.0 / 120.0
 
+    /// Cursor sprite enlarges by `(zoomFactor - 1) · this` while a zoom is
+    /// engaged. 0.5 yields ~1.30× cursor at a 1.6× zoom (the default
+    /// auto-zoom), matching what users perceive as "the cursor grew
+    /// along with the zoomed UI." Multiplied into `CursorSettings.scale`
+    /// per frame so the boost rides the ease curve naturally (no boost
+    /// when zoom is idle, peak at hold).
+    private static let cursorScaleBoostPerZoomUnit: Double = 0.5
+
     private func handle(request: AVAsynchronousVideoCompositionRequest) {
         if cancelled {
             request.finishCancelledRequest()
@@ -154,10 +162,25 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
             let next = sampleCursorTrajectory(instruction.cursorTrajectory, at: t + dt)
             let vx = (next.x - prior.x) / (2 * dt)
             let vy = (next.y - prior.y) / (2 * dt)
+            // Cursor enlarges while a zoom is engaged so it stays
+            // proportionally visible against the zoomed-in UI. Boost is
+            // derived from the live zoom factor (post-effect screen width
+            // ÷ base screen width) rather than poked through from
+            // EffectEvaluator: that keeps the compositor stateless about
+            // keyframe geometry and naturally tracks the ease in/out
+            // (factor=1.0 at idle → no boost, ramps up mid-ease, peaks at
+            // hold, then ramps back down). The coefficient is tuned so a
+            // 1.6× zoom (the default auto-zoom) yields ~1.30× cursor —
+            // matches the screen scale-up the user perceives as "the UI
+            // got bigger so the cursor should too".
+            let zoomFactor = baseLayout.screen.size.width > 0
+                ? layout.screen.size.width / baseLayout.screen.size.width
+                : 1.0
+            let zoomCursorBoost = 1.0 + max(0.0, Double(zoomFactor) - 1.0) * Self.cursorScaleBoostPerZoomUnit
             cursorState = CursorRenderState(
                 xFractionInScreen: position.x,
                 yFractionInScreen: position.y,
-                scale: cursorSettings.scale,
+                scale: cursorSettings.scale * zoomCursorBoost,
                 velocityXFractionPerSecond: vx,
                 velocityYFractionPerSecond: vy
             )

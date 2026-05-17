@@ -84,4 +84,80 @@ public enum MouseTrajectory {
         }
         return result
     }
+
+    /// Camera-follow damping. Smooths the master cursor trajectory through
+    /// a critically-damped spring — no overshoot, decelerates naturally at
+    /// the ends of a sweep, tracks slow precise motion closely. Fed once
+    /// per composition build into BOTH the cursor sprite render and the
+    /// zoom anchor (see `PreviewCompositionBuilder.build`), so sprite and
+    /// camera move as one body — the cursor visibly glides, and the zoom
+    /// stays glued to the cursor instead of trailing behind it. This is
+    /// the Screen Studio / Loom pattern; the earlier split-path design
+    /// (raw sprite + damped anchor) produced a cursor that raced toward
+    /// the frame edge during fast sweeps, which the user reported as
+    /// "too quick and hard for the eyes to follow."
+    ///
+    /// Time-domain (not sample-domain) so the feel is consistent across
+    /// recording rates: at `tau = 0.18` the spring reaches 95 % of any
+    /// step change in ~0.85 s regardless of whether samples arrive at
+    /// 30 Hz or 120 Hz.
+    ///
+    /// `tau` is the spring's natural-frequency time constant
+    /// (`ωn = 1/τ`). Now that the output drives BOTH sprite and anchor,
+    /// τ controls a unified visual lag (cursor sprite vs real input),
+    /// not a camera-vs-cursor lag. Steady-state sprite lag at a 0.2
+    /// norm/sec "precise click" move is `2·v·τ` ≈ 0.072 norm-units
+    /// (~7 % of frame width) — noticeable but not soggy; the spring
+    /// catches up in ~5τ ≈ 0.9 s of pointer-stop, so clicks visually
+    /// resolve quickly. History: 0.12 (original, anchor-only damping)
+    /// read as "too quick"; 0.25 (anchor-only) read as buttery but let
+    /// the cursor drift to the edge; 0.18 is the current shared-damping
+    /// default. Sweet-spot range is roughly 0.15–0.22; below 0.12 the
+    /// motion stops feeling cinematic, above 0.25 the sprite feels
+    /// delayed on precise clicks.
+    public static func cameraDamped(
+        _ master: [MouseTrajectorySample],
+        tau: Double = 0.18
+    ) -> [MouseTrajectorySample] {
+        guard master.count > 1 else { return master }
+        let safeTau = max(0.05, tau)
+        // Critically damped second-order: ω = 1/τ, damping = 1. Position
+        // converges to target without overshoot in ~5τ. Semi-implicit
+        // Euler with variable dt (input samples are unevenly spaced under
+        // capture-side coalescing). Sub-stepping caps dt at τ/4 so large
+        // gaps don't blow up the integrator on slow recordings.
+        let omega: Double = 1.0 / safeTau
+        let stiffness: Double = omega * omega
+        let dampingCoef: Double = 2.0 * omega
+        var result: [MouseTrajectorySample] = []
+        result.reserveCapacity(master.count)
+        var x: Double = master[0].centerX
+        var y: Double = master[0].centerY
+        var vx: Double = 0.0
+        var vy: Double = 0.0
+        var prevT: Double = master[0].timelineTime
+        result.append(master[0])
+        let maxStep: Double = safeTau * 0.25
+        for i in 1..<master.count {
+            let sample = master[i]
+            var remaining: Double = max(0.0, sample.timelineTime - prevT)
+            while remaining > 0 {
+                let dt: Double = min(maxStep, remaining)
+                let ax: Double = stiffness * (sample.centerX - x) - dampingCoef * vx
+                let ay: Double = stiffness * (sample.centerY - y) - dampingCoef * vy
+                vx += ax * dt
+                vy += ay * dt
+                x += vx * dt
+                y += vy * dt
+                remaining -= dt
+            }
+            prevT = sample.timelineTime
+            result.append(MouseTrajectorySample(
+                timelineTime: sample.timelineTime,
+                centerX: x,
+                centerY: y
+            ))
+        }
+        return result
+    }
 }

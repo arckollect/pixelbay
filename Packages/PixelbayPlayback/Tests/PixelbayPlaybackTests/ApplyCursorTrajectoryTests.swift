@@ -91,4 +91,74 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         XCTAssertNil(result[0].trajectory)
         XCTAssertNil(result[1].trajectory)
     }
+
+    // Contract guard: applyCursorTrajectory must NOT re-smooth the input.
+    // The caller (PreviewCompositionBuilder.build) runs MouseTrajectory.cameraDamped
+    // once and feeds the smoothed result to both this helper AND the cursor
+    // sprite render path — re-smoothing here would double-filter the
+    // zoom-anchor while leaving the sprite singly-filtered, re-introducing
+    // the sprite-races-ahead-of-camera bug the shared-smoothing design
+    // exists to prevent.
+    func test_inputAssumedPreSmoothed_windowingPreservesValues() {
+        let input: [MouseTrajectorySample] = [
+            MouseTrajectorySample(timelineTime: 1.0, centerX: 0.10, centerY: 0.20),
+            MouseTrajectorySample(timelineTime: 1.5, centerX: 0.30, centerY: 0.40),
+            MouseTrajectorySample(timelineTime: 2.0, centerX: 0.50, centerY: 0.60),
+            MouseTrajectorySample(timelineTime: 2.5, centerX: 0.70, centerY: 0.80)
+        ]
+        let unpinned = makeZoom(start: 1.0, duration: 1.5, anchorMode: .followCursor)
+        let result = PreviewCompositionBuilder.applyCursorTrajectory(
+            to: [unpinned],
+            cursorTrajectory: input
+        )
+        let trajectory = result[0].trajectory ?? []
+        XCTAssertEqual(trajectory.count, input.count,
+                       "all 4 input samples fall in [1.0, 2.5] — none should be dropped or filtered out")
+        for (i, sample) in trajectory.enumerated() {
+            XCTAssertEqual(sample.x, input[i].centerX, accuracy: 1e-9,
+                           "windowing must not alter x — sample \(i) would change if smoothing were re-applied here")
+            XCTAssertEqual(sample.y, input[i].centerY, accuracy: 1e-9,
+                           "windowing must not alter y — sample \(i)")
+        }
+    }
+
+    // Shared-smoothing contract: when the caller pre-smooths with
+    // cameraDamped() and feeds the result to BOTH consumers, the
+    // keyframe.trajectory samples carry the same (x, y) values as the
+    // smoothed master at matching timestamps. This is what makes the
+    // cursor sprite and zoom anchor track in lockstep (Screen Studio /
+    // Loom behaviour) instead of the cursor sprite racing ahead of the
+    // camera frame.
+    func test_sharedSmoothing_spriteAndAnchorReadSamePositions() {
+        let raw: [MouseTrajectorySample] = (0..<20).map {
+            MouseTrajectorySample(
+                timelineTime: Double($0) * 0.05,
+                centerX: 0.30 + 0.02 * Double($0),
+                centerY: 0.50
+            )
+        }
+        let smoothed = MouseTrajectory.cameraDamped(raw)
+        let unpinned = makeZoom(start: 0.2, duration: 0.6, anchorMode: .followCursor)
+        let result = PreviewCompositionBuilder.applyCursorTrajectory(
+            to: [unpinned],
+            cursorTrajectory: smoothed
+        )
+        let trajectory = result[0].trajectory ?? []
+        XCTAssertFalse(trajectory.isEmpty,
+                       "smoothed samples in [0.2, 0.8] must populate the keyframe trajectory")
+        // Each windowed sample's (x, y) must equal the smoothed master's
+        // (centerX, centerY) at the matching absolute timeline timestamp.
+        // window() shifts t by -kf.start but never alters x/y.
+        for sample in trajectory {
+            let absoluteT = sample.t + 0.2
+            guard let source = smoothed.first(where: { abs($0.timelineTime - absoluteT) < 1e-9 }) else {
+                XCTFail("no smoothed master sample at t=\(absoluteT)")
+                continue
+            }
+            XCTAssertEqual(sample.x, source.centerX, accuracy: 1e-9,
+                           "sprite (smoothed master) and anchor (windowed slice) must read identical x at t=\(absoluteT)")
+            XCTAssertEqual(sample.y, source.centerY, accuracy: 1e-9,
+                           "sprite and anchor must read identical y at t=\(absoluteT)")
+        }
+    }
 }

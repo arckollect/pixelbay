@@ -330,18 +330,20 @@ struct EffectsInspector: View {
             )
             let optionalTrajectory: [MouseTrajectorySample]? = trajectory.isEmpty ? nil : trajectory
 
-            // Filtered clicks (drop fast-movement clicks) + deceleration transitions.
-            // The command's cluster pass dedupes the merged stream.
+            // Unified intent-scoring detector. Replaces the prior pair of
+            // independent boolean filters (filterClicks dwell gate +
+            // decelerationZooms velocity transitions) with one scored gate
+            // over click + decel candidates. The command's cluster pass
+            // still merges nearby survivors into single zooms.
             let rawClicks = AutoZoomService.autoZoomClicks(
                 from: sidecar,
                 screenPixelSize: naturalSize
             )
-            let filteredClicks = AutoZoomService.filterClicks(
-                rawClicks,
-                masterTrajectory: optionalTrajectory
+            let candidates = IntentScorer.score(
+                rawClicks: rawClicks,
+                trajectory: trajectory
             )
-            let decelClicks = AutoZoomService.decelerationZooms(from: optionalTrajectory)
-            let autoClicks = (filteredClicks + decelClicks).sorted { $0.timelineTime < $1.timelineTime }
+            let autoClicks = IntentScorer.selectFiring(candidates)
 
             if autoClicks.isEmpty {
                 lastError = "No usable clicks in sidecar (all filtered or before capture start)."
