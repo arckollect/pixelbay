@@ -617,17 +617,32 @@ final class EffectKeyframeCommandsTests: XCTestCase {
     }
 
     func test_generateManualZooms_gestureMark_snapsAnchorToGrid() throws {
-        // Phase 3c: pinned gesture marks snap to a 0.05 norm-unit grid so
-        // sample-time jitter doesn't displace the rect by a few pixels.
-        // 0.523 / 0.05 = 10.46 → round → 10 → 0.50.
+        // Phase 3c: pinned gesture marks snap to a 0.10 norm-unit grid
+        // (10×10 cells) so sample-time jitter doesn't displace the rect by
+        // a few pixels and same-spot shakes land on the same cell. Was
+        // 0.05 (20×20) initially; coarsened to 0.10 after user feedback
+        // that snap "still wasn't strong enough".
         var (project, _) = EditorFixture.minimalSingleClip()
         _ = try GenerateManualZoomsCommand(
-            marks: [AutoZoomClick(timelineTime: 4.0, centerX: 0.523, centerY: 0.487,
-                                  source: .shakeGesture)]
+            marks: [
+                // 0.523 / 0.10 = 5.23 → round → 5 → 0.50 (same outcome
+                // under both 0.05 and 0.10; kept as a continuity check).
+                AutoZoomClick(timelineTime: 4.0, centerX: 0.523, centerY: 0.487,
+                              source: .shakeGesture),
+                // 0.55 / 0.10 = 5.5 → banker's-round → 6 → 0.60. Under the
+                // older 0.05 grid, 0.55 would round to itself (11.0). This
+                // case fails if anyone reverts the grid constant.
+                AutoZoomClick(timelineTime: 6.0, centerX: 0.55, centerY: 0.55,
+                              source: .shakeGesture)
+            ]
         ).apply(to: &project)
-        XCTAssertEqual(project.effects.count, 1)
-        XCTAssertEqual(project.effects[0].centerX, 0.50, accuracy: 1e-9)
-        XCTAssertEqual(project.effects[0].centerY, 0.50, accuracy: 1e-9)
+        XCTAssertEqual(project.effects.count, 2)
+        let sorted = project.effects.sorted { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
+        XCTAssertEqual(sorted[0].centerX, 0.50, accuracy: 1e-9)
+        XCTAssertEqual(sorted[0].centerY, 0.50, accuracy: 1e-9)
+        XCTAssertEqual(sorted[1].centerX, 0.60, accuracy: 1e-9,
+                       "0.55 must round up to 0.60 on the 0.10 grid (banker's-round half-step)")
+        XCTAssertEqual(sorted[1].centerY, 0.60, accuracy: 1e-9)
     }
 
     func test_generateManualZooms_hotkeyMark_doesNotSnap() throws {

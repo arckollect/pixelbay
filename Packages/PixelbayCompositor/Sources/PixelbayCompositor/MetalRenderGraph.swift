@@ -532,16 +532,15 @@ public final class MetalRenderGraph: @unchecked Sendable {
         //   velocity * shutterTime          → fraction of screen-content traversed during the shutter
         //   * screen.size.width / widthPx   → fraction of the cursor sprite width that maps to
         //
-        // `shutterTime` is the synthetic motion-blur exposure window. 1/60 s
-        // matches one render-frame at 60 fps, so the trail length lines up
-        // with what the eye expects from genuine inter-frame motion. Was
-        // 1/30 s originally, dropped to 1/60 after user feedback that fast
-        // sweeps "looked blurred / smeared" — the longer shutter pushed the
-        // kernel into its ±0.5 UV clamp on extreme motion, so the sprite
-        // read as a wash rather than a tracked cursor with a trail. The
-        // kernel is now clamped tighter (±0.3 UV) so even at saturation
-        // the cursor sprite remains visually identifiable, not a smear.
-        let shutterTime: CGFloat = 1.0 / 60.0
+        // `shutterTime` is the synthetic motion-blur exposure window. 1/120 s
+        // is a half-frame at 60 fps, so the trail length is a hint of
+        // sub-frame motion rather than a full inter-frame streak. Was 1/30 s
+        // originally, then 1/60 s, now 1/120 s after user feedback that fast
+        // sweeps still read as a "blur smear moving across the screen"
+        // rather than a recognizable cursor with a small motion trail. The
+        // kernel is also clamped tighter (±0.15 UV, down from ±0.3) so even
+        // at saturation the cursor sprite stays clearly identifiable.
+        let shutterTime: CGFloat = 1.0 / 120.0
         let traversedXContent = CGFloat(state.velocityXFractionPerSecond) * shutterTime * screen.size.width
         let traversedYContent = CGFloat(state.velocityYFractionPerSecond) * shutterTime * screen.size.height
         let blurOffsetUVX = clampUV(Float(traversedXContent / widthPx))
@@ -560,12 +559,13 @@ public final class MetalRenderGraph: @unchecked Sendable {
     }
 
     private func clampUV(_ v: Float) -> Float {
-        // ±0.3 of the cursor sprite UV — keeps the sprite recognisable
-        // even when motion saturates the kernel. The taps still stay
-        // inside `address::clamp_to_edge` territory, so no wrap-side
-        // garbage leaks in. Was ±0.5 originally; tightened with the
-        // shutter shortening so fast sweeps streak instead of smearing.
-        max(-0.3, min(0.3, v))
+        // ±0.15 of the cursor sprite UV — caps the kernel-tap spread so the
+        // sprite shape stays readable on saturation. Was ±0.5 originally,
+        // then ±0.3; tightened further after user feedback that fast sweeps
+        // still read as a smear, with the goal of "legible cursor + small
+        // trail" rather than a moving blob. The taps still stay inside
+        // `address::clamp_to_edge` territory, so no wrap-side garbage leaks.
+        max(-0.15, min(0.15, v))
     }
 
     // Triangle-strip quad covering destinationRect in clip space (-1..+1).

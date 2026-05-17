@@ -1024,16 +1024,19 @@ public struct GenerateManualZoomsCommand: EditCommand {
                 : mouseTrajectory.map {
                     AutoZoomService.trajectoryWindow($0, timelineRange: range)
                 }
-            // Phase 3c: snap pinned (gesture) anchors to a 0.05 norm-unit
-            // grid (20×20 cells). Kills the sub-cell jitter that motivated
+            // Phase 3c: snap pinned (gesture) anchors to a 0.10 norm-unit
+            // grid (10×10 cells). Kills the sub-cell jitter that motivated
             // the earlier `.pinned + trajectory=nil` defensive patch — gesture
             // samples come in slightly noisy in space, and rounding to a
             // visible cell makes back-to-back captures with the same intent
-            // land on the same anchor. Follow-cursor (hotkey) marks are not
-            // snapped — they track the live cursor and quantization would
-            // read as stepped motion.
-            let anchorX = staticAnchor ? (mark.centerX / 0.05).rounded() * 0.05 : mark.centerX
-            let anchorY = staticAnchor ? (mark.centerY / 0.05).rounded() * 0.05 : mark.centerY
+            // land on the same anchor. Grid was 0.05 (20×20) initially;
+            // coarsened to 0.10 after user feedback that the snap "still
+            // wasn't strong enough" and same-spot shake gestures wobbled
+            // cell-to-cell. Follow-cursor (hotkey) marks are not snapped —
+            // they track the live cursor and quantization would read as
+            // stepped motion.
+            let anchorX = staticAnchor ? (mark.centerX / 0.10).rounded() * 0.10 : mark.centerX
+            let anchorY = staticAnchor ? (mark.centerY / 0.10).rounded() * 0.10 : mark.centerY
             // anchorMode: .pinned is the load-bearing part for gesture marks.
             // Setting trajectory: nil alone is NOT enough — at composition
             // build time, `PreviewComposition.applyCursorTrajectory` re-slices

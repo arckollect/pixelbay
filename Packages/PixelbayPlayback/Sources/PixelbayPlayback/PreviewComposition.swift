@@ -152,28 +152,25 @@ public enum PreviewCompositionBuilder {
         let duration = maxTimelineEnd
         let outputSize = computeOutputSize(from: screenSize)
         let resolvedPreset = wallpaperSource?.resolve(project.layout) ?? project.layout
-        // Smooth the master cursor trajectory ONCE per composition build,
-        // then feed the same smoothed array to both consumers (cursor
-        // sprite + zoom anchor). The split implementation (raw sprite +
-        // damped anchor) caused the cursor to visibly drift toward the
-        // frame edge during cursor-follow zooms — the camera lagged but
-        // the cursor sprite raced ahead at input speed. Sharing one
-        // smoothed trajectory is the Screen Studio / Loom pattern: the
-        // cursor itself glides AND stays glued to the zoom centre.
-        //
-        // Hoisted above the `cursorSyntheticallyRendered` branch so the
-        // zoom-anchor path still gets damping on legacy bundles (recorded
-        // with the OS cursor baked into the screen frame). Smoothing
-        // applies even when the synthetic sprite is disabled.
-        let smoothedMaster: [MouseTrajectorySample]
+        // Velocity-adaptive shared-damping (Screen Studio / Loom pattern).
+        // `MouseTrajectory.cameraDamped` runs ONCE per composition build
+        // and feeds the same smoothed array to BOTH consumers (cursor
+        // sprite + zoom anchor) so sprite and camera move as one body.
+        // The damping is velocity-adaptive (τ collapses toward 0.05 when
+        // the cursor is near-stationary, ramps to 0.32 on fast sweeps),
+        // which avoids the "delayed cursor on click" failure mode the
+        // earlier fixed-τ=0.18 shared design hit while still giving fast
+        // sweeps the buttery glide the user is chasing — moving the eye
+        // can actually follow instead of strobing past.
+        let dampedMaster: [MouseTrajectorySample]
         if let master = cursorTrajectory, !master.isEmpty {
-            smoothedMaster = MouseTrajectory.cameraDamped(master)
+            dampedMaster = MouseTrajectory.cameraDamped(master)
         } else {
-            smoothedMaster = []
+            dampedMaster = []
         }
         let effects = applyCursorTrajectory(
             to: project.effects,
-            cursorTrajectory: smoothedMaster.isEmpty ? nil : smoothedMaster
+            cursorTrajectory: dampedMaster.isEmpty ? nil : dampedMaster
         )
         // Phase 3c — only enable the synthetic cursor pass when the screen
         // asset was captured with `showsCursor = false` (flagged via
@@ -185,7 +182,7 @@ public enum PreviewCompositionBuilder {
             asset.kind == .display && asset.cursorRenderedSynthetically
         }
         let cursorTrajectoryForRender: [MouseTrajectorySample] =
-            cursorSyntheticallyRendered ? smoothedMaster : []
+            cursorSyntheticallyRendered ? dampedMaster : []
         let videoComposition = makeVideoComposition(
             duration: duration,
             outputSize: outputSize,
@@ -341,12 +338,22 @@ public enum PreviewCompositionBuilder {
     /// stored sample for the extended portion.
     ///
     /// **Input is assumed pre-smoothed by the caller.** `build()` runs
-    /// `MouseTrajectory.cameraDamped` once at the top and passes the
-    /// result here AND to the cursor sprite render path, so both
-    /// consumers share one filter pass (cursor sprite stays glued to the
-    /// zoom anchor). Re-running damping inside this helper would
-    /// double-filter the zoom-anchor path while leaving the sprite path
-    /// undamped — the bug this contract exists to prevent.
+    /// `MouseTrajectory.cameraDamped` (velocity-adaptive) once at the top
+    /// and feeds the result here AND to the cursor-sprite render path, so
+    /// both consumers share one filter pass — sprite + camera move
+    /// together. Re-running damping inside this helper would double-filter
+    /// the anchor path while leaving the sprite singly-filtered, which
+    /// would re-introduce the sprite-races-ahead-of-camera bug.
+    ///
+    /// **Lazy-follow deadzone.** After windowing each cursor-follow keyframe's
+    /// slice from the master damped trajectory, the slice is piped through
+    /// `MouseTrajectory.lazyFollow` so the zoom anchor sits a generous
+    /// deadzone behind the cursor sprite. The sprite still renders at the
+    /// damped cursor's true position (read from `cursorTrajectoryForRender`
+    /// inside `PixelbayVideoCompositor`), so the cursor visibly drifts off
+    /// the zoom-frame center until it approaches the padding edge — the
+    /// Screen Studio look. Pinned (gesture) keyframes still short-circuit
+    /// before this stage.
     ///
     /// No-op (returns input unchanged) when `cursorTrajectory` is nil or
     /// empty. Non-zoom keyframes pass through untouched. When a re-slice
@@ -376,9 +383,15 @@ public enum PreviewCompositionBuilder {
             // it with a fresh windowed slice of the master cursor path,
             // re-enabling the jitter the pinned mode exists to prevent.
             if kf.anchorMode == .pinned { return kf }
-            let slice = MouseTrajectory.window(master, timelineRange: kf.timelineRange)
+            let windowed = MouseTrajectory.window(master, timelineRange: kf.timelineRange)
+            guard !windowed.isEmpty else {
+                var next = kf
+                next.trajectory = nil
+                return next
+            }
+            let lazy = MouseTrajectory.lazyFollow(windowed, zoomFactor: kf.zoomFactor)
             var next = kf
-            next.trajectory = slice.isEmpty ? nil : slice
+            next.trajectory = lazy
             return next
         }
     }

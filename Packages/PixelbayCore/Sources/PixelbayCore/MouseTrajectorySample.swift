@@ -85,50 +85,49 @@ public enum MouseTrajectory {
         return result
     }
 
-    /// Camera-follow damping. Smooths the master cursor trajectory through
-    /// a critically-damped spring — no overshoot, decelerates naturally at
-    /// the ends of a sweep, tracks slow precise motion closely. Fed once
-    /// per composition build into BOTH the cursor sprite render and the
-    /// zoom anchor (see `PreviewCompositionBuilder.build`), so sprite and
-    /// camera move as one body — the cursor visibly glides, and the zoom
-    /// stays glued to the cursor instead of trailing behind it. This is
-    /// the Screen Studio / Loom pattern; the earlier split-path design
-    /// (raw sprite + damped anchor) produced a cursor that raced toward
-    /// the frame edge during fast sweeps, which the user reported as
-    /// "too quick and hard for the eyes to follow."
+    /// Camera-follow damping with **velocity-adaptive** time constant.
+    /// Smooths the master cursor trajectory through a critically-damped
+    /// spring whose `τ` scales with the cursor's instantaneous speed:
+    /// near-stationary input collapses τ toward `tauLow` so the spring
+    /// tracks tightly (no perceptible lag on precise clicks), while a
+    /// fast sweep ramps τ toward `tauHigh` so the on-screen motion reads
+    /// as a long glide rather than a strobe-fast streak. Output drives
+    /// BOTH the cursor sprite and the zoom anchor (Screen Studio /
+    /// Loom pattern) — sharing one filter keeps sprite + camera locked
+    /// together; the velocity adaptivity is what avoids the "delayed
+    /// cursor on click" failure mode the old fixed-τ shared design hit.
     ///
-    /// Time-domain (not sample-domain) so the feel is consistent across
-    /// recording rates: at `tau = 0.18` the spring reaches 95 % of any
-    /// step change in ~0.85 s regardless of whether samples arrive at
-    /// 30 Hz or 120 Hz.
+    /// Speed is measured as the magnitude of the inter-sample displacement
+    /// per second (norm-units / s), then low-passed by a one-pole EMA
+    /// (`velocityEmaTau`) so τ doesn't whiplash on micro-jitter. The blend
+    /// from `tauLow` → `tauHigh` is a smoothstep over `[vLow, vHigh]`.
     ///
-    /// `tau` is the spring's natural-frequency time constant
-    /// (`ωn = 1/τ`). Now that the output drives BOTH sprite and anchor,
-    /// τ controls a unified visual lag (cursor sprite vs real input),
-    /// not a camera-vs-cursor lag. Steady-state sprite lag at a 0.2
-    /// norm/sec "precise click" move is `2·v·τ` ≈ 0.072 norm-units
-    /// (~7 % of frame width) — noticeable but not soggy; the spring
-    /// catches up in ~5τ ≈ 0.9 s of pointer-stop, so clicks visually
-    /// resolve quickly. History: 0.12 (original, anchor-only damping)
-    /// read as "too quick"; 0.25 (anchor-only) read as buttery but let
-    /// the cursor drift to the edge; 0.18 is the current shared-damping
-    /// default. Sweet-spot range is roughly 0.15–0.22; below 0.12 the
-    /// motion stops feeling cinematic, above 0.25 the sprite feels
-    /// delayed on precise clicks.
+    /// Defaults (norm-units = fraction of screen width):
+    ///   • `tauLow = 0.05` → 5τ settle = 0.25 s when stationary (snappy click feel)
+    ///   • `tauHigh = 0.32` → big glide on cross-screen sweeps
+    ///   • `vLow = 0.15`, `vHigh = 1.20` → adaptivity kicks in once the
+    ///     cursor crosses casual-motion speed, fully engaged on screen-sweep
+    ///   • `velocityEmaTau = 0.05` → speed estimate catches up to a stop
+    ///     within ~0.1 s, so τ drops fast when the user halts to click
+    ///
+    /// Steady-state lag at constant `v` is `2·v·τ(v)`; at the precise-click
+    /// regime (v ≈ 0.2 norm/s, τ ≈ 0.05) that's ~0.02 norm-units — beneath
+    /// perception. During a fast sweep the spring never reaches steady
+    /// state (sweep is shorter than ~5τ ≈ 1.6 s), so the trailing distance
+    /// is bounded by the sweep length and reads as a glide that decelerates
+    /// into the destination.
     public static func cameraDamped(
         _ master: [MouseTrajectorySample],
-        tau: Double = 0.18
+        tauLow: Double = 0.05,
+        tauHigh: Double = 0.32,
+        vLow: Double = 0.15,
+        vHigh: Double = 1.20,
+        velocityEmaTau: Double = 0.05
     ) -> [MouseTrajectorySample] {
         guard master.count > 1 else { return master }
-        let safeTau = max(0.05, tau)
-        // Critically damped second-order: ω = 1/τ, damping = 1. Position
-        // converges to target without overshoot in ~5τ. Semi-implicit
-        // Euler with variable dt (input samples are unevenly spaced under
-        // capture-side coalescing). Sub-stepping caps dt at τ/4 so large
-        // gaps don't blow up the integrator on slow recordings.
-        let omega: Double = 1.0 / safeTau
-        let stiffness: Double = omega * omega
-        let dampingCoef: Double = 2.0 * omega
+        let safeTauLow = max(0.01, tauLow)
+        let safeTauHigh = max(safeTauLow, tauHigh)
+        let safeVelEma = max(0.005, velocityEmaTau)
         var result: [MouseTrajectorySample] = []
         result.reserveCapacity(master.count)
         var x: Double = master[0].centerX
@@ -136,20 +135,42 @@ public enum MouseTrajectory {
         var vx: Double = 0.0
         var vy: Double = 0.0
         var prevT: Double = master[0].timelineTime
+        var smoothedSpeed: Double = 0.0
         result.append(master[0])
-        let maxStep: Double = safeTau * 0.25
         for i in 1..<master.count {
             let sample = master[i]
-            var remaining: Double = max(0.0, sample.timelineTime - prevT)
+            let dtTotal: Double = max(0.0, sample.timelineTime - prevT)
+            if dtTotal <= 0 {
+                result.append(MouseTrajectorySample(
+                    timelineTime: sample.timelineTime,
+                    centerX: x,
+                    centerY: y
+                ))
+                continue
+            }
+            let dx = sample.centerX - master[i - 1].centerX
+            let dy = sample.centerY - master[i - 1].centerY
+            let inputSpeed = (dx * dx + dy * dy).squareRoot() / dtTotal
+            // First-order low-pass on speed: dt-aware alpha so the EMA
+            // behaves consistently across capture rates.
+            let alpha = 1.0 - exp(-dtTotal / safeVelEma)
+            smoothedSpeed += alpha * (inputSpeed - smoothedSpeed)
+            let blend = MouseTrajectory.smoothstep(vLow, vHigh, smoothedSpeed)
+            let tau = safeTauLow + (safeTauHigh - safeTauLow) * blend
+            let omega = 1.0 / tau
+            let stiffness = omega * omega
+            let dampingCoef = 2.0 * omega
+            let maxStep = tau * 0.25
+            var remaining = dtTotal
             while remaining > 0 {
-                let dt: Double = min(maxStep, remaining)
-                let ax: Double = stiffness * (sample.centerX - x) - dampingCoef * vx
-                let ay: Double = stiffness * (sample.centerY - y) - dampingCoef * vy
-                vx += ax * dt
-                vy += ay * dt
-                x += vx * dt
-                y += vy * dt
-                remaining -= dt
+                let step = min(maxStep, remaining)
+                let ax = stiffness * (sample.centerX - x) - dampingCoef * vx
+                let ay = stiffness * (sample.centerY - y) - dampingCoef * vy
+                vx += ax * step
+                vy += ay * step
+                x += vx * step
+                y += vy * step
+                remaining -= step
             }
             prevT = sample.timelineTime
             result.append(MouseTrajectorySample(
@@ -157,6 +178,68 @@ public enum MouseTrajectory {
                 centerX: x,
                 centerY: y
             ))
+        }
+        return result
+    }
+
+    @inline(__always)
+    private static func smoothstep(_ edge0: Double, _ edge1: Double, _ x: Double) -> Double {
+        guard edge1 > edge0 else { return x < edge0 ? 0 : 1 }
+        let t = min(1.0, max(0.0, (x - edge0) / (edge1 - edge0)))
+        return t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Lazy-follow deadzone for cursor-follow zoom anchors. The Screen Studio
+    /// pattern: the visible zoom frame holds still while the cursor roams
+    /// inside a generous central region, and only pans once the cursor
+    /// approaches the padding edge.
+    ///
+    /// Implementation: walk the smoothed cursor samples in order, maintain
+    /// a single 2D anchor seeded at `samples[0]`. For each subsequent
+    /// sample, if the cursor strays past the deadzone half-width on either
+    /// axis, drag the anchor along by exactly the excess (hard rectangular
+    /// pull-toward-edge). The result is a piecewise-flat-then-ramp
+    /// trajectory that Catmull-Rom interpolation downstream
+    /// (`EffectEvaluator.zoomCenter`) smooths into clean pans.
+    ///
+    /// `deadzoneFraction` is the fraction of the *zoomed* viewport that the
+    /// cursor can occupy before the frame starts following — 0.50 means the
+    /// cursor can wander across the middle 50% of the visible frame
+    /// without the camera moving. Maps to source-norm half-width as
+    /// `(deadzoneFraction / 2) / max(1, zoomFactor)` per axis.
+    ///
+    /// Pinned (gesture) keyframes bypass this entirely upstream — they want
+    /// the anchor locked, not lazy-following.
+    public static func lazyFollow(
+        _ samples: [ZoomTrajectorySample],
+        zoomFactor: Double,
+        deadzoneFraction: Double = 0.50
+    ) -> [ZoomTrajectorySample] {
+        guard let first = samples.first else { return [] }
+        guard samples.count > 1 else { return samples }
+        let safeZoom = max(1.0, zoomFactor)
+        let halfX = (deadzoneFraction / 2.0) / safeZoom
+        let halfY = halfX
+        var anchorX = first.x
+        var anchorY = first.y
+        var result: [ZoomTrajectorySample] = []
+        result.reserveCapacity(samples.count)
+        result.append(first)
+        for i in 1..<samples.count {
+            let s = samples[i]
+            let dx = s.x - anchorX
+            if dx > halfX {
+                anchorX += dx - halfX
+            } else if dx < -halfX {
+                anchorX += dx + halfX
+            }
+            let dy = s.y - anchorY
+            if dy > halfY {
+                anchorY += dy - halfY
+            } else if dy < -halfY {
+                anchorY += dy + halfY
+            }
+            result.append(ZoomTrajectorySample(t: s.t, x: anchorX, y: anchorY))
         }
         return result
     }
