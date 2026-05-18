@@ -345,15 +345,18 @@ public enum PreviewCompositionBuilder {
     /// the anchor path while leaving the sprite singly-filtered, which
     /// would re-introduce the sprite-races-ahead-of-camera bug.
     ///
-    /// **Lazy-follow deadzone.** After windowing each cursor-follow keyframe's
-    /// slice from the master damped trajectory, the slice is piped through
-    /// `MouseTrajectory.lazyFollow` so the zoom anchor sits a generous
-    /// deadzone behind the cursor sprite. The sprite still renders at the
-    /// damped cursor's true position (read from `cursorTrajectoryForRender`
-    /// inside `PixelbayVideoCompositor`), so the cursor visibly drifts off
-    /// the zoom-frame center until it approaches the padding edge — the
-    /// Screen Studio look. Pinned (gesture) keyframes still short-circuit
-    /// before this stage.
+    /// **Anchor tracks cursor 1:1.** After windowing each cursor-follow
+    /// keyframe's slice from the master damped trajectory, the slice is
+    /// stored as the keyframe's trajectory directly — no spring, no
+    /// deadzone, no lag. `EffectEvaluator.applyZoom` positions the
+    /// zoomed rect so the anchor sits at viewport centre, so the cursor
+    /// stays centred at all times. The downstream rect-cover clamp still
+    /// kicks in at the source edges (cursor would otherwise need pixels
+    /// outside the source), which is the only case where the cursor
+    /// slides off centre. `MouseTrajectory.anchorFollow` (the previous
+    /// boundary-adaptive spring) remains available in PixelbayCore for
+    /// callers that want lag; production no longer uses it. Pinned
+    /// (gesture) keyframes still short-circuit before this stage.
     ///
     /// No-op (returns input unchanged) when `cursorTrajectory` is nil or
     /// empty. Non-zoom keyframes pass through untouched. When a re-slice
@@ -383,15 +386,22 @@ public enum PreviewCompositionBuilder {
             // it with a fresh windowed slice of the master cursor path,
             // re-enabling the jitter the pinned mode exists to prevent.
             if kf.anchorMode == .pinned { return kf }
-            let windowed = MouseTrajectory.window(master, timelineRange: kf.timelineRange)
+            let windowed = MouseTrajectory.window(
+                master,
+                timelineRange: kf.timelineRange,
+                leadSeconds: kf.followLeadSeconds
+            )
             guard !windowed.isEmpty else {
                 var next = kf
                 next.trajectory = nil
                 return next
             }
-            let lazy = MouseTrajectory.lazyFollow(windowed, zoomFactor: kf.zoomFactor)
+            // Anchor tracks the (already-damped) cursor 1:1 so the cursor
+            // sits at viewport centre at all times — no spring lag, no
+            // deadzone offset. `windowed` is the cameraDamped master, so
+            // the centred framing is still smooth between samples.
             var next = kf
-            next.trajectory = lazy
+            next.trajectory = windowed
             return next
         }
     }

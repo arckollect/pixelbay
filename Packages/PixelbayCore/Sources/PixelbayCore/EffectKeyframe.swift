@@ -116,6 +116,19 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
     /// Selects between cursor-tracking and pinned-static framing. See
     /// `ZoomAnchorMode`. Defaults to `.followCursor` for back-compat.
     public var anchorMode: ZoomAnchorMode
+    /// Shifts the cursor-follow trajectory's start *forward* in time by
+    /// this many seconds. Used by gesture-sourced zooms (shake / circle)
+    /// to anchor the zoom on the cursor's near-future position rather
+    /// than the shake's geometric center — the wiggle is mid-motion, so
+    /// the user's intended focal point is where the cursor is *heading*,
+    /// not where it was. `PreviewComposition.applyCursorTrajectory`
+    /// passes this through to `MouseTrajectory.window` when re-slicing
+    /// the damped master trajectory; the resulting `trajectory[0].t`
+    /// equals this value, and `EffectEvaluator.zoomCenter`'s
+    /// first-sample clamp holds that predicted anchor in place across
+    /// the ease-in window. Defaults to 0 (no lookahead) for non-gesture
+    /// keyframes and for back-compat with pre-2026-05-17 sidecars.
+    public var followLeadSeconds: Double
     public var extras: [String: JSONValue]
 
     public init(
@@ -130,6 +143,7 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
         trajectory: [ZoomTrajectorySample]? = nil,
         origin: ZoomOrigin = .auto,
         anchorMode: ZoomAnchorMode = .followCursor,
+        followLeadSeconds: Double = 0,
         extras: [String: JSONValue] = [:]
     ) {
         self.id = id
@@ -143,6 +157,7 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
         self.trajectory = trajectory
         self.origin = origin
         self.anchorMode = anchorMode
+        self.followLeadSeconds = followLeadSeconds
         self.extras = extras
     }
 
@@ -203,6 +218,7 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
         case trajectory
         case origin
         case anchorMode
+        case followLeadSeconds
         case extras
     }
 
@@ -219,6 +235,7 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
         self.trajectory = try c.decodeIfPresent([ZoomTrajectorySample].self, forKey: .trajectory)
         self.origin = try c.decodeIfPresent(ZoomOrigin.self, forKey: .origin) ?? .auto
         self.anchorMode = try c.decodeIfPresent(ZoomAnchorMode.self, forKey: .anchorMode) ?? .followCursor
+        self.followLeadSeconds = try c.decodeIfPresent(Double.self, forKey: .followLeadSeconds) ?? 0
         self.extras = try c.decode([String: JSONValue].self, forKey: .extras)
     }
 }

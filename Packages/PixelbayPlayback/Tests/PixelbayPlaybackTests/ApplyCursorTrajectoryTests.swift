@@ -15,7 +15,8 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         start: Double = 1.0,
         duration: Double = 1.4,
         anchorMode: ZoomAnchorMode = .followCursor,
-        trajectory: [ZoomTrajectorySample]? = nil
+        trajectory: [ZoomTrajectorySample]? = nil,
+        followLeadSeconds: Double = 0
     ) -> EffectKeyframe {
         EffectKeyframe(
             kind: .zoom,
@@ -24,7 +25,8 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
                 duration: .seconds(duration)
             ),
             trajectory: trajectory,
-            anchorMode: anchorMode
+            anchorMode: anchorMode,
+            followLeadSeconds: followLeadSeconds
         )
     }
 
@@ -92,15 +94,11 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         XCTAssertNil(result[1].trajectory)
     }
 
-    // Lazy-follow integration check: a follow-cursor keyframe whose master
-    // cursor sweeps a long distance must produce a stored trajectory whose
-    // last sample lags the cursor's last sample by the expected deadzone
-    // half-width. Confirms `applyCursorTrajectory` actually pipes through
-    // `MouseTrajectory.lazyFollow`, not just `window`.
-    func test_applyCursorTrajectory_followCursor_outputIsLazyFollowed() {
-        // Master cursor sweeps x: 0.20 → 0.80 over 1.0 s, keyframe covers
-        // [1.0, 2.5] but the cursor samples live in [1.0, 2.0]; all
-        // samples fall in the keyframe range.
+    // Anchor=cursor integration check: a follow-cursor keyframe's stored
+    // trajectory must equal the windowed master sample-for-sample — no
+    // smoothing, no lag. Confirms `applyCursorTrajectory` pipes the
+    // windowed slice straight through (cursor always centred contract).
+    func test_applyCursorTrajectory_followCursor_anchorEqualsCursor() {
         let input: [MouseTrajectorySample] = (0...20).map { i in
             MouseTrajectorySample(
                 timelineTime: 1.0 + 0.05 * Double(i),
@@ -108,8 +106,6 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
                 centerY: 0.50
             )
         }
-        // Default zoomFactor on makeZoom = EffectKeyframe.init's default
-        // (1.5). deadzone half-width: 0.5 / 2 / 1.5 = 0.166̄.
         let unpinned = makeZoom(start: 1.0, duration: 1.5, anchorMode: .followCursor)
         let result = PreviewCompositionBuilder.applyCursorTrajectory(
             to: [unpinned],
@@ -118,26 +114,24 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         let trajectory = result[0].trajectory ?? []
         XCTAssertEqual(trajectory.count, input.count,
                        "all input samples lie inside the keyframe range — none should be dropped")
-        XCTAssertEqual(trajectory[0].x, input[0].centerX, accuracy: 1e-9,
-                       "anchor must seed at the first cursor sample")
-        let halfX = 0.5 / 2.0 / 1.5
-        let lastLag = input.last!.centerX - trajectory.last!.x
-        XCTAssertEqual(lastLag, halfX, accuracy: 1e-9,
-                       "after a sweep that fully traverses the deadzone, the anchor must trail the cursor by exactly halfX")
+        for (cursorSample, anchorSample) in zip(input, trajectory) {
+            XCTAssertEqual(anchorSample.x, cursorSample.centerX, accuracy: 1e-12,
+                           "anchor x must equal cursor x exactly — cursor always centred")
+            XCTAssertEqual(anchorSample.y, cursorSample.centerY, accuracy: 1e-12,
+                           "anchor y must equal cursor y exactly — cursor always centred")
+        }
     }
 
-    // Shared-smoothing contract: the windowed + lazy-followed slice is the
-    // **lazy-follow of** the pre-smoothed master at matching timestamps —
-    // sprite reads the smoothed master directly, anchor reads the windowed
-    // slice with lazy-follow applied. Earlier this test asserted strict
-    // equality (anchor == sprite); the Screen Studio look needs the anchor
-    // to *lag* the sprite by the deadzone, which is what this test now
-    // pins.
-    func test_anchorIsLazyFollowOfSpriteSmoothing() {
+    // Shared-smoothing contract: the stored trajectory is exactly
+    // `window(smoothed)` — sprite reads the smoothed master directly,
+    // anchor reads the windowed slice with no further transform applied
+    // (cursor always centred). Pins the wiring so the composition build
+    // stays the single source of truth for the anchor path.
+    func test_anchorIsWindowOfSmoothedMaster() {
         let raw: [MouseTrajectorySample] = (0..<20).map {
             MouseTrajectorySample(
                 timelineTime: Double($0) * 0.05,
-                centerX: 0.30 + 0.02 * Double($0),
+                centerX: 0.10 + 0.04 * Double($0),
                 centerY: 0.50
             )
         }
@@ -150,26 +144,53 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         let trajectory = result[0].trajectory ?? []
         XCTAssertFalse(trajectory.isEmpty,
                        "smoothed samples in [0.2, 0.8] must populate the keyframe trajectory")
-        // Reconstruct the expected output: window the smoothed master to
-        // the same keyframe range, then apply lazy-follow with the
-        // keyframe's zoom factor. The applyCursorTrajectory output must
-        // match this byte-for-byte.
-        let expectedWindowed = MouseTrajectory.window(smoothed, timelineRange: unpinned.timelineRange)
-        let expected = MouseTrajectory.lazyFollow(expectedWindowed, zoomFactor: unpinned.zoomFactor)
+        let expected = MouseTrajectory.window(smoothed, timelineRange: unpinned.timelineRange)
         XCTAssertEqual(trajectory.count, expected.count)
         for (actual, expect) in zip(trajectory, expected) {
             XCTAssertEqual(actual.t, expect.t, accuracy: 1e-12)
             XCTAssertEqual(actual.x, expect.x, accuracy: 1e-12,
-                           "anchor x must equal lazy-follow of smoothed master at t=\(actual.t)")
+                           "anchor x must equal windowed smoothed master at t=\(actual.t)")
             XCTAssertEqual(actual.y, expect.y, accuracy: 1e-12,
-                           "anchor y must equal lazy-follow of smoothed master at t=\(actual.t)")
+                           "anchor y must equal windowed smoothed master at t=\(actual.t)")
         }
-        // Cross-check: cameraDamped here produces an outward sweep (x
-        // grows monotonically), so the final anchor must lag the final
-        // smoothed-master cursor by the deadzone half-width.
-        let halfX = 0.5 / 2.0 / unpinned.zoomFactor
-        let masterEndX = smoothed.last(where: { $0.timelineTime <= unpinned.timelineRange.end.seconds })!.centerX
-        XCTAssertEqual(masterEndX - trajectory.last!.x, halfX, accuracy: 1e-9,
-                       "anchor must trail the smoothed-master cursor by the deadzone half-width on monotonic outward sweeps")
+    }
+
+    // followLeadSeconds shifts the trajectory's first sample forward in
+    // time. With leadSeconds = 0.15 the windowed slice starts at
+    // timelineRange.start + 0.15, so trajectory[0].t == 0.15. The
+    // EffectEvaluator.zoomCenter first-sample clamp then holds that
+    // "predicted-future" anchor for localT ∈ [0, 0.15] — exactly what
+    // gesture zooms need so the ramp-in points at where the cursor lands
+    // post-shake, not at the wiggle center.
+    func test_followLeadSeconds_shiftsTrajectoryStartForwardInTime() {
+        let input: [MouseTrajectorySample] = (0...20).map { i in
+            MouseTrajectorySample(
+                timelineTime: 1.0 + 0.05 * Double(i),
+                centerX: 0.20 + 0.03 * Double(i),
+                centerY: 0.50
+            )
+        }
+        let leadSeconds = 0.15
+        let withLead = makeZoom(
+            start: 1.0,
+            duration: 1.5,
+            anchorMode: .followCursor,
+            followLeadSeconds: leadSeconds
+        )
+        let result = PreviewCompositionBuilder.applyCursorTrajectory(
+            to: [withLead],
+            cursorTrajectory: input
+        )
+        let trajectory = result[0].trajectory ?? []
+        XCTAssertFalse(trajectory.isEmpty)
+        XCTAssertGreaterThanOrEqual(trajectory[0].t, leadSeconds - 1e-9,
+                                    "trajectory's first sample must land at or after the lookahead offset")
+        // Cross-check: the first sample's x equals the damped master's x
+        // at timelineRange.start + leadSeconds (the predicted-future anchor
+        // point). Find the master sample at that absolute time.
+        let leadAbsoluteT = 1.0 + leadSeconds
+        let masterAtLead = input.first { $0.timelineTime >= leadAbsoluteT }!
+        XCTAssertEqual(trajectory[0].x, masterAtLead.centerX, accuracy: 1e-9,
+                       "trajectory[0] must originate from the master sample at start + leadSeconds")
     }
 }

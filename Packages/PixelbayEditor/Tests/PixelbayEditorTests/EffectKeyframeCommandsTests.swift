@@ -523,7 +523,7 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         XCTAssertEqual(project.effects[0].timelineRange.start.seconds, 0.5, accuracy: 1e-9)
     }
 
-    func test_generateManualZooms_shakeGestureMark_emitsKeyframeWithoutTrajectory() throws {
+    func test_generateManualZooms_shakeGestureMark_emitsFollowCursorNoLookahead() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
         let trajectory = (0...20).map {
             MouseTrajectorySample(
@@ -538,12 +538,14 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1)
         XCTAssertNil(project.effects[0].trajectory,
-                     "shake-sourced marks must hold a static anchor — trajectory follow makes the zoom jitter with post-gesture cursor noise")
-        XCTAssertEqual(project.effects[0].anchorMode, .pinned,
-                       "shake marks must set anchorMode=.pinned so PreviewComposition.applyCursorTrajectory can't backfill trajectory at composition build")
+                     "command leaves trajectory nil; PreviewComposition.applyCursorTrajectory fills it at composition build using the damped master")
+        XCTAssertEqual(project.effects[0].anchorMode, .followCursor,
+                       "shake marks use follow-cursor — anchorFollow's deadzone holds the anchor steady through small wiggles without the static-pin workaround")
+        XCTAssertEqual(project.effects[0].followLeadSeconds, 0, accuracy: 1e-9,
+                       "lookahead is 0 — an earlier iteration tried 0.15 but the first-sample clamp froze the anchor during ease-in while the cursor sprite kept moving, putting the cursor outside the viewport")
     }
 
-    func test_generateManualZooms_circleGestureMark_emitsKeyframeWithoutTrajectory() throws {
+    func test_generateManualZooms_circleGestureMark_emitsFollowCursorNoLookahead() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
         let trajectory = [
             MouseTrajectorySample(timelineTime: 4.0, centerX: 0.5, centerY: 0.5),
@@ -554,15 +556,14 @@ final class EffectKeyframeCommandsTests: XCTestCase {
             mouseTrajectory: trajectory
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1)
-        XCTAssertNil(project.effects[0].trajectory,
-                     "circle-sourced marks must hold a static anchor for the same reason as shake")
-        XCTAssertEqual(project.effects[0].anchorMode, .pinned)
+        XCTAssertNil(project.effects[0].trajectory)
+        XCTAssertEqual(project.effects[0].anchorMode, .followCursor)
+        XCTAssertEqual(project.effects[0].followLeadSeconds, 0, accuracy: 1e-9,
+                       "circle marks share the same no-lookahead policy as shake marks")
     }
 
-    func test_generateManualZooms_hotkeyMark_keepsTrajectoryFollow() throws {
+    func test_generateManualZooms_hotkeyMark_emitsFollowCursorNoLookahead() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
-        // Hotkey marks (⌃⌘Z) keep cursor-tracking — the user pressed mid-
-        // motion and expects the zoom to track wherever they're moving.
         let trajectory = [
             MouseTrajectorySample(timelineTime: 4.0, centerX: 0.5, centerY: 0.5),
             MouseTrajectorySample(timelineTime: 4.5, centerX: 0.7, centerY: 0.5)
@@ -572,18 +573,15 @@ final class EffectKeyframeCommandsTests: XCTestCase {
             mouseTrajectory: trajectory
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1)
-        XCTAssertNotNil(project.effects[0].trajectory,
-                        "hotkey marks must continue to follow the cursor trajectory")
-        XCTAssertEqual(project.effects[0].anchorMode, .followCursor,
-                       "hotkey marks must NOT be pinned — applyCursorTrajectory needs to be allowed to re-window the trajectory on drag/trim")
+        XCTAssertEqual(project.effects[0].anchorMode, .followCursor)
+        XCTAssertEqual(project.effects[0].followLeadSeconds, 0, accuracy: 1e-9)
     }
 
-    func test_generateManualZooms_nilSourceMark_treatedAsGesture_staticAnchor() throws {
-        // Pre-source-tag sidecars (v4) decode marks with source == nil. Real
-        // usage on those recordings is dominantly gesture-sourced (the bug
-        // this whole change addresses showed up on exactly that workflow),
-        // so the back-compat default is static anchor — otherwise every
-        // legacy recording still jitters until re-recorded.
+    func test_generateManualZooms_nilSourceMark_treatedAsGesture_followCursor() throws {
+        // Pre-source-tag sidecars (v4) decode marks with source == nil.
+        // Treated as gesture-equivalent — same follow-cursor + no-lookahead
+        // policy. The earlier static-pin back-compat path is gone now
+        // that anchorFollow's deadzone handles the wiggle jitter.
         var (project, _) = EditorFixture.minimalSingleClip()
         let trajectory = [
             MouseTrajectorySample(timelineTime: 4.0, centerX: 0.5, centerY: 0.5),
@@ -594,10 +592,8 @@ final class EffectKeyframeCommandsTests: XCTestCase {
             mouseTrajectory: trajectory
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1)
-        XCTAssertNil(project.effects[0].trajectory,
-                     "back-compat: nil source (pre-tag v4 sidecars) defaults to gesture-equivalent static anchor")
-        XCTAssertEqual(project.effects[0].anchorMode, .pinned,
-                       "back-compat path must also set anchorMode=.pinned so legacy recordings survive applyCursorTrajectory")
+        XCTAssertEqual(project.effects[0].anchorMode, .followCursor)
+        XCTAssertEqual(project.effects[0].followLeadSeconds, 0, accuracy: 1e-9)
     }
 
     func test_generateManualZooms_zoomStartsAtMarkTimestamp_notBefore() throws {
@@ -616,38 +612,39 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         XCTAssertEqual(project.effects[0].timelineRange.end.seconds, 5.4, accuracy: 1e-9)
     }
 
-    func test_generateManualZooms_gestureMark_snapsAnchorToGrid() throws {
-        // Phase 3c: pinned gesture marks snap to a 0.10 norm-unit grid
-        // (10×10 cells) so sample-time jitter doesn't displace the rect by
-        // a few pixels and same-spot shakes land on the same cell. Was
-        // 0.05 (20×20) initially; coarsened to 0.10 after user feedback
-        // that snap "still wasn't strong enough".
+    func test_generateManualZooms_gestureMark_preservesRawAnchorCoordinates() throws {
+        // Earlier (pre-2026-05-17) gesture marks magnet-snapped to a 0.10
+        // norm-unit grid to mask sub-cell jitter on the static-pin design.
+        // anchor-follow makes that snap unnecessary AND counterproductive —
+        // the spring naturally smooths the cluster, while a grid snap
+        // would yank the anchor away from where the user pointed. Coords
+        // must now pass through unmodified for all sources.
         var (project, _) = EditorFixture.minimalSingleClip()
         _ = try GenerateManualZoomsCommand(
             marks: [
-                // 0.523 / 0.10 = 5.23 → round → 5 → 0.50 (same outcome
-                // under both 0.05 and 0.10; kept as a continuity check).
                 AutoZoomClick(timelineTime: 4.0, centerX: 0.523, centerY: 0.487,
                               source: .shakeGesture),
-                // 0.55 / 0.10 = 5.5 → banker's-round → 6 → 0.60. Under the
-                // older 0.05 grid, 0.55 would round to itself (11.0). This
-                // case fails if anyone reverts the grid constant.
                 AutoZoomClick(timelineTime: 6.0, centerX: 0.55, centerY: 0.55,
+                              source: .shakeGesture),
+                AutoZoomClick(timelineTime: 8.0, centerX: 0.54, centerY: 0.46,
                               source: .shakeGesture)
             ]
         ).apply(to: &project)
-        XCTAssertEqual(project.effects.count, 2)
+        XCTAssertEqual(project.effects.count, 3)
         let sorted = project.effects.sorted { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
-        XCTAssertEqual(sorted[0].centerX, 0.50, accuracy: 1e-9)
-        XCTAssertEqual(sorted[0].centerY, 0.50, accuracy: 1e-9)
-        XCTAssertEqual(sorted[1].centerX, 0.60, accuracy: 1e-9,
-                       "0.55 must round up to 0.60 on the 0.10 grid (banker's-round half-step)")
-        XCTAssertEqual(sorted[1].centerY, 0.60, accuracy: 1e-9)
+        XCTAssertEqual(sorted[0].centerX, 0.523, accuracy: 1e-9,
+                       "gesture marks no longer magnet-snap — coords pass through")
+        XCTAssertEqual(sorted[0].centerY, 0.487, accuracy: 1e-9)
+        XCTAssertEqual(sorted[1].centerX, 0.55, accuracy: 1e-9)
+        XCTAssertEqual(sorted[1].centerY, 0.55, accuracy: 1e-9)
+        XCTAssertEqual(sorted[2].centerX, 0.54, accuracy: 1e-9)
+        XCTAssertEqual(sorted[2].centerY, 0.46, accuracy: 1e-9)
     }
 
-    func test_generateManualZooms_hotkeyMark_doesNotSnap() throws {
-        // Hotkey marks track the live cursor — grid-quantization would read
-        // as stepped motion, so they must pass through unmodified.
+    func test_generateManualZooms_hotkeyMark_preservesRawAnchorCoordinates() throws {
+        // Hotkey marks have always passed through unmodified; covered here
+        // alongside the gesture variant to pin the symmetry now that
+        // magnet-snap is gone for both.
         var (project, _) = EditorFixture.minimalSingleClip()
         let trajectory = [
             MouseTrajectorySample(timelineTime: 4.0, centerX: 0.523, centerY: 0.487),
