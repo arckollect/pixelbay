@@ -64,7 +64,13 @@ public struct IntentCandidate: Equatable, Sendable {
 public enum IntentScorer {
 
     public static let fireThreshold: Double = 0.55
-    public static let cooldown: Double = 1.8
+    /// Minimum gap between consecutive auto-zoom fires. Bumped from 1.8 s
+    /// to 2.5 s during the Phase 3c framing revamp: combined with the
+    /// new 450 ms ease-in / 450 ms ease-out defaults on each cluster
+    /// keyframe, this keeps the overall zoom cadence at one transition
+    /// every ~3.5 s — the "calm but attentive" pacing the user asked for
+    /// on the Screen-Studio question.
+    public static let cooldown: Double = 2.5
 
     // Windows
     private static let preWindow: Double = 0.4
@@ -148,6 +154,25 @@ public enum IntentScorer {
             }
         }
         return result
+    }
+
+    /// Per-sample deceleration confidence in `[0, 1]`, aligned to the
+    /// input `trajectory`'s indices. Drives the decel-gated lookahead the
+    /// camera anchor uses to lead the cursor toward the predicted landing
+    /// zone (see `MouseTrajectory.anchorFollow(... lookaheadConfidence:)`).
+    /// Thin forwarder onto `MouseTrajectory.decelConfidence` in Core —
+    /// the core copy is what PixelbayPlayback calls at composition-build
+    /// time (Playback can't depend on Editor). Same constants
+    /// (`decelWindow`, `decelDropFullScale`) so the editor's intent
+    /// scoring and the playback-side framing predictor stay aligned.
+    public static func decelConfidence(
+        trajectory: [MouseTrajectorySample]
+    ) -> [Double] {
+        MouseTrajectory.decelConfidence(
+            trajectory,
+            decelWindow: decelWindow,
+            decelDropFullScale: decelDropFullScale
+        )
     }
 
     public static func selectFiring(_ candidates: [IntentCandidate]) -> [AutoZoomClick] {

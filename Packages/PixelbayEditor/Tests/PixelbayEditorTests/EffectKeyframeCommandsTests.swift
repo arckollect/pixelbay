@@ -135,7 +135,7 @@ final class EffectKeyframeCommandsTests: XCTestCase {
 
     func test_autoZoom_widelySpacedClicks_generatesOneKeyframePerCluster() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
-        // Default lookahead 0.7 + hold 1.8 + easeOut 0.5 = 3.0s merge window.
+        // Default lookahead 0.45 + hold 1.8 + easeOut 0.45 = 2.7s merge window.
         // Spacing these clicks 6s apart keeps each in its own cluster.
         let clicks = [
             AutoZoomClick(timelineTime: 2.0, centerX: 0.3, centerY: 0.7),
@@ -176,7 +176,7 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         _ = try AddEffectKeyframeCommand(keyframe: manual).apply(to: &project)
 
         // 6s gap so the two clicks land in separate clusters under the
-        // default merge window (lookahead 0.7 + hold 1.8 + easeOut 0.5).
+        // default merge window (lookahead 0.45 + hold 1.8 + easeOut 0.45).
         let clicks = [AutoZoomClick(timelineTime: 4.0), AutoZoomClick(timelineTime: 10.0)]
         let inverse = try GenerateAutoZoomFromClicksCommand(clicks: clicks).apply(to: &project)
         XCTAssertEqual(project.effects.count, 3)
@@ -189,11 +189,11 @@ final class EffectKeyframeCommandsTests: XCTestCase {
 
     func test_autoZoom_twoClicksInsideMergeWindow_collapseToOneKeyframe() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
-        // Defaults: lookahead 0.7, hold 1.8, easeOut 0.5 → merge window 3.0s.
+        // Defaults: lookahead 0.45, hold 1.8, easeOut 0.45 → merge window 2.7s.
         // Two clicks 0.5s apart land well inside that window. The merged
         // keyframe should: (a) span from the first click's zoom-in start
-        // (4.0 - 0.7 = 3.3) to the second click's ease-out end
-        // (4.5 + 1.8 + 0.5 = 6.8), and (b) carry the *latest* click's focal
+        // (4.0 - 0.45 = 3.55) to the second click's ease-out end
+        // (4.5 + 1.8 + 0.45 = 6.75), and (b) carry the *latest* click's focal
         // point so the framing follows the user's attention. The clicks are
         // spatially distant (0.2 vs 0.8) to verify the focal-point follow,
         // so we pass `spatialResetThreshold: 1.0` to disable the spatial
@@ -208,8 +208,8 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1)
         let kf = project.effects[0]
-        XCTAssertEqual(kf.timelineRange.start.seconds, 3.3, accuracy: 1e-6)
-        XCTAssertEqual(kf.timelineRange.duration.seconds, 3.5, accuracy: 1e-6)
+        XCTAssertEqual(kf.timelineRange.start.seconds, 3.55, accuracy: 1e-6)
+        XCTAssertEqual(kf.timelineRange.duration.seconds, 3.2, accuracy: 1e-6)
         XCTAssertEqual(kf.centerX, 0.8, accuracy: 1e-9,
                        "merged cluster anchors at the latest click's focal point")
         XCTAssertEqual(kf.centerY, 0.8, accuracy: 1e-9)
@@ -231,15 +231,15 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1)
         let kf = project.effects[0]
-        XCTAssertEqual(kf.timelineRange.start.seconds, 3.3, accuracy: 1e-6)
-        // Final cluster end follows the last click: 5.2 + 1.8 + 0.5 = 7.5.
-        XCTAssertEqual(kf.timelineRange.duration.seconds, 4.2, accuracy: 1e-6)
+        XCTAssertEqual(kf.timelineRange.start.seconds, 3.55, accuracy: 1e-6)
+        // Final cluster end follows the last click: 5.2 + 1.8 + 0.45 = 7.45.
+        XCTAssertEqual(kf.timelineRange.duration.seconds, 3.9, accuracy: 1e-6)
         XCTAssertEqual(kf.centerX, 0.9, accuracy: 1e-9)
     }
 
     func test_autoZoom_twoClicksOutsideMergeWindow_stayAsTwoKeyframes() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
-        // Gap of 4s exceeds the 3.0s merge window — the clicks must stay in
+        // Gap of 4s exceeds the 2.7s merge window — the clicks must stay in
         // separate clusters. Regression: don't over-merge unrelated clicks.
         let clicks = [
             AutoZoomClick(timelineTime: 4.0, centerX: 0.3, centerY: 0.3),
@@ -262,7 +262,7 @@ final class EffectKeyframeCommandsTests: XCTestCase {
             )
         }
         // Three clicks inside the merge window; expected merged keyframe
-        // range: start = 4.0 - 0.7 = 3.3, end = 5.2 + 2.3 = 7.5.
+        // range: start = 4.0 - 0.45 = 3.55, end = 5.2 + 1.8 + 0.45 = 7.45.
         let clicks = [
             AutoZoomClick(timelineTime: 4.0),
             AutoZoomClick(timelineTime: 4.6),
@@ -275,15 +275,15 @@ final class EffectKeyframeCommandsTests: XCTestCase {
 
         XCTAssertEqual(project.effects.count, 1)
         let traj = try XCTUnwrap(project.effects[0].trajectory)
-        // Samples at master timeline times 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5
-        // fall inside the merged keyframe's [3.3, 7.5] range (rebased to
-        // keyframe-local 0.2 … 4.2). That's 9 samples — far more than the
+        // Master samples at t = 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0 fall
+        // inside the merged keyframe's [3.55, 7.45] range (rebased to
+        // keyframe-local 0.45 … 3.45). That's 7 samples — more than the
         // 3-sample slices the unmerged path would have attached to each
         // standalone keyframe; the merged-trajectory window keeps
         // cursor-follow continuous across the cluster.
-        XCTAssertEqual(traj.count, 9)
-        XCTAssertEqual(traj.first?.t ?? -1, 0.2, accuracy: 1e-6)
-        XCTAssertEqual(traj.last?.t ?? -1, 4.2, accuracy: 1e-6)
+        XCTAssertEqual(traj.count, 7)
+        XCTAssertEqual(traj.first?.t ?? -1, 0.45, accuracy: 1e-6)
+        XCTAssertEqual(traj.last?.t ?? -1, 3.45, accuracy: 1e-6)
     }
 
     func test_autoZoom_mergedCluster_undoRemovesExactlyOneKeyframe() throws {
@@ -665,10 +665,10 @@ final class EffectKeyframeCommandsTests: XCTestCase {
     func test_autoZoom_forcedSplit_truncatesPreviousClusterToAvoidOverlap() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
         // Two clicks 1.5s apart with a spatial jump: the spatial gate forces
-        // a split, but click2's zoom-in start (4.5-0.7=3.8) lands inside the
-        // first cluster's tail (4.0+1.8+0.5=6.3). L2 must truncate the first
-        // cluster's end to exactly click2's start so the two emitted ranges
-        // are disjoint (half-open).
+        // a split, but click2's zoom-in start (5.5-0.45=5.05) lands inside
+        // the first cluster's tail (4.0+1.8+0.45=6.25). L2 must truncate
+        // the first cluster's end to exactly click2's start so the two
+        // emitted ranges are disjoint (half-open).
         let clicks = [
             AutoZoomClick(timelineTime: 4.0, centerX: 0.1, centerY: 0.1),
             AutoZoomClick(timelineTime: 5.5, centerX: 0.9, centerY: 0.9)

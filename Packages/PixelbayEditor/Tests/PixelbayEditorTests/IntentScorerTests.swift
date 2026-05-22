@@ -143,7 +143,7 @@ final class IntentScorerTests: XCTestCase {
     func test_cooldown_dropsSecondFire() {
         // Two strong dwell-clicks 1.0s apart at different locations.
         // First location: (0.3, 0.5); second: (0.7, 0.5). Each gets its own
-        // local stillness, but the 1.0s gap < 1.8s cooldown blocks the second.
+        // local stillness, but the 1.0s gap < 2.5s cooldown blocks the second.
         let dt = 1.0 / 30.0
         var samples: [MouseTrajectorySample] = []
         // Still at (0.3, 0.5) from t=0 to t=1.4s
@@ -174,7 +174,7 @@ final class IntentScorerTests: XCTestCase {
         // Each click candidate scores 0.30 + 0.25 + 0.30 + 0.15·sNovelty.
         let clicks = [
             AutoZoomClick(timelineTime: 1.0, centerX: 0.2, centerY: 0.2),
-            AutoZoomClick(timelineTime: 3.0, centerX: 0.8, centerY: 0.8)
+            AutoZoomClick(timelineTime: 4.0, centerX: 0.8, centerY: 0.8)
         ]
         let candidates = IntentScorer.score(rawClicks: clicks, trajectory: [])
         XCTAssertEqual(candidates.count, 2)
@@ -185,6 +185,6 @@ final class IntentScorerTests: XCTestCase {
             XCTAssertGreaterThan(c.score, IntentScorer.fireThreshold)
         }
         let fires = IntentScorer.selectFiring(candidates)
-        XCTAssertEqual(fires.count, 2, "two well-separated v3 clicks should both fire (past cooldown)")
+        XCTAssertEqual(fires.count, 2, "two well-separated v3 clicks should both fire (past 2.5s cooldown)")
     }
 }

@@ -94,16 +94,25 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         XCTAssertNil(result[1].trajectory)
     }
 
-    // Anchor=cursor integration check: a follow-cursor keyframe's stored
-    // trajectory must equal the windowed master sample-for-sample — no
-    // smoothing, no lag. Confirms `applyCursorTrajectory` pipes the
-    // windowed slice straight through (cursor always centred contract).
-    func test_applyCursorTrajectory_followCursor_anchorEqualsCursor() {
+    // Phase 3c v5.5: anchor follows via continuous soft spring (no hard
+    // deadzone) with boundary-adaptive τ. Cursor sits near-centred at
+    // rest, leads the camera by a small visible offset during motion —
+    // Screen Studio / Loom pattern.
+    func test_applyCursorTrajectory_followCursor_continuousSoftSpring() {
+        // Cursor wanders gently within ±0.04 of the start position. With
+        // no deadzone, the spring is always engaged and the anchor
+        // drifts toward the cursor's average position with the relaxed
+        // τ (0.18 s). For a wander whose mean stays near the start,
+        // anchor stays close to its start position but is allowed to
+        // move — assert it tracks within the safe-zone bound and ends
+        // somewhere reasonable rather than locked at the initial point.
+        let zoomFactor = 1.5
+        let safeHalf = 0.80 / 2.0 / zoomFactor
         let input: [MouseTrajectorySample] = (0...20).map { i in
             MouseTrajectorySample(
                 timelineTime: 1.0 + 0.05 * Double(i),
-                centerX: 0.20 + 0.03 * Double(i),
-                centerY: 0.50
+                centerX: 0.50 + 0.04 * sin(Double(i) * 0.5),
+                centerY: 0.50 + 0.03 * sin(Double(i) * 0.7)
             )
         }
         let unpinned = makeZoom(start: 1.0, duration: 1.5, anchorMode: .followCursor)
@@ -114,45 +123,45 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         let trajectory = result[0].trajectory ?? []
         XCTAssertEqual(trajectory.count, input.count,
                        "all input samples lie inside the keyframe range — none should be dropped")
-        for (cursorSample, anchorSample) in zip(input, trajectory) {
-            XCTAssertEqual(anchorSample.x, cursorSample.centerX, accuracy: 1e-12,
-                           "anchor x must equal cursor x exactly — cursor always centred")
-            XCTAssertEqual(anchorSample.y, cursorSample.centerY, accuracy: 1e-12,
-                           "anchor y must equal cursor y exactly — cursor always centred")
+        for (cursorSample, anchor) in zip(input, trajectory) {
+            let lagX = abs(cursorSample.centerX - anchor.x)
+            let lagY = abs(cursorSample.centerY - anchor.y)
+            XCTAssertLessThanOrEqual(lagX, safeHalf + 1e-9,
+                                     "anchor-to-cursor lag must respect the safe-zone invariant")
+            XCTAssertLessThanOrEqual(lagY, safeHalf + 1e-9,
+                                     "anchor-to-cursor lag must respect the safe-zone invariant")
         }
     }
 
-    // Shared-smoothing contract: the stored trajectory is exactly
-    // `window(smoothed)` — sprite reads the smoothed master directly,
-    // anchor reads the windowed slice with no further transform applied
-    // (cursor always centred). Pins the wiring so the composition build
-    // stays the single source of truth for the anchor path.
-    func test_anchorIsWindowOfSmoothedMaster() {
-        let raw: [MouseTrajectorySample] = (0..<20).map {
+    // Bounded-lag contract: a sustained move makes the anchor track the
+    // cursor with bounded lag (≤ safeZone half-width). Confirms the
+    // windowed slice IS being piped through anchorFollow, not stored raw.
+    func test_applyCursorTrajectory_followCursor_anchorTracksWithBoundedLagOnSustainedMotion() {
+        // Linear sweep across 0.4 norm-units over 2.0s. The continuous
+        // spring tracks with steady-state lag ≈ 2·v·τ at the relaxed τ
+        // (with the boundary-adaptive ramp reducing it further as the
+        // cursor approaches the wall).
+        let zoomFactor = 1.5
+        let safeHalf = 0.80 / 2.0 / zoomFactor
+        let input: [MouseTrajectorySample] = (0...40).map { i in
             MouseTrajectorySample(
-                timelineTime: Double($0) * 0.05,
-                centerX: 0.10 + 0.04 * Double($0),
+                timelineTime: 1.0 + 0.05 * Double(i),
+                centerX: 0.20 + 0.01 * Double(i),
                 centerY: 0.50
             )
         }
-        let smoothed = MouseTrajectory.cameraDamped(raw)
-        let unpinned = makeZoom(start: 0.2, duration: 0.6, anchorMode: .followCursor)
+        let unpinned = makeZoom(start: 1.0, duration: 2.0, anchorMode: .followCursor)
         let result = PreviewCompositionBuilder.applyCursorTrajectory(
             to: [unpinned],
-            cursorTrajectory: smoothed
+            cursorTrajectory: input
         )
         let trajectory = result[0].trajectory ?? []
-        XCTAssertFalse(trajectory.isEmpty,
-                       "smoothed samples in [0.2, 0.8] must populate the keyframe trajectory")
-        let expected = MouseTrajectory.window(smoothed, timelineRange: unpinned.timelineRange)
-        XCTAssertEqual(trajectory.count, expected.count)
-        for (actual, expect) in zip(trajectory, expected) {
-            XCTAssertEqual(actual.t, expect.t, accuracy: 1e-12)
-            XCTAssertEqual(actual.x, expect.x, accuracy: 1e-12,
-                           "anchor x must equal windowed smoothed master at t=\(actual.t)")
-            XCTAssertEqual(actual.y, expect.y, accuracy: 1e-12,
-                           "anchor y must equal windowed smoothed master at t=\(actual.t)")
-        }
+        XCTAssertEqual(trajectory.count, input.count)
+        let finalLag = input.last!.centerX - trajectory.last!.x
+        XCTAssertGreaterThan(finalLag, 0.0,
+                             "anchor must trail the cursor after a sustained move")
+        XCTAssertLessThanOrEqual(finalLag, safeHalf + 1e-9,
+                                 "anchor lag must respect the safe-zone invariant")
     }
 
     // followLeadSeconds shifts the trajectory's first sample forward in

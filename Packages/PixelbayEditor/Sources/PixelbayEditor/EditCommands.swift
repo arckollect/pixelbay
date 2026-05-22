@@ -629,15 +629,20 @@ public struct GenerateAutoZoomFromClicksCommand: EditCommand {
 
     public init(
         clicks: [AutoZoomClick],
-        lookahead: Double = 0.7,
+        lookahead: Double = 0.45,
         holdDuration: Double = 1.8,
-        easeOutDuration: Double = 0.5,
+        easeOutDuration: Double = 0.45,
         zoomFactor: Double = 2.0,
         timelineDuration: Double? = nil,
         maxClusterDuration: Double = 4.5,
         spatialResetThreshold: Double = 0.30,
         mouseTrajectory: [MouseTrajectorySample]? = nil
     ) {
+        // Phase 3c — 450 ms ease-in + 450 ms ease-out per keyframe gives
+        // back-to-back clusters a 900 ms transition envelope (the
+        // Screen-Studio cadence the user picked). Pre-3c defaults were
+        // 700 ms in / 500 ms out — punchier but read as busy when
+        // combined with the new 2.5 s intent-scorer cooldown.
         self.clicks = clicks
         self.lookahead = max(0.05, lookahead)
         self.holdDuration = max(0.1, holdDuration)

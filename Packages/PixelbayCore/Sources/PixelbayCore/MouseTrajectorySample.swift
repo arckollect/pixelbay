@@ -100,6 +100,92 @@ public enum MouseTrajectory {
         return result
     }
 
+    /// Per-sample deceleration confidence in `[0, 1]`, aligned to
+    /// `trajectory`'s indices. Drives the decel-gated lookahead on
+    /// `anchorFollow`: when confidence is high the camera leans toward
+    /// the cursor's predicted landing zone; at 0 it behaves like a plain
+    /// deadzone follow. Same formula as the editor's `IntentScorer.sDecel`
+    /// (the signal that decides which clicks earn an auto-zoom keyframe)
+    /// so the "intent" signal that fires keyframes and the one that
+    /// biases framing agree by construction.
+    ///
+    /// Mirror lives in `IntentScorer.decelConfidence(trajectory:)` —
+    /// reproduces this output bit-for-bit. The duplication is intentional:
+    /// PixelbayPlayback cannot depend on PixelbayEditor, so the core
+    /// helper lives here and the editor calls into it. Constants
+    /// (`decelWindow = 0.5 s`, `decelDropFullScale = 0.35 norm/s`) match
+    /// IntentScorer so a single tuning pass updates both consumers.
+    ///
+    /// At index `i` the value is the normalised drop from the trajectory's
+    /// peak smoothed velocity over `[t_i - decelWindow, t_i]` down to the
+    /// current sample's velocity, divided by `decelDropFullScale` and
+    /// clamped to `[0, 1]`. A constant-velocity sweep produces 0; a clean
+    /// decel-to-rest produces values approaching 1 right at the landing
+    /// point — which is exactly where the camera should already be
+    /// pointed before the cursor finishes settling.
+    public static func decelConfidence(
+        _ trajectory: [MouseTrajectorySample],
+        decelWindow: Double = 0.5,
+        decelDropFullScale: Double = 0.35
+    ) -> [Double] {
+        guard trajectory.count >= 2 else {
+            return Array(repeating: 0.0, count: trajectory.count)
+        }
+        let v = boxSmoothedVelocity(trajectory)
+        var out = [Double](repeating: 0.0, count: trajectory.count)
+        let windowSafe = max(0.001, decelWindow)
+        let scaleSafe = max(1e-6, decelDropFullScale)
+        for i in 0..<trajectory.count {
+            let t = trajectory[i].timelineTime
+            let start = t - windowSafe
+            var maxV = 0.0
+            var atV = 0.0
+            var found = false
+            for j in 0..<trajectory.count {
+                let tj = trajectory[j].timelineTime
+                if tj < start { continue }
+                if tj > t { break }
+                found = true
+                if v[j] > maxV { maxV = v[j] }
+                atV = v[j]
+            }
+            if !found { continue }
+            let drop = max(0.0, maxV - atV)
+            out[i] = max(0.0, min(1.0, drop / scaleSafe))
+        }
+        return out
+    }
+
+    /// Per-sample instantaneous velocity (norm-units/s), box-smoothed
+    /// with a ±2-sample window (~5 samples, ~165 ms at 30 Hz). Mirrors
+    /// `IntentScorer.computeSmoothedVelocity` byte-for-byte so the
+    /// in-Core decel-confidence reproduces the editor's intent scoring.
+    static func boxSmoothedVelocity(_ trajectory: [MouseTrajectorySample]) -> [Double] {
+        guard trajectory.count >= 2 else {
+            return Array(repeating: 0.0, count: trajectory.count)
+        }
+        var raw: [Double] = [0]
+        raw.reserveCapacity(trajectory.count)
+        for i in 1..<trajectory.count {
+            let p = trajectory[i - 1]
+            let s = trajectory[i]
+            let dt = s.timelineTime - p.timelineTime
+            guard dt > 0 else { raw.append(raw[i - 1]); continue }
+            let dx = s.centerX - p.centerX
+            let dy = s.centerY - p.centerY
+            raw.append((dx * dx + dy * dy).squareRoot() / dt)
+        }
+        var smoothed = [Double](repeating: 0.0, count: raw.count)
+        for i in 0..<raw.count {
+            let lo = max(0, i - 2)
+            let hi = min(raw.count - 1, i + 2)
+            var sum = 0.0
+            for k in lo...hi { sum += raw[k] }
+            smoothed[i] = sum / Double(hi - lo + 1)
+        }
+        return smoothed
+    }
+
     /// Camera-follow damping with **velocity-adaptive** time constant.
     /// Smooths the master cursor trajectory through a critically-damped
     /// spring whose `τ` scales with the cursor's instantaneous speed:
@@ -198,10 +284,64 @@ public enum MouseTrajectory {
     }
 
     @inline(__always)
-    private static func smoothstep(_ edge0: Double, _ edge1: Double, _ x: Double) -> Double {
+    public static func smoothstep(_ edge0: Double, _ edge1: Double, _ x: Double) -> Double {
         guard edge1 > edge0 else { return x < edge0 ? 0 : 1 }
         let t = min(1.0, max(0.0, (x - edge0) / (edge1 - edge0)))
         return t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Lightweight one-pole EMA for the cursor *sprite* path — decoupled
+    /// from the camera's `cameraDamped` so the sprite can move at near-real
+    /// speed while the camera glides on the longer-τ velocity-adaptive
+    /// spring (Screen Studio / Loom pattern). Default `tau = 0.02 s`
+    /// settles within ~0.06 s — kills 60–120 Hz capture jitter without
+    /// adding a perceptible lag on the click moment, where the previous
+    /// shared `cameraDamped` path bled τ ≈ 0.05 s of lag into the sprite
+    /// even at the precise-click regime.
+    ///
+    /// dt-aware alpha (`1 - exp(-dt/tau)`) so the smoother behaves
+    /// consistently across capture rates and is robust to the ~30 Hz vs
+    /// ~120 Hz mode that macOS event coalescing toggles between mid-sweep.
+    /// Output preserves `timelineTime`; only `centerX / centerY` change.
+    /// The sprite path's downstream consumer is the Catmull-Rom sampler in
+    /// `PixelbayVideoCompositor.sampleCursorTrajectory`, which expects raw
+    /// (not spring-damped) samples — feeding the lightly-EMA-smoothed
+    /// trajectory there preserves the snap on direction changes that the
+    /// Catmull-Rom interp gets credit for.
+    public static func spriteSmoothed(
+        _ master: [MouseTrajectorySample],
+        tau: Double = 0.02
+    ) -> [MouseTrajectorySample] {
+        guard master.count > 1 else { return master }
+        let safeTau = max(0.001, tau)
+        var result: [MouseTrajectorySample] = []
+        result.reserveCapacity(master.count)
+        var x = master[0].centerX
+        var y = master[0].centerY
+        var prevT = master[0].timelineTime
+        result.append(master[0])
+        for i in 1..<master.count {
+            let sample = master[i]
+            let dt = max(0.0, sample.timelineTime - prevT)
+            if dt <= 0 {
+                result.append(MouseTrajectorySample(
+                    timelineTime: sample.timelineTime,
+                    centerX: x,
+                    centerY: y
+                ))
+                continue
+            }
+            let alpha = 1.0 - exp(-dt / safeTau)
+            x += alpha * (sample.centerX - x)
+            y += alpha * (sample.centerY - y)
+            prevT = sample.timelineTime
+            result.append(MouseTrajectorySample(
+                timelineTime: sample.timelineTime,
+                centerX: x,
+                centerY: y
+            ))
+        }
+        return result
     }
 
     /// Deadzone-aware critically-damped spring that pulls the zoom anchor
@@ -214,27 +354,48 @@ public enum MouseTrajectory {
     /// cursor moves naturally inside a central region and the camera
     /// only pans when the cursor approaches the edge.
     ///
-    /// Three concentric zones (per axis, in source-norm coords):
-    ///   • `h_dead = (deadzoneFraction / 2) / max(1, zoomFactor)` — inside
-    ///     this radius, no spring force; anchor velocity damps to zero
-    ///     and the cursor moves freely within the viewport.
-    ///   • `h_safe = (safeZoneFraction / 2) / max(1, zoomFactor)` — the
-    ///     hard safe-zone boundary; cursor must never exit the central
-    ///     `safeZoneFraction` of the visible viewport.
-    ///   • Between `h_dead` and `h_safe` ("active band") — critically-
-    ///     damped spring pulls the anchor toward the cursor with a
-    ///     boundary-adaptive τ that ramps from `tauRelaxed` (loose,
-    ///     just past the deadzone edge) to `tauTight` (snappy, at the
-    ///     safe-zone wall).
+    /// Default mode (`deadzoneFraction = 0`) is a **boundary-adaptive
+    /// soft spring**: the spring is always engaged, pulling the anchor
+    /// toward the cursor across the entire viewport, with τ ramping by
+    /// distance to the safe-zone wall. Near the centre τ is `tauRelaxed`
+    /// (0.18 s by default — gentle ~360 ms-to-catch-up that reads as
+    /// cinematic lag); near the safe-zone wall τ tightens to `tauTight`
+    /// (0.04 s — snappy catch-up before the cursor escapes the safe
+    /// zone). Cursor sits near-centred at rest, leads the camera by a
+    /// small visible offset during motion (Screen Studio / Loom pattern).
+    /// Opting into a non-zero `deadzoneFraction` carves out an inner
+    /// no-force region — see below for the geometry when that's used.
     ///
-    /// Spring target trick: instead of pulling the anchor toward the
-    /// raw cursor position, the spring pulls toward `cursor - h_dead`
-    /// in the cursor's direction. So the spring's rest state is "cursor
-    /// at the deadzone boundary" — once the anchor catches up enough
-    /// that the cursor is back inside the deadzone, the spring force
-    /// vanishes naturally (target offset = 0) and the anchor coasts to
-    /// a stop. Continuous gradient, no discontinuity at the deadzone
-    /// boundary.
+    /// `h_safe = (safeZoneFraction / 2) / max(1, zoomFactor)` is the
+    /// hard safe-zone boundary; cursor must never exit the central
+    /// `safeZoneFraction` of the visible viewport. After each substep
+    /// the anchor is clamped to `cursor ± h_safe` if the spring couldn't
+    /// catch up — failsafe for capture-rate dropouts and synthetic
+    /// teleports.
+    ///
+    /// Opt-in deadzone (`deadzoneFraction > 0`): an inner radius
+    /// `h_dead = (deadzoneFraction / 2) / max(1, zoomFactor)` becomes a
+    /// no-force region; anchor velocity damps to zero inside, cursor
+    /// moves freely within the viewport, spring engages only past the
+    /// deadzone edge. The spring target then becomes
+    /// `cursor − h_dead` in the cursor's direction, so the rest state
+    /// is "cursor at the deadzone boundary" — continuous gradient with
+    /// no discontinuity at the boundary. The boundary-adaptive τ ramp
+    /// in this mode spans the *active band* `[h_dead, h_safe]` instead
+    /// of `[0, h_safe]`. Used by callers that want explicit calm-frame
+    /// behaviour over soft tracking.
+    ///
+    /// `lookaheadSeconds` + `lookaheadConfidence` (optional) shift the
+    /// spring target forward along the cursor's instantaneous velocity:
+    /// `target = cursor + velocity · lookaheadSeconds · confidence[i]`.
+    /// Pass `lookaheadConfidence = nil` for a fixed-strength prediction
+    /// (confidence = 1 at every sample). Pass a same-length array of
+    /// `[0, 1]` values (typically from `IntentScorer`'s deceleration
+    /// signal) to gate prediction on per-sample confidence — at 0 the
+    /// behaviour is identical to a no-lookahead follow. The cursor's
+    /// actual position is still used for the hard-barrier safe-zone
+    /// invariant, so a wrong prediction (cursor changes direction
+    /// mid-decel) still cannot exceed the safe zone.
     ///
     /// τ ramp inside the active band:
     ///   `e = max(|cx-ax|, |cy-ay|) − h_dead) / (h_safe − h_dead)`,
@@ -257,10 +418,12 @@ public enum MouseTrajectory {
     public static func anchorFollow(
         _ samples: [ZoomTrajectorySample],
         zoomFactor: Double,
-        deadzoneFraction: Double = 0.60,
+        deadzoneFraction: Double = 0.0,
         safeZoneFraction: Double = 0.80,
         tauRelaxed: Double = 0.18,
-        tauTight: Double = 0.04
+        tauTight: Double = 0.04,
+        lookaheadSeconds: Double = 0.0,
+        lookaheadConfidence: [Double]? = nil
     ) -> [ZoomTrajectorySample] {
         guard let first = samples.first else { return [] }
         guard samples.count > 1 else { return samples }
@@ -272,6 +435,7 @@ public enum MouseTrajectory {
         let hSafe = (safeFrac / 2.0) / safeZoom
         let hDead = (deadFrac / 2.0) / safeZoom
         let activeBand = max(1e-9, hSafe - hDead)
+        let safeLookahead = max(0.0, lookaheadSeconds)
         var anchorX = first.x
         var anchorY = first.y
         var vx: Double = 0
@@ -282,19 +446,41 @@ public enum MouseTrajectory {
         result.append(first)
         for i in 1..<samples.count {
             let s = samples[i]
+            let prev = samples[i - 1]
             let dtTotal = max(0.0, s.t - prevT)
             if dtTotal <= 0 {
                 result.append(ZoomTrajectorySample(t: s.t, x: anchorX, y: anchorY))
                 continue
             }
+            // Per-sample cursor velocity from the *cursor* trajectory (not
+            // the anchor's). Used by the lookahead term to shift the spring
+            // target forward along the cursor's heading. Confidence ∈ [0,1]
+            // gates how aggressively we predict — at 0, lookahead vanishes
+            // and we behave exactly like the plain deadzone follow.
+            let cursorVx: Double
+            let cursorVy: Double
+            if dtTotal > 0 {
+                cursorVx = (s.x - prev.x) / dtTotal
+                cursorVy = (s.y - prev.y) / dtTotal
+            } else {
+                cursorVx = 0
+                cursorVy = 0
+            }
+            let conf: Double = {
+                guard let arr = lookaheadConfidence else { return 1.0 }
+                guard i < arr.count else { return 0.0 }
+                return max(0.0, min(1.0, arr[i]))
+            }()
+            let leadX = cursorVx * safeLookahead * conf
+            let leadY = cursorVy * safeLookahead * conf
             var remaining = dtTotal
             while remaining > 0 {
-                // Spring target offset: cursor offset minus the deadzone
-                // radius in the cursor's direction. Inside the deadzone
-                // the target offset is zero, so the spring exerts no
-                // force — anchor velocity damps to a stop.
-                let dxRaw = s.x - anchorX
-                let dyRaw = s.y - anchorY
+                // Spring target offset: cursor (+ lookahead·v·conf) offset
+                // minus the deadzone radius in the cursor's direction.
+                // Inside the deadzone the target offset is zero, so the
+                // spring exerts no force — anchor velocity damps to a stop.
+                let dxRaw = (s.x + leadX) - anchorX
+                let dyRaw = (s.y + leadY) - anchorY
                 let targetDx = abs(dxRaw) > hDead ? dxRaw - copysign(hDead, dxRaw) : 0
                 let targetDy = abs(dyRaw) > hDead ? dyRaw - copysign(hDead, dyRaw) : 0
                 // Adaptive τ: ramps from relaxed (just past deadzone) to

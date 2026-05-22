@@ -34,6 +34,28 @@ public enum EffectEvaluator {
     /// motion-softening cue is preserved but text edges stay crisp).
     static let screenZoomBlurMaxStrength: Double = 0.012
 
+    /// Camera-velocity blur ramp (Phase 3c). Below `blurThresholdSpeed`
+    /// the camera is treated as still — no blur, even if the user is
+    /// mid-zoom but cursor is parked in the deadzone. Above
+    /// `blurSaturationSpeed` the blur saturates at
+    /// `screenZoomBlurMaxStrength`. Tuned so a slow drift produces 0,
+    /// a deliberate pan produces just-visible softening, and a fast
+    /// fling caps out (rather than dominating the frame).
+    ///
+    /// Norm-units / sec on the per-frame zoom centre. 0.05 covers
+    /// sub-deadzone wobble; 1.0 corresponds to "camera traverses the
+    /// whole viewport in one second" — well past anything a Screen
+    /// Studio-style follow should sustain.
+    static let blurThresholdSpeed: Double = 0.05
+    static let blurSaturationSpeed: Double = 1.0
+
+    /// Δt used to finite-difference the zoom centre when computing the
+    /// camera's instantaneous speed for the blur ramp. One 60 fps frame
+    /// is short enough that the difference closely tracks the
+    /// instantaneous velocity, long enough that quantisation in the
+    /// Catmull-Rom interpolation doesn't dominate.
+    static let blurVelocityDt: Double = 1.0 / 60.0
+
     public static func apply(
         keyframes: [EffectKeyframe],
         baseLayout: ResolvedLayout,
@@ -71,16 +93,36 @@ public enum EffectEvaluator {
         }
         if let winner {
             layout = applyZoom(winner.kf, strength: winner.strength, atTime: t, to: layout)
-            // Per-frame radial motion-blur intensity for the screen layer.
-            // 4·s·(1−s) is a smooth bump centred at s = 0.5 — zero at hold
-            // (s = 1) and idle (s = 0), peaks mid-ease where the framing is
-            // changing fastest. Multiplied by a global cap so the effect
-            // stays subtle (a heavy blur reads as "broken playback" rather
-            // than "smooth motion").
-            let easeProgress = winner.strength
-            let bump = 4.0 * easeProgress * (1.0 - easeProgress)
+            // Phase 3c — camera-velocity-driven radial motion blur.
+            // Replaces the earlier ease-driven 4·s·(1−s) bump (which
+            // always blurred during a transition, regardless of whether
+            // the camera was actually moving). Differences the zoomCenter
+            // at t vs t − dt to get the camera's instantaneous norm-units/s
+            // speed; blur ramps in via smoothstep between
+            // `blurThresholdSpeed` and `blurSaturationSpeed`. A still
+            // camera (cursor parked in the deadzone, zoom holding) reads
+            // as 0 — calm framing isn't softened. Only deliberate pans
+            // and fast settling motions blur, masking spring vibration
+            // without becoming a visual effect of its own.
             let center = zoomCenter(for: winner.kf, atTime: t)
-            layout.screenZoomBlurStrength = Float(max(0.0, min(1.0, bump)) * Self.screenZoomBlurMaxStrength)
+            let prevT = max(0.0, t - Self.blurVelocityDt)
+            let prevCenter = zoomCenter(for: winner.kf, atTime: prevT)
+            let dx = center.x - prevCenter.x
+            let dy = center.y - prevCenter.y
+            let dt = max(1e-6, t - prevT)
+            let cameraSpeed = (dx * dx + dy * dy).squareRoot() / dt
+            let speedNorm = MouseTrajectory.smoothstep(
+                Self.blurThresholdSpeed,
+                Self.blurSaturationSpeed,
+                cameraSpeed
+            )
+            // Multiply by ease strength too — if the keyframe is fading
+            // in / out, the screen rect itself is still being interpolated
+            // toward / away from the zoomed framing, so the visible blur
+            // should ramp with the keyframe's authority over the layout.
+            // Otherwise a hard-cut blur would pop at t = keyframe.start.
+            let easeWeight = max(0.0, min(1.0, winner.strength))
+            layout.screenZoomBlurStrength = Float(speedNorm * easeWeight * Self.screenZoomBlurMaxStrength)
             layout.screenZoomBlurCenterUV = SIMD2(
                 Float(max(0.0, min(1.0, center.x))),
                 Float(max(0.0, min(1.0, center.y)))

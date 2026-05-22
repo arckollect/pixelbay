@@ -3,10 +3,14 @@ import XCTest
 
 final class MouseTrajectoryAnchorFollowTests: XCTestCase {
 
-    // At zoomFactor 2.0 with the default `deadzoneFraction = 0.60` and
-    // `safeZoneFraction = 0.80`:
-    private let hDeadAtZoom2 = 0.60 / 2.0 / 2.0  // 0.15
+    // At zoomFactor 2.0 with the default `deadzoneFraction = 0.0` and
+    // `safeZoneFraction = 0.80` (v5.5 onward — anchor is a continuous
+    // soft spring, no inner no-force zone). Tests that exercise an
+    // opt-in deadzone pass `deadzoneFraction: 0.55` explicitly and use
+    // `optInHDead` for their geometry.
     private let hSafeAtZoom2 = 0.80 / 2.0 / 2.0  // 0.20
+    private let optInDeadzoneFrac = 0.55
+    private let optInHDeadAtZoom2 = 0.55 / 2.0 / 2.0  // 0.1375
 
     // MARK: - Empty / degenerate input
 
@@ -24,12 +28,14 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
         XCTAssertEqual(out[0].y, only.y, accuracy: 1e-12)
     }
 
-    // MARK: - Deadzone
+    // MARK: - Opt-in deadzone (callers passing deadzoneFraction > 0)
 
-    func test_anchorFollow_smallMotionInsideDeadzone_anchorStaysPut() {
+    func test_anchorFollow_smallMotionInsideOptInDeadzone_anchorStaysPut() {
+        // Caller explicitly opts into a 0.55 deadzone (the v5.4 setting,
+        // kept available as a knob even though v5.5 defaults to 0).
         // Cursor wanders within ±0.05 of the start position, entirely
-        // inside the 0.0875 deadzone half-width at zoom 2. Spring exerts
-        // no force inside the deadzone, so the anchor must not drift.
+        // inside the 0.1375 deadzone half-width at zoom 2. Spring exerts
+        // no force inside the opt-in deadzone, so the anchor must not drift.
         let start = ZoomTrajectorySample(t: 0.0, x: 0.50, y: 0.50)
         let samples: [ZoomTrajectorySample] = [
             start,
@@ -39,20 +45,52 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
             ZoomTrajectorySample(t: 0.4, x: 0.53, y: 0.54),
             ZoomTrajectorySample(t: 0.5, x: 0.48, y: 0.47)
         ]
-        let out = MouseTrajectory.anchorFollow(samples, zoomFactor: 2.0)
+        let out = MouseTrajectory.anchorFollow(
+            samples,
+            zoomFactor: 2.0,
+            deadzoneFraction: optInDeadzoneFrac
+        )
         for sample in out.dropFirst() {
             XCTAssertEqual(sample.x, start.x, accuracy: 1e-6,
-                           "anchor must hold steady while cursor wanders inside the deadzone")
+                           "anchor must hold steady while cursor wanders inside the opt-in deadzone")
             XCTAssertEqual(sample.y, start.y, accuracy: 1e-6)
         }
     }
 
-    // MARK: - Steady-state lag past the deadzone
+    // MARK: - Default continuous soft spring (v5.5 production path)
 
-    func test_anchorFollow_sustainedMotionPastDeadzone_anchorTracksWithBoundedLag() {
-        // Cursor moves at v = 0.20 norm/s for 4s. Spring engages once
-        // the cursor crosses the deadzone, and the lag stays bounded by
-        // the safe-zone half-width.
+    func test_anchorFollow_noDeadzone_anchorTracksAtRelaxedTau() {
+        // With deadzoneFraction = 0 (the default), the spring is always
+        // engaged. A cursor sustained at constant velocity inside the
+        // safe zone produces a measurable but bounded steady-state lag:
+        // ≈ 2·v·τ_relaxed = 2·0.20·0.18 = 0.072 norm-units. The exact
+        // value depends on the boundary-adaptive τ ramp (τ tightens as
+        // cursor approaches the wall, reducing actual lag below the
+        // closed-form bound) — assert it's measurable AND ≤ hSafe.
+        let v = 0.20
+        let duration = 4.0
+        let dt = 0.02
+        let count = Int(duration / dt)
+        let samples: [ZoomTrajectorySample] = (0...count).map { i in
+            let t = Double(i) * dt
+            return ZoomTrajectorySample(t: t, x: 0.50 + v * t, y: 0.5)
+        }
+        let out = MouseTrajectory.anchorFollow(samples, zoomFactor: 2.0)
+        let lag = samples.last!.x - out.last!.x
+        XCTAssertGreaterThan(lag, 0.0,
+                             "continuous spring must produce measurable trailing lag during sustained motion")
+        XCTAssertLessThanOrEqual(lag, hSafeAtZoom2 + 1e-9,
+                                 "lag must respect the safe-zone invariant even without a deadzone")
+    }
+
+    // MARK: - Steady-state lag past the opt-in deadzone
+
+    func test_anchorFollow_sustainedMotionPastOptInDeadzone_anchorTracksWithBoundedLag() {
+        // With an opt-in 0.55 deadzone, cursor moves at v = 0.20 norm/s
+        // for 4 s. Spring engages once the cursor crosses the deadzone
+        // edge; lag stays bounded between the deadzone half-width (no
+        // spring force before then) and the safe-zone half-width (hard
+        // barrier).
         let v = 0.20
         let duration = 4.0
         let dt = 0.02
@@ -61,10 +99,14 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
             let t = Double(i) * dt
             return ZoomTrajectorySample(t: t, x: 0.10 + v * t, y: 0.5)
         }
-        let out = MouseTrajectory.anchorFollow(samples, zoomFactor: 2.0)
+        let out = MouseTrajectory.anchorFollow(
+            samples,
+            zoomFactor: 2.0,
+            deadzoneFraction: optInDeadzoneFrac
+        )
         let lag = samples.last!.x - out.last!.x
-        XCTAssertGreaterThan(lag, hDeadAtZoom2 - 1e-9,
-                             "after sustained motion the cursor must have exited the deadzone, producing measurable lag")
+        XCTAssertGreaterThan(lag, optInHDeadAtZoom2 - 1e-9,
+                             "after sustained motion the cursor must have exited the opt-in deadzone, producing measurable lag")
         XCTAssertLessThanOrEqual(lag, hSafeAtZoom2 + 1e-9,
                                  "anchor lag must never exceed the safe-zone half-width")
     }
@@ -105,13 +147,15 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
                        "anchor must sit exactly at the trailing safe-zone wall after a forward teleport")
     }
 
-    // MARK: - Continuity past the deadzone
+    // MARK: - Monotonicity under sustained motion
 
-    func test_anchorFollow_motionPastDeadzone_anchorDeltaIsMonotone() {
-        // Cursor moves continuously over a long sweep that fully crosses
-        // the deadzone. Once past the deadzone boundary the spring is
-        // engaged and the anchor moves monotonically with the cursor —
-        // no plateaus, no oscillations.
+    func test_anchorFollow_monotoneInput_producesMonotoneAnchor() {
+        // Constant-velocity cursor sweep. The critically-damped spring
+        // must produce a monotone anchor output — no plateaus, no
+        // oscillations. Holds regardless of deadzone setting (with
+        // deadzone=0 the spring is always engaged; with a non-zero
+        // deadzone the anchor stays at its initial position until the
+        // cursor crosses the deadzone, then tracks monotonically).
         let dt = 0.02
         let count = 60
         let samples: [ZoomTrajectorySample] = (0...count).map { i in
