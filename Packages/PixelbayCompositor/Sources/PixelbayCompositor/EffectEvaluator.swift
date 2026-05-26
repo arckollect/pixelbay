@@ -26,15 +26,39 @@ import PixelbayCore
 // passes this to MetalRenderGraph just like a static layout.
 
 public enum EffectEvaluator {
-    /// Phase 3d screen-blur peak sigma in pixels, applied via a small
-    /// Gaussian on the screen layer. Driven by `4·s·(1−s)` of the
-    /// keyframe's eased strength so it ramps up through the ease-in,
-    /// resolves to crisp text at the hold, and ramps again on ease-out.
-    /// At 1.5 px the kernel is just barely perceptible — a soft veil
-    /// during transitions, not a warp effect. Replaces the Phase 3c
-    /// camera-velocity-driven radial zoom blur, which felt like
-    /// light-speed warping during zooms.
+    /// Phase 3d transition-blur peak sigma in pixels. Driven by the eased
+    /// strength bell `4·s·(1−s)` so it ramps `0 → peak → 0` across each
+    /// ease window, hits 0 during held zoom and off-keyframe. Replaces
+    /// the Phase 3c camera-velocity radial blur for the *transition*
+    /// portion — Gaussian, not radial, so it reads as a soft veil rather
+    /// than a warp.
     static let screenZoomBlurPeakSigmaPx: Double = 1.5
+
+    /// Phase 3d iter 2 pan-blur peak sigma in pixels. Combined with the
+    /// transition bell via `max(...)`, so during a transition the bell
+    /// dominates and during held-zoom cursor follows a pan-driven
+    /// Gaussian softens the in-zoom motion. Re-introduces the "buttery
+    /// pan" cue the radial blur was trying (and failing) to provide in
+    /// Phase 3c — same kernel as the transition blur, just velocity-
+    /// gated instead of ease-gated. Held-zoom with a stationary cursor
+    /// still reads as 0 (no blur).
+    static let screenPanBlurPeakSigmaPx: Double = 1.0
+
+    /// Camera-speed ramp for the pan blur, in norm-units/sec on the
+    /// per-frame zoom centre. Below threshold the camera is treated as
+    /// still (no blur); above saturation the pan blur hits its peak.
+    /// Tuned so a slow drift produces 0, a deliberate follow produces
+    /// just-visible softening, and a fast chase caps out (rather than
+    /// dominating the frame).
+    static let panBlurThresholdSpeed: Double = 0.10
+    static let panBlurSaturationSpeed: Double = 1.20
+
+    /// Δt used to finite-difference the zoom centre when computing the
+    /// camera's instantaneous speed for the pan-blur ramp. One 60 fps
+    /// frame is short enough that the difference closely tracks the
+    /// instantaneous velocity, long enough that quantisation in the
+    /// Catmull-Rom interpolation doesn't dominate.
+    static let panBlurVelocityDt: Double = 1.0 / 60.0
 
     public static func apply(
         keyframes: [EffectKeyframe],
@@ -73,16 +97,33 @@ public enum EffectEvaluator {
         }
         if let winner {
             layout = applyZoom(winner.kf, strength: winner.strength, atTime: t, to: layout)
-            // Phase 3d — ease-curve-driven Gaussian veil. The `4·s·(1−s)`
-            // bell of the keyframe's eased strength peaks mid-ease-in and
-            // mid-ease-out, and is 0 during the held (strength=1) and off
-            // (strength=0) portions. So the soft veil materialises only
-            // while the rect is actually growing or shrinking, never on
-            // pans, never on settled framing. Sigma is in pixels; the
-            // shader normalises against the layer rect's size to apply
-            // the kernel symmetrically across non-square viewports.
-            let bell = 4.0 * winner.strength * (1.0 - winner.strength)
-            layout.screenZoomBlurSigmaPx = Float(max(0.0, bell) * Self.screenZoomBlurPeakSigmaPx)
+            // Phase 3d iter 2 — combined transition-bell + pan-velocity
+            // sigma. Transition term peaks mid-ease and resolves crisp at
+            // hold (same as Phase 3d). Pan term ramps with camera speed
+            // (norm-units/s on the zoomCenter finite difference), so
+            // in-zoom cursor follows pick up a soft Gaussian softening
+            // while held-zoom-with-stationary-cursor stays bit-identical
+            // to no blur. Combined via max so transitions and pans don't
+            // double-count — the bigger one wins.
+            let bell = max(0.0, 4.0 * winner.strength * (1.0 - winner.strength))
+            let transitionSigma = bell * Self.screenZoomBlurPeakSigmaPx
+            let center = zoomCenter(for: winner.kf, atTime: t)
+            let prevT = max(0.0, t - Self.panBlurVelocityDt)
+            let prevCenter = zoomCenter(for: winner.kf, atTime: prevT)
+            let dx = center.x - prevCenter.x
+            let dy = center.y - prevCenter.y
+            let dt = max(1e-6, t - prevT)
+            let cameraSpeed = (dx * dx + dy * dy).squareRoot() / dt
+            let panRamp = MouseTrajectory.smoothstep(
+                Self.panBlurThresholdSpeed,
+                Self.panBlurSaturationSpeed,
+                cameraSpeed
+            )
+            // Pan blur weighted by the keyframe's eased strength so it
+            // ramps with the keyframe's authority — no hard-cut blur pop
+            // at t = keyframe.start.
+            let panSigma = panRamp * winner.strength * Self.screenPanBlurPeakSigmaPx
+            layout.screenZoomBlurSigmaPx = Float(max(transitionSigma, panSigma))
         }
 
         for kf in keyframes where kf.kind == .talkingHeadSwap {

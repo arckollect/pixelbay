@@ -3,13 +3,15 @@ import XCTest
 
 final class MouseTrajectoryAnchorFollowTests: XCTestCase {
 
-    // At zoomFactor 2.0 with the Phase 3d defaults: `deadzoneFraction = 0.0`
-    // and `safeZoneFraction = 0.50` (Phase 3d tightened from 0.80 so the
-    // boundary-adaptive τ engages earlier as cursor approaches the wall).
-    // Tests that exercise an opt-in deadzone pass it AND an explicit
-    // `safeZoneFraction: 0.80` so the deadzone+safezone band stays wide
-    // enough for the original assertions.
-    private let hSafeAtZoom2 = 0.50 / 2.0 / 2.0  // 0.125
+    // At zoomFactor 2.0 with the Phase 3d iter 2 defaults:
+    // `deadzoneFraction = 0.0` and `safeZoneFraction = 0.30` (tightened
+    // from 0.50 once `cameraDamped` was removed from the upstream anchor
+    // path — the spring now sees a near-instant input and can hold the
+    // cursor inside a much smaller safe zone). Tests that exercise an
+    // opt-in deadzone pass it AND an explicit `safeZoneFraction: 0.80`
+    // so the deadzone+safezone band stays wide enough for the original
+    // assertions.
+    private let hSafeAtZoom2 = 0.30 / 2.0 / 2.0  // 0.075
     private let optInDeadzoneFrac = 0.55
     private let optInSafeZoneFrac = 0.80
     private let optInHSafeAtZoom2 = 0.80 / 2.0 / 2.0  // 0.20
@@ -67,10 +69,9 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
         // With deadzoneFraction = 0 (the default), the spring is always
         // engaged. A cursor sustained at constant velocity inside the
         // safe zone produces a measurable but bounded steady-state lag.
-        // Phase 3d closed-form bound: ≈ 2·v·τ_relaxed = 2·0.20·0.08 = 0.032
-        // norm-units. The actual value depends on the boundary-adaptive τ
-        // ramp (τ tightens as cursor approaches the wall, reducing actual
-        // lag below the bound) — assert it's measurable AND ≤ hSafe.
+        // Phase 3d iter 2 closed-form bound: ≈ 2·v·τ_relaxed = 2·0.20·0.05
+        // = 0.020 norm-units, well inside the 0.075 safe-zone half-width.
+        // Assert lag is measurable AND ≤ hSafe.
         let v = 0.20
         let duration = 4.0
         let dt = 0.02

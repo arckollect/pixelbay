@@ -152,44 +152,34 @@ public enum PreviewCompositionBuilder {
         let duration = maxTimelineEnd
         let outputSize = computeOutputSize(from: screenSize)
         let resolvedPreset = wallpaperSource?.resolve(project.layout) ?? project.layout
-        // Phase 3c split — sprite and anchor are now on separate smoothing
-        // paths (Screen Studio / Loom). Earlier iterations shared
-        // `cameraDamped` between them so sprite + camera moved as one
-        // body; that fixed the "cursor in slow motion while world scrolls"
-        // failure mode of tight-tracking but at the cost of locking the
-        // cursor to the centre of the zoom frame, which reads as
-        // claustrophobic on long pans and steals the click snap.
+        // Phase 3d iteration 2 — sprite and anchor share the SAME upstream
+        // smoothing (`spriteSmoothed`, τ≈0.02 EMA). Earlier Phase 3c split
+        // ran the anchor through `cameraDamped` (velocity-adaptive τ up to
+        // 0.32 s) before `anchorFollow`, so even with anchorFollow at
+        // τ=0.08 the camera saw a 320 ms-lagged signal on fast cursor
+        // motion and the cursor visibly out-ran the camera to the
+        // safe-zone wall. Sharing `spriteSmoothed` means the only lag
+        // between cursor sprite and camera is `anchorFollow`'s spring,
+        // which Phase 3d-iter2 tightens to τRelaxed=0.05 / safeZone=0.30 —
+        // cursor visually locks to camera frame instead of pushing it.
         //
         //   • Sprite path: `spriteSmoothed` (light τ≈0.02 EMA) — kills
         //     capture jitter only; cursor moves at near-real speed so
         //     clicks feel snappy.
-        //   • Anchor path: `cameraDamped` (velocity-adaptive critically-
-        //     damped spring, τ ramps 0.05→0.32 with speed) → fed into
-        //     `applyCursorTrajectory`, which routes the windowed slice
-        //     through `anchorFollow` (Phase 3d: continuous soft spring,
-        //     50 % safe zone, no lookahead — tight enough that the camera
-        //     reads as locked to the cursor). The two paths only coincide
-        //     when the cursor is stationary (both settle on the same point).
-        //
-        // The deadzone is what prevents the old freeze failure, NOT the
-        // shared damping — once the cursor exits the deadzone the spring
-        // engages with bounded lag, and inside the deadzone the cursor
-        // visibly moves around a steady frame.
-        let dampedAnchorMaster: [MouseTrajectorySample]
+        //   • Anchor path: same `spriteSmoothed`, then `anchorFollow`
+        //     (continuous soft spring τ=0.05 s, 30 % safe zone, no
+        //     lookahead). Steady-state cursor-vs-camera lag at v=0.2
+        //     norm/s ≈ 2·v·τ = 0.02 norm-units, far below the safe-zone
+        //     half-width (0.075) so the hard barrier almost never bites.
         let spriteMaster: [MouseTrajectorySample]
         if let master = cursorTrajectory, !master.isEmpty {
-            dampedAnchorMaster = MouseTrajectory.cameraDamped(master)
             spriteMaster = MouseTrajectory.spriteSmoothed(master)
         } else {
-            dampedAnchorMaster = []
             spriteMaster = []
         }
-        // Phase 3d: decel-gated lookahead is gone, so we no longer compute
-        // perSample decel confidence here. The Catmull-Rom-fed anchor spring
-        // with no lookahead does not need it.
         let effects = applyCursorTrajectory(
             to: project.effects,
-            cursorTrajectory: dampedAnchorMaster.isEmpty ? nil : dampedAnchorMaster
+            cursorTrajectory: spriteMaster.isEmpty ? nil : spriteMaster
         )
         // Phase 3c — only enable the synthetic cursor pass when the screen
         // asset was captured with `showsCursor = false` (flagged via
@@ -357,23 +347,22 @@ public enum PreviewCompositionBuilder {
     /// stored sample for the extended portion.
     ///
     /// **Input is assumed pre-smoothed by the caller.** `build()` runs
-    /// `MouseTrajectory.cameraDamped` once for the anchor path and
-    /// `spriteSmoothed` separately for the sprite path. This helper only
-    /// touches the anchor path — it receives the cameraDamped output as
+    /// `MouseTrajectory.spriteSmoothed` (τ≈0.02 EMA) once for both the
+    /// cursor-sprite render path AND the anchor path. This helper only
+    /// touches the anchor path — it receives the spriteSmoothed output as
     /// `cursorTrajectory` and produces per-keyframe trajectory slices for
     /// `EffectEvaluator.zoomCenter` to consume.
     ///
-    /// **Anchor follows via continuous soft spring (Phase 3d).** After
+    /// **Anchor follows via continuous soft spring (Phase 3d iter 2).** After
     /// windowing each cursor-follow keyframe's slice, the slice is routed
-    /// through `MouseTrajectory.anchorFollow` with NO deadzone (continuous
-    /// always-on spring), 50 % safe zone, and NO lookahead. Spring τ ramps
-    /// from `tauRelaxed = 0.08 s` near viewport centre to `tauTight = 0.04 s`
-    /// near the safe-zone wall via the boundary-adaptive ramp — much
-    /// tighter than the 3c values (0.18/0.04 over 80 % safe zone), which
-    /// hand-tested as "cursor leads the camera too much." The 140 ms decel-
-    /// gated lookahead was removed in 3d: with τ at 0.08 s the camera
-    /// already catches up before any practical decel window matters, and
-    /// targeting *ahead* of the cursor was visually amplifying the lead.
+    /// through `MouseTrajectory.anchorFollow` with NO deadzone, 30 % safe
+    /// zone, and NO lookahead. Spring τ ramps from `tauRelaxed = 0.05 s`
+    /// near viewport centre to `tauTight = 0.04 s` near the safe-zone wall.
+    /// Sharing `spriteSmoothed` between sprite and anchor (instead of the
+    /// earlier `cameraDamped`/`spriteSmoothed` split) means the only
+    /// cursor-to-camera lag is the spring itself — at v=0.2 norm/s the
+    /// steady-state lag is ≈ 0.02 norm-units, well inside the 0.075 safe-
+    /// zone half-width, so the hard clamp almost never bites.
     ///
     /// Pinned (gesture) keyframes still short-circuit before this stage —
     /// they want a locked anchor, not a deadzone follow.
