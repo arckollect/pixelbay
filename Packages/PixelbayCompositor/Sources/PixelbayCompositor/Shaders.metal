@@ -24,14 +24,20 @@ struct VertexOut {
 };
 
 // Uniforms shared across passes. Layer-local rect normalisation happens on
-// the CPU side (vertex inputs).
+// the CPU side (vertex inputs). Phase 3d swapped the radial zoom-blur for a
+// Gaussian veil driven by `screenBlurSigmaPx`; the trailing pads keep this
+// struct 16-byte aligned and matched in size with the Swift-side mirror.
 struct LayerUniforms {
     float2 outputSizePx;        // total framebuffer in pixels
     float2 layerSizePx;         // this layer's rect in pixels
     float cornerRadiusPx;       // 0 disables rounded-rect masking
     float isCircle;             // 1 → mask to inscribed circle (overrides cornerRadius)
     float opacity;              // Phase 3b talking-head crossfade — multiplies final alpha
+    float screenBlurSigmaPx;    // Phase 3d Gaussian sigma in pixels; 0 = no blur
     float _pad0;
+    float _pad1;
+    float _pad2;
+    float _pad3;
 };
 
 // Phase 3a background pass.
@@ -103,14 +109,46 @@ static inline float layerAlphaMask(VertexOut in, constant LayerUniforms &u) {
     return saturate(0.5 - d);
 }
 
-// BGRA fragment: simple sample, optional alpha mask.
+// Phase 3d Gaussian veil. 9-tap cross (center + ±σ + ±2σ on each axis).
+// `sigmaPx` ≤ 0.5 short-circuits to a single sample.
+static inline float4 screenBlurSample(
+    texture2d<float, access::sample> tex,
+    sampler s,
+    float2 uv,
+    float2 layerSizePx,
+    float sigmaPx
+) {
+    if (sigmaPx <= 0.5) {
+        return tex.sample(s, uv);
+    }
+    float2 sigmaUV = float2(
+        sigmaPx / max(1.0, layerSizePx.x),
+        sigmaPx / max(1.0, layerSizePx.y)
+    );
+    const float w0 = 1.0;
+    const float w1 = 0.6065;
+    const float w2 = 0.1353;
+    const float wSum = w0 + 4.0 * w1 + 4.0 * w2;
+    float4 acc = tex.sample(s, uv) * w0;
+    acc += tex.sample(s, uv + float2( sigmaUV.x, 0.0)) * w1;
+    acc += tex.sample(s, uv + float2(-sigmaUV.x, 0.0)) * w1;
+    acc += tex.sample(s, uv + float2(0.0,  sigmaUV.y)) * w1;
+    acc += tex.sample(s, uv + float2(0.0, -sigmaUV.y)) * w1;
+    acc += tex.sample(s, uv + float2( 2.0 * sigmaUV.x, 0.0)) * w2;
+    acc += tex.sample(s, uv + float2(-2.0 * sigmaUV.x, 0.0)) * w2;
+    acc += tex.sample(s, uv + float2(0.0,  2.0 * sigmaUV.y)) * w2;
+    acc += tex.sample(s, uv + float2(0.0, -2.0 * sigmaUV.y)) * w2;
+    return acc / wSum;
+}
+
+// BGRA fragment: Gaussian-veiled sample, optional alpha mask.
 fragment float4 bgraFragment(
     VertexOut in [[stage_in]],
     texture2d<float, access::sample> tex [[texture(0)]],
     constant LayerUniforms &u [[buffer(0)]]
 ) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float4 c = tex.sample(s, in.texCoord);
+    float4 c = screenBlurSample(tex, s, in.texCoord, u.layerSizePx, u.screenBlurSigmaPx);
     c.a *= layerAlphaMask(in, u) * u.opacity;
     return c;
 }
@@ -125,8 +163,10 @@ fragment float4 nv12Fragment(
     constant LayerUniforms &u [[buffer(0)]]
 ) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float y = yPlane.sample(s, in.texCoord).r;
-    float2 cbcr = cbcrPlane.sample(s, in.texCoord).rg;
+    float4 yAcc = screenBlurSample(yPlane, s, in.texCoord, u.layerSizePx, u.screenBlurSigmaPx);
+    float4 cbcrAcc = screenBlurSample(cbcrPlane, s, in.texCoord, u.layerSizePx, u.screenBlurSigmaPx);
+    float y = yAcc.r;
+    float2 cbcr = cbcrAcc.rg;
 
     float yLin = (y - 16.0/255.0) * (255.0/219.0);
     float cb = cbcr.r - 0.5;

@@ -3,13 +3,16 @@ import XCTest
 
 final class MouseTrajectoryAnchorFollowTests: XCTestCase {
 
-    // At zoomFactor 2.0 with the default `deadzoneFraction = 0.0` and
-    // `safeZoneFraction = 0.80` (v5.5 onward — anchor is a continuous
-    // soft spring, no inner no-force zone). Tests that exercise an
-    // opt-in deadzone pass `deadzoneFraction: 0.55` explicitly and use
-    // `optInHDead` for their geometry.
-    private let hSafeAtZoom2 = 0.80 / 2.0 / 2.0  // 0.20
+    // At zoomFactor 2.0 with the Phase 3d defaults: `deadzoneFraction = 0.0`
+    // and `safeZoneFraction = 0.50` (Phase 3d tightened from 0.80 so the
+    // boundary-adaptive τ engages earlier as cursor approaches the wall).
+    // Tests that exercise an opt-in deadzone pass it AND an explicit
+    // `safeZoneFraction: 0.80` so the deadzone+safezone band stays wide
+    // enough for the original assertions.
+    private let hSafeAtZoom2 = 0.50 / 2.0 / 2.0  // 0.125
     private let optInDeadzoneFrac = 0.55
+    private let optInSafeZoneFrac = 0.80
+    private let optInHSafeAtZoom2 = 0.80 / 2.0 / 2.0  // 0.20
     private let optInHDeadAtZoom2 = 0.55 / 2.0 / 2.0  // 0.1375
 
     // MARK: - Empty / degenerate input
@@ -48,7 +51,8 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
         let out = MouseTrajectory.anchorFollow(
             samples,
             zoomFactor: 2.0,
-            deadzoneFraction: optInDeadzoneFrac
+            deadzoneFraction: optInDeadzoneFrac,
+            safeZoneFraction: optInSafeZoneFrac
         )
         for sample in out.dropFirst() {
             XCTAssertEqual(sample.x, start.x, accuracy: 1e-6,
@@ -62,11 +66,11 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
     func test_anchorFollow_noDeadzone_anchorTracksAtRelaxedTau() {
         // With deadzoneFraction = 0 (the default), the spring is always
         // engaged. A cursor sustained at constant velocity inside the
-        // safe zone produces a measurable but bounded steady-state lag:
-        // ≈ 2·v·τ_relaxed = 2·0.20·0.18 = 0.072 norm-units. The exact
-        // value depends on the boundary-adaptive τ ramp (τ tightens as
-        // cursor approaches the wall, reducing actual lag below the
-        // closed-form bound) — assert it's measurable AND ≤ hSafe.
+        // safe zone produces a measurable but bounded steady-state lag.
+        // Phase 3d closed-form bound: ≈ 2·v·τ_relaxed = 2·0.20·0.08 = 0.032
+        // norm-units. The actual value depends on the boundary-adaptive τ
+        // ramp (τ tightens as cursor approaches the wall, reducing actual
+        // lag below the bound) — assert it's measurable AND ≤ hSafe.
         let v = 0.20
         let duration = 4.0
         let dt = 0.02
@@ -102,12 +106,13 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
         let out = MouseTrajectory.anchorFollow(
             samples,
             zoomFactor: 2.0,
-            deadzoneFraction: optInDeadzoneFrac
+            deadzoneFraction: optInDeadzoneFrac,
+            safeZoneFraction: optInSafeZoneFrac
         )
         let lag = samples.last!.x - out.last!.x
         XCTAssertGreaterThan(lag, optInHDeadAtZoom2 - 1e-9,
                              "after sustained motion the cursor must have exited the opt-in deadzone, producing measurable lag")
-        XCTAssertLessThanOrEqual(lag, hSafeAtZoom2 + 1e-9,
+        XCTAssertLessThanOrEqual(lag, optInHSafeAtZoom2 + 1e-9,
                                  "anchor lag must never exceed the safe-zone half-width")
     }
 

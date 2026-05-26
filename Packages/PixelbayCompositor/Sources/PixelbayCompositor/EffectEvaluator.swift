@@ -26,35 +26,15 @@ import PixelbayCore
 // passes this to MetalRenderGraph just like a static layout.
 
 public enum EffectEvaluator {
-    /// Global ceiling on the radial-blur strength fed to the screen shader.
-    /// Even at peak mid-ease the kernel only spreads ~1.2 % of the radius —
-    /// just enough to hint at motion without softening UI text. Was 0.06
-    /// originally, then 0.025 — still read as too blurry; halved again
-    /// to 0.012 which is right at the threshold of perceptibility (the
-    /// motion-softening cue is preserved but text edges stay crisp).
-    static let screenZoomBlurMaxStrength: Double = 0.012
-
-    /// Camera-velocity blur ramp (Phase 3c). Below `blurThresholdSpeed`
-    /// the camera is treated as still — no blur, even if the user is
-    /// mid-zoom but cursor is parked in the deadzone. Above
-    /// `blurSaturationSpeed` the blur saturates at
-    /// `screenZoomBlurMaxStrength`. Tuned so a slow drift produces 0,
-    /// a deliberate pan produces just-visible softening, and a fast
-    /// fling caps out (rather than dominating the frame).
-    ///
-    /// Norm-units / sec on the per-frame zoom centre. 0.05 covers
-    /// sub-deadzone wobble; 1.0 corresponds to "camera traverses the
-    /// whole viewport in one second" — well past anything a Screen
-    /// Studio-style follow should sustain.
-    static let blurThresholdSpeed: Double = 0.05
-    static let blurSaturationSpeed: Double = 1.0
-
-    /// Δt used to finite-difference the zoom centre when computing the
-    /// camera's instantaneous speed for the blur ramp. One 60 fps frame
-    /// is short enough that the difference closely tracks the
-    /// instantaneous velocity, long enough that quantisation in the
-    /// Catmull-Rom interpolation doesn't dominate.
-    static let blurVelocityDt: Double = 1.0 / 60.0
+    /// Phase 3d screen-blur peak sigma in pixels, applied via a small
+    /// Gaussian on the screen layer. Driven by `4·s·(1−s)` of the
+    /// keyframe's eased strength so it ramps up through the ease-in,
+    /// resolves to crisp text at the hold, and ramps again on ease-out.
+    /// At 1.5 px the kernel is just barely perceptible — a soft veil
+    /// during transitions, not a warp effect. Replaces the Phase 3c
+    /// camera-velocity-driven radial zoom blur, which felt like
+    /// light-speed warping during zooms.
+    static let screenZoomBlurPeakSigmaPx: Double = 1.5
 
     public static func apply(
         keyframes: [EffectKeyframe],
@@ -93,40 +73,16 @@ public enum EffectEvaluator {
         }
         if let winner {
             layout = applyZoom(winner.kf, strength: winner.strength, atTime: t, to: layout)
-            // Phase 3c — camera-velocity-driven radial motion blur.
-            // Replaces the earlier ease-driven 4·s·(1−s) bump (which
-            // always blurred during a transition, regardless of whether
-            // the camera was actually moving). Differences the zoomCenter
-            // at t vs t − dt to get the camera's instantaneous norm-units/s
-            // speed; blur ramps in via smoothstep between
-            // `blurThresholdSpeed` and `blurSaturationSpeed`. A still
-            // camera (cursor parked in the deadzone, zoom holding) reads
-            // as 0 — calm framing isn't softened. Only deliberate pans
-            // and fast settling motions blur, masking spring vibration
-            // without becoming a visual effect of its own.
-            let center = zoomCenter(for: winner.kf, atTime: t)
-            let prevT = max(0.0, t - Self.blurVelocityDt)
-            let prevCenter = zoomCenter(for: winner.kf, atTime: prevT)
-            let dx = center.x - prevCenter.x
-            let dy = center.y - prevCenter.y
-            let dt = max(1e-6, t - prevT)
-            let cameraSpeed = (dx * dx + dy * dy).squareRoot() / dt
-            let speedNorm = MouseTrajectory.smoothstep(
-                Self.blurThresholdSpeed,
-                Self.blurSaturationSpeed,
-                cameraSpeed
-            )
-            // Multiply by ease strength too — if the keyframe is fading
-            // in / out, the screen rect itself is still being interpolated
-            // toward / away from the zoomed framing, so the visible blur
-            // should ramp with the keyframe's authority over the layout.
-            // Otherwise a hard-cut blur would pop at t = keyframe.start.
-            let easeWeight = max(0.0, min(1.0, winner.strength))
-            layout.screenZoomBlurStrength = Float(speedNorm * easeWeight * Self.screenZoomBlurMaxStrength)
-            layout.screenZoomBlurCenterUV = SIMD2(
-                Float(max(0.0, min(1.0, center.x))),
-                Float(max(0.0, min(1.0, center.y)))
-            )
+            // Phase 3d — ease-curve-driven Gaussian veil. The `4·s·(1−s)`
+            // bell of the keyframe's eased strength peaks mid-ease-in and
+            // mid-ease-out, and is 0 during the held (strength=1) and off
+            // (strength=0) portions. So the soft veil materialises only
+            // while the rect is actually growing or shrinking, never on
+            // pans, never on settled framing. Sigma is in pixels; the
+            // shader normalises against the layer rect's size to apply
+            // the kernel symmetrically across non-square viewports.
+            let bell = 4.0 * winner.strength * (1.0 - winner.strength)
+            layout.screenZoomBlurSigmaPx = Float(max(0.0, bell) * Self.screenZoomBlurPeakSigmaPx)
         }
 
         for kf in keyframes where kf.kind == .talkingHeadSwap {
@@ -154,48 +110,84 @@ public enum EffectEvaluator {
         to layout: ResolvedLayout
     ) -> ResolvedLayout {
         let factorAtFullStrength = max(1.0, kf.zoomFactor)
-        let baseFactor = 1.0 + (factorAtFullStrength - 1.0) * strength
-        guard baseFactor > 1.0001 else { return layout }
+        guard factorAtFullStrength > 1.0001, strength > 1e-6 else { return layout }
 
         let screen = layout.screen
         let center = zoomCenter(for: kf, atTime: t)
         let rawCx = max(0, min(1, center.x))
         let rawCy = max(0, min(1, center.y))
-        // Edge-blending is only applied to STATIC anchors (pinned-gesture
-        // marks, single-click auto-zooms with no trajectory). For cursor-
-        // following zooms (trajectory present and not pinned) we must
-        // pass the raw cursor anchor through — the natural clamp below
-        // is what produces the "snap-to-edge" feel where the cursor
-        // stays visible against the viewport edge. Blending the anchor
-        // toward centre when the cursor is near an edge shifts the rect
-        // just inside the clamp, which then renders the cursor sprite
-        // outside the visible viewport entirely (the sprite is anchored
-        // by raw cursor coords against the post-zoom screen rect, so the
-        // blended framing literally moves the cursor off-screen).
+        // Edge-blending only applies to STATIC anchors (pinned-gesture marks,
+        // single-click auto-zooms with no trajectory). Cursor-following
+        // zooms keep the raw anchor — the natural clamp below produces the
+        // snap-to-edge framing that keeps the cursor visible at viewport
+        // edges. Blending toward centre on cursor-follow would shift the
+        // rect just inside the clamp and render the cursor sprite outside
+        // the visible viewport.
         let isCursorFollow = kf.anchorMode != .pinned
             && (kf.trajectory?.isEmpty == false)
-        let (cx, cy, factor): (Double, Double, CGFloat)
+        let (cx, cy, factorAtFull): (Double, Double, CGFloat)
         if isCursorFollow {
-            (cx, cy, factor) = (rawCx, rawCy, baseFactor)
+            (cx, cy, factorAtFull) = (rawCx, rawCy, CGFloat(factorAtFullStrength))
         } else {
-            (cx, cy, factor) = frameAnchor(rawCx: rawCx, rawCy: rawCy, baseFactor: baseFactor)
+            (cx, cy, factorAtFull) = frameAnchor(rawCx: rawCx, rawCy: rawCy, baseFactor: CGFloat(factorAtFullStrength))
         }
 
-        let newWidth = screen.size.width * CGFloat(factor)
-        let newHeight = screen.size.height * CGFloat(factor)
-        // Place the zoomed rect so the cursor (cx, cy) — in source-fraction
-        // space — sits at the visual centre of the original screen rect.
-        // Then clamp so the (larger) rect still fully covers the original;
-        // when the cursor approaches an edge the rect snaps so the edge
-        // aligns, instead of revealing black past the screen.
-        let targetX = screen.minX + screen.size.width / 2
-        let targetY = screen.minY + screen.size.height / 2
-        let unclampedX = targetX - newWidth * CGFloat(cx)
-        let unclampedY = targetY - newHeight * CGFloat(cy)
+        // currentFactor must use the (possibly corner-backed-off) factorAtFull,
+        // not the raw zoomFactor — otherwise the deep-corner backoff is
+        // silently overridden by the linear strength ramp.
+        let currentFactor = 1.0 + (Double(factorAtFull) - 1.0) * strength
+        guard currentFactor > 1.0001 else { return layout }
+
+        // Phase 3d — interpolate the cursor's screen position, not the rect
+        // origin. The old path applied `currentFactor` to the rect size
+        // then clamped the origin to fit the viewport; at low zoom factors
+        // (early in ease-in) the clamp was so tight that even a "centred"
+        // computation barely moved the cursor's screen position — the
+        // cursor would stay near its pre-zoom location until the rect grew
+        // enough to loosen the clamp, then "snap" toward the framed
+        // position. With this lerp the cursor glides smoothly from its
+        // natural unzoomed screen position to its fully-framed position
+        // over the ease curve.
+        //
+        // 1. Compute the cursor's screen position at FULL zoom (where it
+        //    lands at strength=1, fully clamped to keep the rect inside
+        //    the viewport).
+        let framedWidth = screen.size.width * factorAtFull
+        let framedHeight = screen.size.height * factorAtFull
+        let viewportCenterX = screen.minX + screen.size.width / 2
+        let viewportCenterY = screen.minY + screen.size.height / 2
+        let framedUnclampedOriginX = viewportCenterX - framedWidth * CGFloat(cx)
+        let framedUnclampedOriginY = viewportCenterY - framedHeight * CGFloat(cy)
+        let framedMinOriginX = screen.maxX - framedWidth
+        let framedMinOriginY = screen.maxY - framedHeight
+        let framedOriginX = max(framedMinOriginX, min(screen.minX, framedUnclampedOriginX))
+        let framedOriginY = max(framedMinOriginY, min(screen.minY, framedUnclampedOriginY))
+        let framedCursorX = framedOriginX + framedWidth * CGFloat(cx)
+        let framedCursorY = framedOriginY + framedHeight * CGFloat(cy)
+
+        // 2. Natural cursor position at strength=0 (no zoom): cursor sits
+        //    at (cx, cy) within the original screen rect.
+        let naturalCursorX = screen.minX + screen.size.width * CGFloat(cx)
+        let naturalCursorY = screen.minY + screen.size.height * CGFloat(cy)
+
+        // 3. Lerp via the keyframe's eased strength.
+        let s = CGFloat(strength)
+        let currentCursorX = naturalCursorX + (framedCursorX - naturalCursorX) * s
+        let currentCursorY = naturalCursorY + (framedCursorY - naturalCursorY) * s
+
+        // 4. Size the rect at currentFactor and place it so the cursor
+        //    lands at the interpolated screen position. Apply the safe-
+        //    coverage clamp as a no-op safety net (it shouldn't bite at
+        //    strength=0 or strength=1 by construction; intermediate
+        //    strengths stay inside the convex hull of those endpoints).
+        let newWidth = screen.size.width * CGFloat(currentFactor)
+        let newHeight = screen.size.height * CGFloat(currentFactor)
+        let unclampedOriginX = currentCursorX - newWidth * CGFloat(cx)
+        let unclampedOriginY = currentCursorY - newHeight * CGFloat(cy)
         let minOriginX = screen.maxX - newWidth
         let minOriginY = screen.maxY - newHeight
-        let newOriginX = max(minOriginX, min(screen.minX, unclampedX))
-        let newOriginY = max(minOriginY, min(screen.minY, unclampedY))
+        let newOriginX = max(minOriginX, min(screen.minX, unclampedOriginX))
+        let newOriginY = max(minOriginY, min(screen.minY, unclampedOriginY))
 
         var next = layout
         next.screen = LayerRect(
@@ -235,22 +227,40 @@ public enum EffectEvaluator {
         return (cx, cy, factor)
     }
 
-    /// Per-frame zoom centre. When the keyframe carries a non-empty
-    /// `trajectory`, the centre follows it via non-uniform Catmull-Rom
-    /// (Barry-Goldman) across `(t, x, y)` waypoints (keyframe-local time,
-    /// `t=0` at `timelineRange.start`). Non-uniform parameterisation is
-    /// load-bearing — captured trajectory samples are unevenly spaced in
-    /// time (CGEventTap is event-driven, macOS coalesces under load), and
-    /// uniform Catmull-Rom on those gaps produces velocity overshoots at
-    /// each spacing change that read as jitter at zoom factors ≥ 1.5×.
-    /// With only ≤ 2 samples (no outer neighbours available) falls back
-    /// to linear; at the trajectory's first / last segment the missing
-    /// outer neighbour is mirrored from the boundary sample. The lookup
-    /// `t` is clamped to `[first.t, last.t]` so we never extrapolate.
-    /// Falls back to the static `(centerX, centerY)` for manually-
-    /// authored keyframes (`trajectory == nil`) and for the empty-
-    /// explicit sentinel the slice-2 auto-zoom path can emit
-    /// (`trajectory == []`).
+    /// Per-frame zoom centre.
+    ///
+    /// Phase 3d: the centre is **locked** during the ease-in and ease-out
+    /// windows. The ease windows now drive a deliberate rect-growth-in-
+    /// place feel (paired with the screen-position lerp in `applyZoom`):
+    ///   - Ease-in: hold at `trajectory[0]` (cursor-at-trigger). The
+    ///     viewer sees the framing rect grow around the click point.
+    ///   - Hold (middle): non-uniform Catmull-Rom along trajectory — the
+    ///     camera follows live cursor motion via the post-anchorFollow
+    ///     anchor positions.
+    ///   - Ease-out: hold at `trajectory[last]` (cursor at the moment
+    ///     ease-out begins, give or take a few ms). The framing rect
+    ///     shrinks back to 1× without the centre drifting.
+    ///
+    /// The earlier always-Catmull-Rom behaviour caused the focal point to
+    /// wobble while the rect was still small (low zoom factor), which
+    /// read as "the zoom doesn't centre on the cursor — it lands there
+    /// last-second." Locking the centre during the ease windows eliminates
+    /// that wobble: the only motion during the transition comes from the
+    /// strength lerp.
+    ///
+    /// Catmull-Rom (held middle): non-uniform Barry-Goldman across `(t, x,
+    /// y)` waypoints. Non-uniform parameterisation is load-bearing —
+    /// captured trajectory samples are unevenly spaced in time (CGEventTap
+    /// is event-driven, macOS coalesces under load), and uniform Catmull-
+    /// Rom on those gaps produces velocity overshoots at each spacing
+    /// change that read as jitter at zoom factors ≥ 1.5×. With only ≤ 2
+    /// samples (no outer neighbours available) falls back to linear; at
+    /// the trajectory's first / last segment the missing outer neighbour
+    /// is mirrored from the boundary sample.
+    ///
+    /// Falls back to the static `(centerX, centerY)` for manually-authored
+    /// keyframes (`trajectory == nil`) and for the empty-explicit sentinel
+    /// the slice-2 auto-zoom path can emit (`trajectory == []`).
     private static func zoomCenter(
         for kf: EffectKeyframe,
         atTime t: Double
@@ -271,14 +281,37 @@ public enum EffectEvaluator {
         let localT = t - kf.timelineRange.start.seconds
         let firstSample = trajectory[0]
         let lastSample = trajectory[trajectory.count - 1]
-        if localT <= firstSample.t {
+
+        // Phase 3d centre-lock during the ease windows. The keyframe's
+        // ease-in / ease-out durations are inside the keyframe's range, so
+        // localT < easeIn  → still ramping up      → lock to first sample.
+        // localT > range − easeOut → ramping back down → lock to last sample.
+        // Hold (middle) → sample the trajectory normally below.
+        let total = kf.timelineRange.end.seconds - kf.timelineRange.start.seconds
+        let easeIn = max(0.0, kf.easeIn.seconds)
+        let easeOut = max(0.0, kf.easeOut.seconds)
+        let easeBudget = easeIn + easeOut
+        let inEff: Double
+        let outEff: Double
+        if easeBudget > total, total > 0 {
+            let scale = total / easeBudget
+            inEff = easeIn * scale
+            outEff = easeOut * scale
+        } else {
+            inEff = easeIn
+            outEff = easeOut
+        }
+        if localT <= max(firstSample.t, inEff) {
             return (firstSample.x, firstSample.y)
         }
-        if localT >= lastSample.t {
+        let outStart = total - outEff
+        if localT >= min(lastSample.t, outStart) {
             return (lastSample.x, lastSample.y)
         }
-        // Linear scan is fine — auto-zoom segments are short (≤ a few seconds
-        // at 120 Hz → hundreds of samples max). Switch to binary search if
+
+        // Hold portion — non-uniform Catmull-Rom along trajectory. Linear
+        // scan is fine: auto-zoom segments are short (≤ a few seconds at
+        // 120 Hz → hundreds of samples max). Switch to binary search if
         // profiles ever say otherwise.
         for i in 1..<trajectory.count {
             let b = trajectory[i]

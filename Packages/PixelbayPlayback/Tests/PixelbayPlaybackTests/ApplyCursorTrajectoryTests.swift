@@ -94,20 +94,20 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         XCTAssertNil(result[1].trajectory)
     }
 
-    // Phase 3c v5.5: anchor follows via continuous soft spring (no hard
-    // deadzone) with boundary-adaptive τ. Cursor sits near-centred at
-    // rest, leads the camera by a small visible offset during motion —
-    // Screen Studio / Loom pattern.
+    // Phase 3d: anchor follows via tightened continuous soft spring
+    // (relaxed τ = 0.08 s, safe zone 50 %, no lookahead). Cursor
+    // sits near-centred at rest, tracks more tightly than the 3c values
+    // so it never visually trails the camera by a wide margin.
     func test_applyCursorTrajectory_followCursor_continuousSoftSpring() {
         // Cursor wanders gently within ±0.04 of the start position. With
         // no deadzone, the spring is always engaged and the anchor
         // drifts toward the cursor's average position with the relaxed
-        // τ (0.18 s). For a wander whose mean stays near the start,
+        // τ (0.08 s). For a wander whose mean stays near the start,
         // anchor stays close to its start position but is allowed to
         // move — assert it tracks within the safe-zone bound and ends
         // somewhere reasonable rather than locked at the initial point.
         let zoomFactor = 1.5
-        let safeHalf = 0.80 / 2.0 / zoomFactor
+        let safeHalf = 0.50 / 2.0 / zoomFactor
         let input: [MouseTrajectorySample] = (0...20).map { i in
             MouseTrajectorySample(
                 timelineTime: 1.0 + 0.05 * Double(i),
@@ -137,12 +137,11 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
     // cursor with bounded lag (≤ safeZone half-width). Confirms the
     // windowed slice IS being piped through anchorFollow, not stored raw.
     func test_applyCursorTrajectory_followCursor_anchorTracksWithBoundedLagOnSustainedMotion() {
-        // Linear sweep across 0.4 norm-units over 2.0s. The continuous
-        // spring tracks with steady-state lag ≈ 2·v·τ at the relaxed τ
-        // (with the boundary-adaptive ramp reducing it further as the
-        // cursor approaches the wall).
+        // Linear sweep across 0.4 norm-units over 2.0s. Phase 3d steady-
+        // state lag is ≈ 2·v·τ = 2·0.20·0.08 = 0.032 norm-units, well
+        // below the 50 % safe-zone half-width.
         let zoomFactor = 1.5
-        let safeHalf = 0.80 / 2.0 / zoomFactor
+        let safeHalf = 0.50 / 2.0 / zoomFactor
         let input: [MouseTrajectorySample] = (0...40).map { i in
             MouseTrajectorySample(
                 timelineTime: 1.0 + 0.05 * Double(i),

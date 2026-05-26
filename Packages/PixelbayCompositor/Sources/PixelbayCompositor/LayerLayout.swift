@@ -62,16 +62,15 @@ public struct ResolvedLayout: Sendable, Equatable {
     // window while the webcam rect is overlaid on the screen rect, so the
     // webcam crossfades in on top of the still-rendered screen layer.
     public var webcamOpacity: Float
-    /// Strength of the radial motion-blur applied to the screen layer this
-    /// frame, in [0, 1]. EffectEvaluator peaks this mid-zoom-ease (when the
-    /// zoom is changing fastest) and falls to zero during hold/idle so the
-    /// final framed shot stays crisp. 0 = no blur, kernel collapses to a
-    /// single sample.
-    public var screenZoomBlurStrength: Float
-    /// UV centre of the radial blur, in screen-texture [0, 1] space. Aligns
-    /// with the active zoom keyframe's focal point so taps stream outward
-    /// from the same point the zoom is converging on.
-    public var screenZoomBlurCenterUV: SIMD2<Float>
+    /// Phase 3d Gaussian blur sigma in pixels applied to the screen layer
+    /// during zoom transitions. EffectEvaluator peaks this via the eased-
+    /// strength bell (4·s·(1−s)) so it ramps in / out across ease-in and
+    /// ease-out windows, and is zero during the held zoom — settled
+    /// framing stays crisp. Replaces the Phase 3c radial zoom blur, which
+    /// felt like light-speed warping during transitions. The shader
+    /// normalises against the layer rect's size to produce symmetric soft
+    /// veil on non-square viewports.
+    public var screenZoomBlurSigmaPx: Float
 
     public init(
         outputSize: CGSize,
@@ -82,8 +81,7 @@ public struct ResolvedLayout: Sendable, Equatable {
         webcamShape: CamShape,
         webcamCornerRadius: CGFloat,
         webcamOpacity: Float = 1.0,
-        screenZoomBlurStrength: Float = 0,
-        screenZoomBlurCenterUV: SIMD2<Float> = SIMD2(0.5, 0.5)
+        screenZoomBlurSigmaPx: Float = 0
     ) {
         self.outputSize = outputSize
         self.background = background
@@ -93,8 +91,7 @@ public struct ResolvedLayout: Sendable, Equatable {
         self.webcamShape = webcamShape
         self.webcamCornerRadius = webcamCornerRadius
         self.webcamOpacity = webcamOpacity
-        self.screenZoomBlurStrength = screenZoomBlurStrength
-        self.screenZoomBlurCenterUV = screenZoomBlurCenterUV
+        self.screenZoomBlurSigmaPx = screenZoomBlurSigmaPx
     }
 }
 

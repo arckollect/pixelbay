@@ -270,8 +270,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
             cornerRadiusPx: layout.screenCornerRadius,
             isCircle: false,
             opacity: 1.0,
-            radialBlurStrength: layout.screenZoomBlurStrength,
-            radialBlurCenterUV: layout.screenZoomBlurCenterUV,
+            screenBlurSigmaPx: layout.screenZoomBlurSigmaPx,
             cvTextureRefs: &cvTextureRefs
         )
 
@@ -376,10 +375,14 @@ public final class MetalRenderGraph: @unchecked Sendable {
         var cornerRadiusPx: Float
         var isCircle: Float
         var opacity: Float
+        var screenBlurSigmaPx: Float = 0
+        // 8-byte tail padding so this struct matches the Metal-side layout
+        // (Metal aligns to 16 bytes; without this the next struct field
+        // would land in the wrong slot when the buffer is reused).
         var pad0: Float = 0
-        var radialBlurCenterUV: SIMD2<Float> = SIMD2(0.5, 0.5)
-        var radialBlurStrength: Float = 0
         var pad1: Float = 0
+        var pad2: Float = 0
+        var pad3: Float = 0
     }
 
     /// Cursor-specific uniforms. Adds a velocity offset (in cursor-UV space)
@@ -402,8 +405,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
         cornerRadiusPx: CGFloat,
         isCircle: Bool,
         opacity: Float,
-        radialBlurStrength: Float = 0,
-        radialBlurCenterUV: SIMD2<Float> = SIMD2(0.5, 0.5),
+        screenBlurSigmaPx: Float = 0,
         cvTextureRefs: inout [CVMetalTexture]
     ) throws {
         let vertices = makeQuadVertices(rect: destinationRect, outputSize: outputSize)
@@ -415,8 +417,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
             cornerRadiusPx: Float(cornerRadiusPx),
             isCircle: isCircle ? 1 : 0,
             opacity: max(0, min(1, opacity)),
-            radialBlurCenterUV: radialBlurCenterUV,
-            radialBlurStrength: max(0, min(1, radialBlurStrength))
+            screenBlurSigmaPx: max(0, screenBlurSigmaPx)
         )
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerUniforms>.stride, index: 0)
 
@@ -699,41 +700,50 @@ public final class MetalRenderGraph: @unchecked Sendable {
         float cornerRadiusPx;
         float isCircle;
         float opacity;
+        float screenBlurSigmaPx;
         float _pad0;
-        float2 radialBlurCenterUV;
-        float radialBlurStrength;
         float _pad1;
+        float _pad2;
+        float _pad3;
     };
 
-    // Radial multi-tap sampler used by the screen layer. 7 symmetric taps
-    // along (uv - center), each scaled by the layer's radialBlurStrength.
-    // strength = 0 short-circuits to a single sample so non-screen layers
-    // (and the screen layer at hold/idle) stay perfectly crisp.
-    static inline float4 radialBlurSample(
+    // Phase 3d screen blur. Approximate Gaussian as a 9-tap cross
+    // (center + ±σ in 4 directions + ±2σ in 4 directions). Cheaper than
+    // separable two-pass for the subtle (≤ 3 px) sigmas we use, and
+    // visually indistinguishable since the kernel is small. `sigmaPx`
+    // ≤ 0.5 short-circuits to a single sample so held-zoom frames stay
+    // bit-identical to a no-blur pass.
+    static inline float4 screenBlurSample(
         texture2d<float, access::sample> tex,
         sampler s,
         float2 uv,
-        float2 centerUV,
-        float strength
+        float2 layerSizePx,
+        float sigmaPx
     ) {
-        if (strength <= 0.0001) {
+        if (sigmaPx <= 0.5) {
             return tex.sample(s, uv);
         }
-        float2 dir = uv - centerUV;
-        const int N = 7;
-        const float weights[7] = {1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.0};
-        const float weightSum = 16.0;
-        float4 acc = float4(0.0);
-        for (int i = 0; i < N; ++i) {
-            float u_i = (float(i) - 3.0) / 3.0; // [-1, 1]
-            float2 sampleUV = uv + dir * (strength * u_i);
-            // clamp_to_edge sampler keeps off-texture taps inside [0,1], but
-            // we still want to avoid pulling color from far outside the
-            // visible region, so cheap clamp here as well.
-            sampleUV = clamp(sampleUV, float2(0.0), float2(1.0));
-            acc += tex.sample(s, sampleUV) * weights[i];
-        }
-        return acc / weightSum;
+        // Sigma normalised against the layer's pixel size so the kernel
+        // is symmetric in pixels regardless of viewport aspect ratio.
+        float2 sigmaUV = float2(
+            sigmaPx / max(1.0, layerSizePx.x),
+            sigmaPx / max(1.0, layerSizePx.y)
+        );
+        // Gaussian weights at distances 0, 1σ, 2σ.
+        const float w0 = 1.0;
+        const float w1 = 0.6065;  // exp(-0.5)
+        const float w2 = 0.1353;  // exp(-2.0)
+        const float wSum = w0 + 4.0 * w1 + 4.0 * w2;
+        float4 acc = tex.sample(s, uv) * w0;
+        acc += tex.sample(s, uv + float2( sigmaUV.x, 0.0)) * w1;
+        acc += tex.sample(s, uv + float2(-sigmaUV.x, 0.0)) * w1;
+        acc += tex.sample(s, uv + float2(0.0,  sigmaUV.y)) * w1;
+        acc += tex.sample(s, uv + float2(0.0, -sigmaUV.y)) * w1;
+        acc += tex.sample(s, uv + float2( 2.0 * sigmaUV.x, 0.0)) * w2;
+        acc += tex.sample(s, uv + float2(-2.0 * sigmaUV.x, 0.0)) * w2;
+        acc += tex.sample(s, uv + float2(0.0,  2.0 * sigmaUV.y)) * w2;
+        acc += tex.sample(s, uv + float2(0.0, -2.0 * sigmaUV.y)) * w2;
+        return acc / wSum;
     }
 
     struct BackgroundUniforms {
@@ -807,7 +817,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
         constant LayerUniforms &u [[buffer(0)]]
     ) {
         constexpr sampler s(address::clamp_to_edge, filter::linear);
-        float4 c = radialBlurSample(tex, s, in.texCoord, u.radialBlurCenterUV, u.radialBlurStrength);
+        float4 c = screenBlurSample(tex, s, in.texCoord, u.layerSizePx, u.screenBlurSigmaPx);
         c.a *= layerAlphaMask(in, u) * u.opacity;
         return c;
     }
@@ -866,13 +876,14 @@ public final class MetalRenderGraph: @unchecked Sendable {
         constant LayerUniforms &u [[buffer(0)]]
     ) {
         constexpr sampler s(address::clamp_to_edge, filter::linear);
-        // NV12 lives on two planes — radial blur on each plane independently
-        // and then YCbCr→RGB on the averaged result. Sampling YCbCr first
-        // and then averaging the RGB conversions would amplify quantisation
-        // error around chroma boundaries; averaging in YCbCr space is
-        // exactly the right place since both planes share the same UV.
-        float4 yAcc = radialBlurSample(yPlane, s, in.texCoord, u.radialBlurCenterUV, u.radialBlurStrength);
-        float4 cbcrAcc = radialBlurSample(cbcrPlane, s, in.texCoord, u.radialBlurCenterUV, u.radialBlurStrength);
+        // NV12 lives on two planes — Gaussian blur on each plane
+        // independently and then YCbCr→RGB on the averaged result.
+        // Sampling YCbCr first and then averaging the RGB conversions
+        // would amplify quantisation error around chroma boundaries;
+        // averaging in YCbCr space is exactly the right place since both
+        // planes share the same UV.
+        float4 yAcc = screenBlurSample(yPlane, s, in.texCoord, u.layerSizePx, u.screenBlurSigmaPx);
+        float4 cbcrAcc = screenBlurSample(cbcrPlane, s, in.texCoord, u.layerSizePx, u.screenBlurSigmaPx);
         float y = yAcc.r;
         float2 cbcr = cbcrAcc.rg;
 

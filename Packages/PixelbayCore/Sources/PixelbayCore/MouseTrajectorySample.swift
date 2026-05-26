@@ -358,11 +358,13 @@ public enum MouseTrajectory {
     /// soft spring**: the spring is always engaged, pulling the anchor
     /// toward the cursor across the entire viewport, with τ ramping by
     /// distance to the safe-zone wall. Near the centre τ is `tauRelaxed`
-    /// (0.18 s by default — gentle ~360 ms-to-catch-up that reads as
-    /// cinematic lag); near the safe-zone wall τ tightens to `tauTight`
-    /// (0.04 s — snappy catch-up before the cursor escapes the safe
-    /// zone). Cursor sits near-centred at rest, leads the camera by a
-    /// small visible offset during motion (Screen Studio / Loom pattern).
+    /// (0.08 s by default — Phase 3d tightening from the old 0.18 s, which
+    /// produced visible cursor lead during in-zoom pans); near the safe-
+    /// zone wall τ tightens to `tauTight` (0.04 s — snappy catch-up before
+    /// the cursor escapes the safe zone). Safe zone shrunk to 50 % in
+    /// Phase 3d (was 80 %) so the boundary-tight τ engages earlier as the
+    /// cursor approaches the edge — cursor never reaches the viewport wall
+    /// during in-zoom motion.
     /// Opting into a non-zero `deadzoneFraction` carves out an inner
     /// no-force region — see below for the geometry when that's used.
     ///
@@ -419,8 +421,8 @@ public enum MouseTrajectory {
         _ samples: [ZoomTrajectorySample],
         zoomFactor: Double,
         deadzoneFraction: Double = 0.0,
-        safeZoneFraction: Double = 0.80,
-        tauRelaxed: Double = 0.18,
+        safeZoneFraction: Double = 0.50,
+        tauRelaxed: Double = 0.08,
         tauTight: Double = 0.04,
         lookaheadSeconds: Double = 0.0,
         lookaheadConfidence: [Double]? = nil

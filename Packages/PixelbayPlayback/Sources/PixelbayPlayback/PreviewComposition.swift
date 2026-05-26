@@ -165,11 +165,11 @@ public enum PreviewCompositionBuilder {
         //     clicks feel snappy.
         //   • Anchor path: `cameraDamped` (velocity-adaptive critically-
         //     damped spring, τ ramps 0.05→0.32 with speed) → fed into
-        //     `applyCursorTrajectory`, which now also routes the windowed
-        //     slice through `anchorFollow` (55 % deadzone, decel-gated
-        //     lookahead) for the Screen-Studio "calm frame, alive cursor"
-        //     framing. The two paths only coincide when the cursor is
-        //     stationary (both settle on the same point).
+        //     `applyCursorTrajectory`, which routes the windowed slice
+        //     through `anchorFollow` (Phase 3d: continuous soft spring,
+        //     50 % safe zone, no lookahead — tight enough that the camera
+        //     reads as locked to the cursor). The two paths only coincide
+        //     when the cursor is stationary (both settle on the same point).
         //
         // The deadzone is what prevents the old freeze failure, NOT the
         // shared damping — once the cursor exits the deadzone the spring
@@ -184,21 +184,12 @@ public enum PreviewCompositionBuilder {
             dampedAnchorMaster = []
             spriteMaster = []
         }
-        // Decel confidence is computed from the raw master (not the damped
-        // one) so it tracks the actual cursor motion the user produced —
-        // the cameraDamped output has its own velocity profile that
-        // wouldn't match the decel cues the intent scorer is reading.
-        let decelConfidence: [Double]
-        if let master = cursorTrajectory, master.count >= 2 {
-            decelConfidence = MouseTrajectory.decelConfidence(master)
-        } else {
-            decelConfidence = []
-        }
+        // Phase 3d: decel-gated lookahead is gone, so we no longer compute
+        // perSample decel confidence here. The Catmull-Rom-fed anchor spring
+        // with no lookahead does not need it.
         let effects = applyCursorTrajectory(
             to: project.effects,
-            cursorTrajectory: dampedAnchorMaster.isEmpty ? nil : dampedAnchorMaster,
-            masterTrajectory: cursorTrajectory,
-            decelConfidence: decelConfidence
+            cursorTrajectory: dampedAnchorMaster.isEmpty ? nil : dampedAnchorMaster
         )
         // Phase 3c — only enable the synthetic cursor pass when the screen
         // asset was captured with `showsCursor = false` (flagged via
@@ -372,26 +363,17 @@ public enum PreviewCompositionBuilder {
     /// `cursorTrajectory` and produces per-keyframe trajectory slices for
     /// `EffectEvaluator.zoomCenter` to consume.
     ///
-    /// **Anchor follows via continuous soft spring (Phase 3c v5.5).** After
+    /// **Anchor follows via continuous soft spring (Phase 3d).** After
     /// windowing each cursor-follow keyframe's slice, the slice is routed
     /// through `MouseTrajectory.anchorFollow` with NO deadzone (continuous
-    /// always-on spring), 80 % safe zone, and 140 ms decel-gated lookahead.
-    /// Spring τ ramps from `tauRelaxed = 0.18 s` near viewport centre
-    /// (cinematic ~360 ms catch-up) to `tauTight = 0.04 s` near the
-    /// safe-zone wall (snappy catch-up before escape) via the
-    /// boundary-adaptive ramp. Result: cursor sits near-centred at rest,
-    /// leads the camera by ~6 % of viewport during typical motion
-    /// (Screen Studio / Loom pattern). The earlier 55 % hard deadzone was
-    /// dropped after v5.4 hand-testing — the abrupt no-force → spring
-    /// boundary made the sprite-at-real-speed cursor read as disconnected
-    /// from the locked camera. When `decelConfidence` is provided
-    /// (per-sample, aligned with `masterTrajectory`), the lookahead leans
-    /// the spring target toward the cursor's predicted landing zone — the
-    /// camera reads as "knowing" where the user is heading. Confidence
-    /// comes from `MouseTrajectory.decelConfidence`, the in-Core mirror
-    /// of IntentScorer's `sDecel` signal that decides which clicks earn
-    /// an auto-zoom keyframe — so framing and keyframe firing both react
-    /// to the same deceleration evidence.
+    /// always-on spring), 50 % safe zone, and NO lookahead. Spring τ ramps
+    /// from `tauRelaxed = 0.08 s` near viewport centre to `tauTight = 0.04 s`
+    /// near the safe-zone wall via the boundary-adaptive ramp — much
+    /// tighter than the 3c values (0.18/0.04 over 80 % safe zone), which
+    /// hand-tested as "cursor leads the camera too much." The 140 ms decel-
+    /// gated lookahead was removed in 3d: with τ at 0.08 s the camera
+    /// already catches up before any practical decel window matters, and
+    /// targeting *ahead* of the cursor was visually amplifying the lead.
     ///
     /// Pinned (gesture) keyframes still short-circuit before this stage —
     /// they want a locked anchor, not a deadzone follow.
@@ -410,9 +392,7 @@ public enum PreviewCompositionBuilder {
     // (the value type returned by build).
     static func applyCursorTrajectory(
         to effects: [EffectKeyframe],
-        cursorTrajectory: [MouseTrajectorySample]?,
-        masterTrajectory: [MouseTrajectorySample]? = nil,
-        decelConfidence: [Double] = []
+        cursorTrajectory: [MouseTrajectorySample]?
     ) -> [EffectKeyframe] {
         guard let master = cursorTrajectory, !master.isEmpty else {
             return effects
@@ -436,69 +416,22 @@ public enum PreviewCompositionBuilder {
                 next.trajectory = nil
                 return next
             }
-            // Phase 3c — anchor now follows via deadzone spring with
-            // decel-gated lookahead. Confidence is aligned with the raw
-            // master, so we map each windowed sample back to its master
-            // index by timelineTime equality (window preserves t modulo
-            // the keyframe-local rebase + leadSeconds shift).
-            let perSampleConf = mapConfidence(
-                to: windowed,
-                master: masterTrajectory,
-                masterConfidence: decelConfidence,
-                keyframeStartSeconds: kf.timelineRange.start.seconds,
-                leadSeconds: kf.followLeadSeconds
-            )
+            // Phase 3d — anchor follows via the tightened continuous soft
+            // spring with NO lookahead. The 3c per-sample decel confidence
+            // is no longer plumbed because the lookahead it gated is gone;
+            // the spring's tight tauRelaxed (0.08 s) catches up on its own
+            // and predicting forward was making cursor lead worse, not
+            // better.
             let followed = MouseTrajectory.anchorFollow(
                 windowed,
                 zoomFactor: kf.zoomFactor,
                 deadzoneFraction: 0.0,
-                lookaheadSeconds: 0.14,
-                lookaheadConfidence: perSampleConf
+                lookaheadSeconds: 0.0
             )
             var next = kf
             next.trajectory = followed
             return next
         }
-    }
-
-    /// Build a per-sample confidence array aligned with `windowed` by
-    /// looking up each windowed sample's absolute time in the master
-    /// trajectory. The windowed sample at local-time `t` corresponds to
-    /// master-time `keyframeStartSeconds + t`. Returns nil when no
-    /// master / no confidence is available, so `anchorFollow` falls back
-    /// to fixed-strength lookahead (or zero lookahead if `lookaheadSeconds`
-    /// is also zero). The lookup is a forward linear scan — windowed
-    /// segments are small (≤ a few seconds) and the master is monotonic,
-    /// so O(n) total.
-    private static func mapConfidence(
-        to windowed: [ZoomTrajectorySample],
-        master: [MouseTrajectorySample]?,
-        masterConfidence: [Double],
-        keyframeStartSeconds: Double,
-        leadSeconds: Double
-    ) -> [Double]? {
-        guard let master, !master.isEmpty, masterConfidence.count == master.count else {
-            return nil
-        }
-        var out = [Double](repeating: 0.0, count: windowed.count)
-        var mIdx = 0
-        for (wi, w) in windowed.enumerated() {
-            // Match each windowed sample's master time. windowed.t is
-            // keyframe-local + leadSeconds shift, so the original master
-            // time is keyframeStartSeconds + (w.t - leadSeconds) +
-            // leadSeconds = keyframeStartSeconds + w.t. (leadSeconds
-            // cancels because `window` stores `sample.timelineTime - start`
-            // for the *original* sample, then adds leadSeconds back via
-            // the slice start filter; the resulting t already matches
-            // `sample.timelineTime - start`.)
-            let absT = keyframeStartSeconds + w.t
-            while mIdx < master.count && master[mIdx].timelineTime < absT - 1e-9 {
-                mIdx += 1
-            }
-            if mIdx >= master.count { break }
-            out[wi] = masterConfidence[mIdx]
-        }
-        return out
     }
 
     private static func computeOutputSize(from screenSize: CGSize) -> CGSize {
