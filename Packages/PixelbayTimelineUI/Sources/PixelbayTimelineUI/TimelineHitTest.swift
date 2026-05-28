@@ -36,6 +36,13 @@ public enum TimelineHit: Sendable, Equatable {
     /// Click landed in empty area of the effects lane. ⌥-click on this
     /// inserts a new keyframe at the click time via `AddEffectKeyframeCommand`.
     case emptyEffectsLane
+    /// Branch B (Slice B.4) — click landed on a grouped lane's
+    /// disclosure triangle (the chevron at the left of the lane
+    /// header). Toggles the lane between collapsed and expanded via
+    /// `SetLaneCollapsedCommand`. Only emitted for `groupedVideo` /
+    /// `groupedAudio` display rows OR for expanded `singleTrack` rows
+    /// inside a group (the child row's chevron collapses back).
+    case laneDisclosure(LaneGroupID)
     /// Click landed outside any meaningful area (e.g. negative scroll
     /// region, far-right beyond all clips). Treat as deselect.
     case empty
@@ -48,13 +55,22 @@ public enum TimelineHitTest {
     public static let edgeZoneWidth: CGFloat = 6
 
     /// Returns what's at `point` (timeline-view coordinates) given a layout.
-    /// Order of precedence: ruler → track header → clip edges → clip body →
-    /// empty lane → effects-lane header → effect-keyframe edges → effect-
-    /// keyframe body → empty effects lane → nothing.
+    /// Order of precedence: ruler → lane disclosure → track header → clip
+    /// edges → clip body → empty lane → effects-lane header → effect-
+    /// keyframe edges → effect-keyframe body → empty effects lane → nothing.
     public static func hit(at point: CGPoint, in layout: TimelineLayout) -> TimelineHit {
         // Ruler is the strip across the top.
         if point.y >= 0 && point.y < layout.rulerHeight {
             return .ruler
+        }
+        // Branch B (Slice B.4) — lane disclosure triangles sit in the
+        // header column at the left edge of each grouped lane row.
+        // Check before track-header so the chevron tap wins over a
+        // header-area tap.
+        for disclosure in layout.laneDisclosures {
+            if disclosure.hitFrame.contains(point) {
+                return .laneDisclosure(disclosure.groupID)
+            }
         }
         // Each track contributes a header cell + a lane cell.
         for track in layout.tracks {

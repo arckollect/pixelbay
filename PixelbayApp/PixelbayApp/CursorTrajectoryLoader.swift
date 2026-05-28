@@ -1,8 +1,11 @@
 import AVFoundation
 import Foundation
+import OSLog
 import PixelbayCore
 import PixelbayEditor
 import PixelbayInputCapture
+
+private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "CursorTrajectoryLoader")
 
 // App-target glue: load the cursor trajectory from a project's clicks
 // sidecar so PreviewCompositionBuilder.build / PreviewPlayer.load can
@@ -13,6 +16,17 @@ import PixelbayInputCapture
 // originally-generated range, and the evaluator clamps to the last
 // stored sample.
 //
+// Phase 5 multi-scene support: after a scenes merge, the project carries
+// N screen assets (one per merged scene) each with its own clicks-*.json
+// sidecar. The loader walks every screen-kind track's clips, pairs each
+// clip with its underlying asset's sidecar, shifts the per-asset samples
+// by `clip.timelineRange.start - clip.sourceRange.start` so they land at
+// the right project-timeline position, then concatenates into a single
+// master trajectory. The compositor consumes the merged stream unchanged;
+// per-frame trajectory sampling already does a linear scan by
+// timelineTime, so back-to-back scene clips render cursor-follow as one
+// continuous path.
+//
 // Three call sites use this (ProjectView's .task, PostCaptureView's load
 // path, ExportSheet.runExport) so it lives here rather than being
 // inlined three times.
@@ -20,49 +34,114 @@ import PixelbayInputCapture
 enum CursorTrajectoryLoader {
 
     /// Returns the master cursor trajectory for `project`, or nil when
-    /// there's no screen asset, no sidecar, or the sidecar carries no
-    /// mouse-move samples. Silent on errors: any I/O failure returns nil
-    /// so the preview still loads — cursor-follow simply falls back to
-    /// the per-keyframe stored slice (or, when that's nil/empty, the
-    /// static centre).
+    /// there's no screen asset, no sidecar, or the sidecars carry no
+    /// mouse-move samples. Silent on errors: any I/O failure for a single
+    /// asset is dropped so the preview still loads — cursor-follow simply
+    /// falls back to the per-keyframe stored slice (or, when that's
+    /// nil/empty, the static centre).
+    ///
+    /// In a single-asset project (the only Phase 1–4 shape) the returned
+    /// trajectory is identical to what the pre-Phase-5 loader produced.
     static func load(
         for project: Project,
         bundleURL: URL
     ) async -> [MouseTrajectorySample]? {
-        guard let asset = AutoZoomService.screenAsset(in: project) else { return nil }
-        guard let sidecarURL = AutoZoomService.clicksSidecarURL(
-            forScreenAsset: asset,
-            in: bundleURL
-        ) else { return nil }
-        guard FileManager.default.fileExists(atPath: sidecarURL.path) else { return nil }
-        do {
-            let sidecar = try ClicksSidecarStore.read(from: sidecarURL)
-            guard !sidecar.moves.isEmpty else { return nil }
-            let assetURL = bundleURL.appendingPathComponent(asset.relativePath)
-            let avAsset = AVURLAsset(url: assetURL)
-            let videoTracks = try await avAsset.loadTracks(withMediaType: .video)
-            let naturalSize: CGSize
-            if let track = videoTracks.first {
-                naturalSize = try await track.load(.naturalSize)
-            } else {
-                naturalSize = .zero
+        let pairs = screenClipsByAsset(in: project)
+        guard !pairs.isEmpty else { return nil }
+
+        var merged: [MouseTrajectorySample] = []
+        for (asset, clips) in pairs {
+            guard let sidecarURL = AutoZoomService.clicksSidecarURL(
+                forScreenAsset: asset,
+                in: bundleURL
+            ) else { continue }
+            guard FileManager.default.fileExists(atPath: sidecarURL.path) else { continue }
+
+            do {
+                let sidecar = try ClicksSidecarStore.read(from: sidecarURL)
+                guard !sidecar.moves.isEmpty else { continue }
+                let naturalSize = try await naturalPixelSize(
+                    for: bundleURL.appendingPathComponent(asset.relativePath)
+                )
+                let perAsset = AutoZoomService.mouseTrajectory(
+                    from: sidecar,
+                    screenPixelSize: naturalSize
+                )
+                guard !perAsset.isEmpty else { continue }
+                for clip in clips {
+                    merged.append(contentsOf: shift(
+                        perAsset,
+                        intoClipTimeline: clip
+                    ))
+                }
+            } catch {
+                log.error("trajectory load failed for asset \(asset.relativePath, privacy: .public): \(String(describing: error), privacy: .public)")
+                continue
             }
-            let master = AutoZoomService.mouseTrajectory(
-                from: sidecar,
-                screenPixelSize: naturalSize
+        }
+
+        // Defensive sort: ClickLogger dispatches each move through a
+        // `Task { await self.recordMove }` and Swift's actor scheduler
+        // does not guarantee FIFO enqueue order; concatenating per-clip
+        // shifted slices preserves out-of-order errors. The compositor's
+        // linear-bracket-pair scan would otherwise pick the wrong
+        // neighbours.
+        let sorted = merged.sorted { $0.timelineTime < $1.timelineTime }
+        return sorted.isEmpty ? nil : sorted
+    }
+
+    // MARK: - Helpers
+
+    private static func screenClipsByAsset(
+        in project: Project
+    ) -> [(asset: MediaAsset, clips: [Clip])] {
+        let screenAssetByID: [MediaAssetID: MediaAsset] = Dictionary(
+            uniqueKeysWithValues: project.assets
+                .filter { $0.kind == .display }
+                .map { ($0.id, $0) }
+        )
+        var grouped: [MediaAssetID: [Clip]] = [:]
+        for track in project.tracks where track.kind == .screen {
+            for clip in track.clips where screenAssetByID[clip.assetID] != nil {
+                grouped[clip.assetID, default: []].append(clip)
+            }
+        }
+        return grouped.compactMap { (id, clips) -> (MediaAsset, [Clip])? in
+            guard let asset = screenAssetByID[id] else { return nil }
+            return (asset, clips)
+        }
+    }
+
+    private static func naturalPixelSize(for url: URL) async throws -> CGSize {
+        let avAsset = AVURLAsset(url: url)
+        let videoTracks = try await avAsset.loadTracks(withMediaType: .video)
+        guard let track = videoTracks.first else { return .zero }
+        return try await track.load(.naturalSize)
+    }
+
+    /// Per-asset samples have `timelineTime` in the recording's own time
+    /// domain (t=0 at the asset's `captureStart`). To project them onto the
+    /// editor's timeline we subtract the clip's `sourceRange.start` (which
+    /// part of the asset the clip uses) and add the clip's
+    /// `timelineRange.start` (where the clip sits in the timeline). Samples
+    /// outside the clip's source range are dropped — they correspond to
+    /// material the editor trimmed off.
+    private static func shift(
+        _ samples: [MouseTrajectorySample],
+        intoClipTimeline clip: Clip
+    ) -> [MouseTrajectorySample] {
+        let sourceStart = clip.sourceRange.start.seconds
+        let sourceEnd = clip.sourceRange.end.seconds
+        let timelineStart = clip.timelineRange.start.seconds
+        return samples.compactMap { sample -> MouseTrajectorySample? in
+            guard sample.timelineTime >= sourceStart,
+                  sample.timelineTime <= sourceEnd
+            else { return nil }
+            return MouseTrajectorySample(
+                timelineTime: timelineStart + (sample.timelineTime - sourceStart),
+                centerX: sample.centerX,
+                centerY: sample.centerY
             )
-            // Defensive sort: ClickLogger dispatches each move through
-            // `Task { await self.recordMove }`, and Swift's actor scheduler
-            // does not guarantee FIFO enqueue order. The compositor walks
-            // the trajectory left-to-right assuming sorted timelineTime and
-            // would otherwise pick the wrong bracketing pair on an
-            // out-of-order sample, producing visible mis-tracking. O(n log
-            // n) one-time cost on load is well below the cost of a single
-            // composition build.
-            let sorted = master.sorted { $0.timelineTime < $1.timelineTime }
-            return sorted.isEmpty ? nil : sorted
-        } catch {
-            return nil
         }
     }
 }

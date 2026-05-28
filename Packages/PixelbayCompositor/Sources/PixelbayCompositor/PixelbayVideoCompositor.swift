@@ -318,6 +318,26 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
                 }
                 let p0 = (i - 2) >= 0 ? samples[i - 2] : a
                 let p3 = (i + 1) < samples.count ? samples[i + 1] : b
+                // Scenes-merge defense: when a neighbor (p0 or p3) sits
+                // across a scene boundary, its (timeDelta, posDelta)
+                // pair makes the Catmull-Rom tangents huge — the spline
+                // overshoots and the cursor sprite smears across the
+                // boundary for ~1 frame. ScenesMerger places clips
+                // back-to-back, so a boundary shows up as a
+                // zero-or-near-zero time delta with a non-trivial
+                // position delta in the 4-point window. When detected,
+                // fall back to linear (a, b) interpolation, which uses
+                // only the bracketing samples and never reaches across
+                // the discontinuity. Single-shot recordings never trip
+                // this — their trajectory is one continuous stream.
+                if Self.neighborIsAcrossBoundary(a: p0, b: a) ||
+                   Self.neighborIsAcrossBoundary(a: b, b: p3) {
+                    let u = (t - a.timelineTime) / span
+                    return (
+                        a.centerX + (b.centerX - a.centerX) * u,
+                        a.centerY + (b.centerY - a.centerY) * u
+                    )
+                }
                 return nonUniformCatmullRom2D(
                     p0t: p0.timelineTime, p0x: p0.centerX, p0y: p0.centerY,
                     p1t: a.timelineTime, p1x: a.centerX, p1y: a.centerY,
@@ -328,6 +348,29 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
             }
         }
         return (last.centerX, last.centerY)
+    }
+
+    /// True when two adjacent trajectory samples look like opposite
+    /// sides of a scenes-merge boundary: zero or near-zero time delta
+    /// paired with a non-trivial position delta. ScenesMerger places
+    /// clips back-to-back so the merged master trajectory shows scene
+    /// N's last sample and scene N+1's first sample at the same
+    /// timeline time. Within a single recording, sample density is
+    /// ~120 Hz and the position delta between adjacent samples is
+    /// small — even fast cursor motion (~5 norm-units/sec) only moves
+    /// ~0.04 norm-units between adjacent samples. The 0.05 norm-units
+    /// threshold catches real scene snaps while leaving in-recording
+    /// motion alone.
+    private static func neighborIsAcrossBoundary(
+        a: MouseTrajectorySample,
+        b: MouseTrajectorySample
+    ) -> Bool {
+        let dt = b.timelineTime - a.timelineTime
+        if dt > 0.001 { return false }   // ≥1 ms apart → same recording
+        let dx = b.centerX - a.centerX
+        let dy = b.centerY - a.centerY
+        let distSq = dx * dx + dy * dy
+        return distSq > (0.05 * 0.05)    // > 5% of normalized screen
     }
 
     // Last-resort: copy the screen layer's pixels into the destination buffer

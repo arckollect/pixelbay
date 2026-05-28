@@ -552,6 +552,10 @@ public struct UpdateEffectKeyframeCommand: EditCommand {
                 centerY: newValue.centerY,
                 easeIn: newValue.easeIn,
                 easeOut: newValue.easeOut,
+                trajectory: newValue.trajectory,
+                origin: newValue.origin,
+                anchorMode: newValue.anchorMode,
+                followLeadSeconds: newValue.followLeadSeconds,
                 extras: newValue.extras
             )
         }
@@ -1035,6 +1039,105 @@ public struct GenerateManualZoomsCommand: EditCommand {
             keyframesToRemove: generated,
             keyframesToInsert: previousManualKeyframes
         )
+    }
+}
+
+// MARK: - AddZoomAtPlayhead (slice #11.e)
+
+/// Inserts a single zoom keyframe at `timelineTime`. Drives the "Add Zoom
+/// at Playhead" Inspector button so the user can hand-author a zoom
+/// anywhere — no click or gesture mark required.
+///
+/// Mirrors `GenerateManualZoomsCommand`'s envelope and tagging so it
+/// behaves identically downstream: snappy 0.3/0.6/0.5 timing, `origin =
+/// .manualHotkey`, `anchorMode = .followCursor`. The compositor will
+/// re-slice the master cursor trajectory onto this keyframe at build time,
+/// so it cursor-follows like a gesture-sourced zoom.
+///
+/// Refuses to land on top of an existing zoom — the compositor's
+/// single-winner rule would otherwise have to arbitrate, and that's
+/// confusing for a user-initiated insert. The Inspector surfaces the
+/// thrown error in its status row.
+public struct AddZoomAtPlayheadCommand: EditCommand {
+    public let displayName = "Add Zoom"
+    public let timelineTime: Double
+    public let centerX: Double
+    public let centerY: Double
+    public let lookahead: Double
+    public let holdDuration: Double
+    public let easeOutDuration: Double
+    public let zoomFactor: Double
+    public let timelineDuration: Double?
+
+    public init(
+        timelineTime: Double,
+        centerX: Double = 0.5,
+        centerY: Double = 0.5,
+        lookahead: Double = 0.3,
+        holdDuration: Double = 0.6,
+        easeOutDuration: Double = 0.5,
+        zoomFactor: Double = 2.0,
+        timelineDuration: Double? = nil
+    ) {
+        self.timelineTime = timelineTime
+        self.centerX = min(max(centerX, 0), 1)
+        self.centerY = min(max(centerY, 0), 1)
+        self.lookahead = max(0.05, lookahead)
+        self.holdDuration = max(0.1, holdDuration)
+        self.easeOutDuration = max(0.05, easeOutDuration)
+        self.zoomFactor = max(1.05, zoomFactor)
+        self.timelineDuration = timelineDuration
+    }
+
+    /// Total length of the keyframe's envelope (ease-in + hold + ease-out).
+    public var totalDuration: Double { lookahead + holdDuration + easeOutDuration }
+
+    /// The timeline range this command would insert, clamped so it never
+    /// starts before t=0.
+    public var projectedRange: TimeRange {
+        TimeRange(start: .seconds(max(0, timelineTime)), duration: .seconds(totalDuration))
+    }
+
+    /// Human-readable reason this zoom can't be inserted into `project`, or
+    /// `nil` if it can. Single source of truth shared by `apply` (which
+    /// throws on a non-nil reason) and the Inspector (which surfaces it in
+    /// the status row instead of dispatching) — so the UI can never disagree
+    /// with what `apply` actually does.
+    public func insertionConflict(in project: Project) -> String? {
+        let start = max(0, timelineTime)
+        if let timelineDuration, start + totalDuration > timelineDuration {
+            return "zoom won't fit before timeline end"
+        }
+        let overlap = project.effects.contains {
+            $0.kind == .zoom && $0.timelineRange.overlaps(projectedRange)
+        }
+        if overlap {
+            return "playhead is inside an existing zoom"
+        }
+        return nil
+    }
+
+    @discardableResult
+    public func apply(to project: inout Project) throws -> any EditCommand {
+        if let reason = insertionConflict(in: project) {
+            throw EditError.invalidTimelineRange(reason: reason)
+        }
+        let range = projectedRange
+        let keyframe = EffectKeyframe(
+            kind: .zoom,
+            timelineRange: range,
+            zoomFactor: zoomFactor,
+            centerX: centerX,
+            centerY: centerY,
+            easeIn: .seconds(lookahead),
+            easeOut: .seconds(easeOutDuration),
+            trajectory: nil,
+            origin: .manualHotkey,
+            anchorMode: .followCursor,
+            followLeadSeconds: 0
+        )
+        project.effects.append(keyframe)
+        return RemoveEffectKeyframeCommand(keyframeID: keyframe.id)
     }
 }
 

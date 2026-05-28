@@ -194,4 +194,59 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
             XCTAssertEqual(a.y, b.y, accuracy: 1e-12)
         }
     }
+
+    // MARK: - Scenes-merge boundary (polish 2026-05-27)
+
+    func test_anchorFollow_sceneBoundary_snapsInsteadOfChasing() {
+        // Two recordings concatenated back-to-back via ScenesMerger.
+        // Scene 1 has the cursor in the upper-left and barely moves;
+        // scene 2 picks up with the cursor in the lower-right. Without
+        // the boundary snap, the spring would carry over its scene-1
+        // anchor and chase scene-2's position over the next ~50-100 ms
+        // — visible camera lag at every scene cut. With the snap, the
+        // anchor jumps to scene 2's first sample so the spring resumes
+        // from the right place.
+        var samples: [ZoomTrajectorySample] = []
+        // Scene 1: cursor near (0.2, 0.2), barely moving for 1 s.
+        for i in 0...20 {
+            samples.append(ZoomTrajectorySample(t: 0.05 * Double(i), x: 0.2, y: 0.2))
+        }
+        // Scene 2 starts at the SAME timeline time as scene 1's last
+        // sample (back-to-back per ScenesMerger), cursor jumps to
+        // (0.8, 0.8). Then 1 s of stationary cursor.
+        let boundaryT = samples.last!.t
+        samples.append(ZoomTrajectorySample(t: boundaryT, x: 0.8, y: 0.8))
+        for i in 1...20 {
+            samples.append(ZoomTrajectorySample(t: boundaryT + 0.05 * Double(i), x: 0.8, y: 0.8))
+        }
+        let out = MouseTrajectory.anchorFollow(samples, zoomFactor: 2.0)
+        // Sample 1 frame after the boundary — the anchor should already
+        // be at (or very close to) scene 2's position, not still
+        // lingering near (0.2, 0.2). Without the snap fix, the spring
+        // would put the anchor at roughly the midpoint after one frame.
+        let postBoundary = out[samples.count - 20]   // first sample after the snap
+        XCTAssertEqual(postBoundary.x, 0.8, accuracy: 0.01,
+                       "anchor must snap to scene 2's starting position at the boundary")
+        XCTAssertEqual(postBoundary.y, 0.8, accuracy: 0.01)
+    }
+
+    func test_anchorFollow_sameTimestampSmallMove_doesNotSnap() {
+        // Sanity check: two samples at the same time with a tiny
+        // position delta (< 5% of normalized screen) are NOT treated
+        // as a scene boundary — they could be a clock-quantization
+        // artifact within a single recording. Anchor stays put.
+        let samples: [ZoomTrajectorySample] = [
+            ZoomTrajectorySample(t: 0.0, x: 0.5, y: 0.5),
+            ZoomTrajectorySample(t: 0.01, x: 0.5, y: 0.5),
+            ZoomTrajectorySample(t: 0.01, x: 0.51, y: 0.5),   // same-t, tiny move
+            ZoomTrajectorySample(t: 0.02, x: 0.51, y: 0.5),
+        ]
+        let out = MouseTrajectory.anchorFollow(samples, zoomFactor: 2.0)
+        // After the same-timestamp tiny-move sample, anchor should
+        // still be near 0.5 (not snapped to 0.51 — that's the
+        // pre-boundary-fix behavior we want to preserve for in-
+        // recording samples).
+        XCTAssertEqual(out[2].x, 0.5, accuracy: 0.01,
+                       "tiny moves at the same timestamp must NOT trigger the boundary snap")
+    }
 }

@@ -22,7 +22,14 @@ import Foundation
 // their OS cursor baked in, so the compositor only renders synthetic cursor
 // when the screen `MediaAsset.cursorRenderedSynthetically` flag is set
 // (stored in `extras`, no MediaAsset schema bump needed).
-public let currentSchemaVersion: Int = 4
+//
+// v4 → v5 (Phase 5 — Scenes, 2026-05-26): adds optional `scenesSession:
+// ScenesSession?` to Project. Non-nil means the project is the persistent
+// .pixelbay bundle backing the Scenes window (multi-take recording, merge
+// produces a normal timeline-editable project and clears the field back to
+// nil). The migrator is a no-op because the field is optional — pre-v5
+// projects decode cleanly with `scenesSession == nil`.
+public let currentSchemaVersion: Int = 5
 
 // Bumped on any breaking change to the .pixelbay directory layout itself
 // (e.g. renaming the media/ folder, splitting sidecars into a new subdirectory).
@@ -313,6 +320,12 @@ public struct Project: Codable, Sendable, Identifiable {
     // legacy recordings (cursor baked into screen frames) skip the synthetic
     // pass and avoid a double cursor.
     public var cursorSettings: CursorSettings
+    // Phase 5 — populated only on the persistent scenes-session bundle. `nil`
+    // for every "normal" project (whether brand-new, imported, or the result
+    // of a Scenes-mode merge). The Codable optional-decode contract treats a
+    // missing JSON key as `nil`, so pre-v5 documents continue to decode
+    // without any data stamping (the v4→v5 migrator is a no-op).
+    public var scenesSession: ScenesSession?
     public var extras: [String: JSONValue]
 
     public init(
@@ -328,6 +341,7 @@ public struct Project: Codable, Sendable, Identifiable {
         layout: LayoutPreset = .phase1Default,
         effects: [EffectKeyframe] = [],
         cursorSettings: CursorSettings = .default,
+        scenesSession: ScenesSession? = nil,
         extras: [String: JSONValue] = [:]
     ) {
         self.schemaVersion = schemaVersion
@@ -342,6 +356,7 @@ public struct Project: Codable, Sendable, Identifiable {
         self.layout = layout
         self.effects = effects
         self.cursorSettings = cursorSettings
+        self.scenesSession = scenesSession
         self.extras = extras
     }
 
@@ -358,6 +373,7 @@ public struct Project: Codable, Sendable, Identifiable {
         case layout
         case effects
         case cursorSettings
+        case scenesSession
         case extras
     }
 }

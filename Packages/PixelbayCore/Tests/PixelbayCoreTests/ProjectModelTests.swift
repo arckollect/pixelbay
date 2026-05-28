@@ -184,4 +184,65 @@ final class ProjectModelTests: XCTestCase {
         XCTAssertFalse(a.overlaps(b))
         XCTAssertFalse(b.overlaps(a))
     }
+
+    // MARK: - Project+TimelineCollapse (Branch B, 2026-05-27)
+
+    func test_timelineLaneCollapse_extras_roundTripThroughCodable() throws {
+        var project = Project(name: "Collapse round-trip")
+        project.timelineLaneCollapse = [.video: false, .audio: true]
+        project.timelineLaneCollapseDefault = false
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let data = try encoder.encode(project)
+        let decoded = try decoder.decode(Project.self, from: data)
+
+        XCTAssertEqual(decoded.timelineLaneCollapse[.video], false)
+        XCTAssertEqual(decoded.timelineLaneCollapse[.audio], true)
+        XCTAssertEqual(decoded.timelineLaneCollapseDefault, false)
+    }
+
+    func test_timelineLaneCollapse_freshProject_defaultsToCollapsed() {
+        let project = Project(name: "Fresh")
+        // Smart-default seed: both groups read as collapsed when no
+        // entry has been written yet.
+        XCTAssertTrue(project.isLaneCollapsed(.video))
+        XCTAssertTrue(project.isLaneCollapsed(.audio))
+        XCTAssertTrue(project.timelineLaneCollapseDefault)
+        XCTAssertTrue(project.timelineLaneCollapse.isEmpty,
+                      "extras key absent until first write")
+    }
+
+    func test_timelineLaneCollapse_perLaneOverridesDefault() {
+        var project = Project(name: "Override")
+        project.timelineLaneCollapseDefault = true
+        project.timelineLaneCollapse = [.video: false]
+
+        XCTAssertFalse(project.isLaneCollapsed(.video),
+                       "per-lane override wins over default")
+        XCTAssertTrue(project.isLaneCollapsed(.audio),
+                      "untouched lane still uses default")
+    }
+
+    func test_timelineLaneCollapse_emptySet_clearsExtrasKey() {
+        var project = Project(name: "Clear")
+        project.timelineLaneCollapse = [.video: false]
+        XCTAssertNotNil(project.extras["timelineLaneCollapse"])
+        project.timelineLaneCollapse = [:]
+        XCTAssertNil(project.extras["timelineLaneCollapse"],
+                     "writing empty map should remove the extras entry")
+    }
+
+    func test_trackKind_laneGroup_mapping() {
+        XCTAssertEqual(TrackKind.screen.laneGroup, .video)
+        XCTAssertEqual(TrackKind.webcam.laneGroup, .video)
+        XCTAssertEqual(TrackKind.overlay.laneGroup, .video)
+        XCTAssertEqual(TrackKind.microphone.laneGroup, .audio)
+        XCTAssertEqual(TrackKind.systemAudio.laneGroup, .audio)
+        XCTAssertEqual(TrackKind.voiceover.laneGroup, .audio)
+        XCTAssertNil(TrackKind.effects.laneGroup,
+                     "effects track stays standalone, not part of a group")
+    }
 }

@@ -21,6 +21,8 @@ import SwiftUI
 
 struct ProjectView: View {
     @Bindable var document: ProjectDocument
+    @Environment(ScenesAppendTarget.self) private var scenesAppendTarget
+    @Environment(\.openWindow) private var openWindow
 
     @State private var player = PreviewPlayer()
     @State private var selectedClipID: ClipID?
@@ -38,6 +40,11 @@ struct ProjectView: View {
     /// drag.
     @State private var previewVolumes: [ClipID: Double] = [:]
     @State private var previewSpeeds: [ClipID: Double] = [:]
+    /// Slice A.3 — controls the timeline-end "+" popover. Hosting the
+    /// popover state here (rather than inside TimelineView) keeps the
+    /// invasive change off `TimelineView.swift` so the parallel Branch B
+    /// can keep restructuring timeline row rendering without conflict.
+    @State private var appendPopoverPresented: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -100,6 +107,20 @@ struct ProjectView: View {
 
     private var toolbar: some View {
         HStack(spacing: 12) {
+            // Slice A.2 — "Scenes" entry point. Sets the shared
+            // ScenesAppendTarget singleton to this document's bundleURL,
+            // then opens the singleton scenes window. The window snapshots
+            // the URL on appear; the editor toolbar button stays the FIRST
+            // item in the HStack so Branch B's later additions (Expand /
+            // Collapse all) at the END of the row don't conflict on merge.
+            Button {
+                scenesAppendTarget.set(document.bundleURL)
+                openWindow(id: WindowID.scenes)
+            } label: {
+                Label("Scenes", systemImage: "rectangle.stack.badge.play")
+            }
+            .help("Add more scenes to this project")
+            Divider().frame(height: 22)
             // Toolbar Undo/Redo are visible affordances; the keyboard
             // shortcuts (⌘Z / ⇧⌘Z) live on the Edit menu via
             // EditUndoRedoCommands so a focused TextField doesn't shadow
@@ -134,9 +155,38 @@ struct ProjectView: View {
             } label: {
                 Label("Reveal", systemImage: "folder")
             }
+            // Branch B (Slice B.4) — bulk toggle of every grouped lane.
+            // Reads the smart-default seed to decide which direction the
+            // button toggles to. INSERTION ORDER: this is the LAST item
+            // in the toolbar HStack so the merge surface against Branch
+            // A's "Scenes" button (added as the FIRST item) stays
+            // minimal (one diff per edge, no body interleave).
+            Button {
+                let nowCollapsed = !allLanesCollapsed
+                Task {
+                    await document.apply(SetAllLanesCollapsedCommand(collapsed: nowCollapsed))
+                }
+            } label: {
+                Label(
+                    allLanesCollapsed ? "Expand All" : "Collapse All",
+                    systemImage: allLanesCollapsed
+                        ? "chevron.down.square"
+                        : "chevron.right.square"
+                )
+            }
+            .help(allLanesCollapsed
+                  ? "Expand every grouped lane to show underlying tracks"
+                  : "Collapse every grouped lane into Video / Audio bands")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    /// True when every known lane group is currently collapsed (per the
+    /// resolved state — explicit value falls back to the smart-default
+    /// seed). Drives the toolbar button's label + glyph.
+    private var allLanesCollapsed: Bool {
+        LaneGroupID.allCases.allSatisfy { document.project.isLaneCollapsed($0) }
     }
 
     // MARK: - Preview pane
@@ -237,6 +287,30 @@ struct ProjectView: View {
                 .help("Zoom timeline")
                 Image(systemName: "plus.magnifyingglass")
                     .foregroundStyle(.secondary)
+                Divider().frame(height: 16)
+                // Slice A.3 — "+" entry point for a single-shot append
+                // recording. Anchored at the right edge of the timeline
+                // header so the user reads it as "add to the end of this
+                // timeline". The popover hosts source pickers; on stop the
+                // result flows through `document.appendRecordingToTimeline`
+                // which dispatches one InsertClipCommand per asset (undo-able).
+                Button {
+                    appendPopoverPresented = true
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .imageScale(.large)
+                        .foregroundStyle(.tint)
+                }
+                .buttonStyle(.plain)
+                .help("Record more — appends to the timeline tail")
+                .popover(isPresented: $appendPopoverPresented, arrowEdge: .top) {
+                    AppendRecordingPopover(
+                        bundle: ProjectBundle(url: document.bundleURL),
+                        onRecorded: { result in
+                            Task { await document.appendRecordingToTimeline(result: result) }
+                        }
+                    )
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
@@ -345,6 +419,7 @@ struct ProjectView: View {
         EffectsInspector(
             project: document.project,
             bundleURL: document.bundleURL,
+            playheadTime: player.currentTime.seconds,
             selectedKeyframeID: $selectedEffectKeyframeID,
             onApply: { command in
                 Task { await document.apply(command) }

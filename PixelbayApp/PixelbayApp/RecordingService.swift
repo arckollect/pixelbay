@@ -47,6 +47,17 @@ final class RecordingService {
         var markerStillExists: Bool
         var trackStats: [CaptureTrack: TrackStats]
         var writerErrors: [String]
+        /// Phase 5 — IDs of every `MediaAsset` this recording appended to
+        /// `project.assets`. Single-recording callers can ignore this
+        /// (assets are already wired into tracks); Scenes mode reads it to
+        /// build a `Take` whose `assetIDs` point at the freshly recorded
+        /// media without having to diff `project.assets` before/after.
+        var assetIDs: [MediaAssetID] = []
+        /// Session ID prefix used by every file this recording produced
+        /// (`screen-{sessionID}.mov`, `clicks-{sessionID}.json`, etc.).
+        /// Phase 5 stamps it onto `Take.sessionID`; single-recording mode
+        /// ignores it (the value is also embedded in each asset's relativePath).
+        var sessionID: String = ""
     }
 
     struct StartRequest {
@@ -63,6 +74,14 @@ final class RecordingService {
         var micID: String?
         var includeSystemAudio: Bool
         var logClicks: Bool
+        /// Phase 5 — when false, the captured `MediaAsset`s are still
+        /// appended to `project.assets` but NO `Track`s are created. Scenes
+        /// mode passes `false` so the per-scene takes don't pollute the
+        /// timeline with N tracks per recording; the merge step (see
+        /// `ScenesMerger`) creates the shared screen/webcam/mic/sysAudio
+        /// tracks once at the end. Default `true` preserves Phase 1–4
+        /// single-recording behavior unchanged.
+        var appendTracks: Bool = true
     }
 
     var phase: Phase = .idle
@@ -72,6 +91,16 @@ final class RecordingService {
     private var bundle: ProjectBundle?
     private var clickLogger: ClickLogger?
     private var clickSessionID: String?
+    /// Same 8-char prefix used by every file this recording produces (screen,
+    /// cam, mic, sysAudio, clicks sidecar). Captured at `start(_:existingBundle:)`
+    /// time so `stop()` can stamp it onto the `Result` for scenes mode
+    /// (which builds a `Take` whose `sessionID` matches the file naming).
+    private var currentSessionID: String?
+    /// Captured at `start(_:existingBundle:)` time so `stop()` knows whether
+    /// to wire each recorded asset into a `Track` (single-recording mode,
+    /// default) or only append it to `project.assets` (scenes mode). Resets
+    /// to true in `tearDown()`.
+    private var appendTracksOnStop: Bool = true
 
     var isRecording: Bool {
         if case .recording = phase { return true }
@@ -85,16 +114,22 @@ final class RecordingService {
         }
     }
 
-    func start(_ request: StartRequest) async {
+    /// Phase 5 — pass `existingBundle` to record into a persistent
+    /// scenes-session bundle instead of allocating a fresh one. The default
+    /// `nil` preserves Phase 1–4 single-recording behavior (one bundle per
+    /// recording at `~/Library/Application Support/Pixelbay/Recordings/rec-*`).
+    func start(_ request: StartRequest, existingBundle: ProjectBundle? = nil) async {
         guard canStartRecording else {
             log.notice("start() ignored — phase=\(String(describing: self.phase), privacy: .public)")
             return
         }
         phase = .preparing
+        appendTracksOnStop = request.appendTracks
         do {
-            let bundle = try prepareBundle()
+            let bundle = try existingBundle ?? prepareBundle()
             let audio: AudioSource = request.micID.map { .external(deviceUniqueID: $0) } ?? .none
             let sessionID = CaptureOutputDeriver.makeSessionID()
+            self.currentSessionID = sessionID
             let outputs = CaptureOutputDeriver.outputs(
                 in: bundle,
                 sessionID: sessionID,
@@ -259,12 +294,31 @@ final class RecordingService {
         let store = ProjectBundleStore()
         var project = try store.loadProject(from: bundle)
 
-        // Each captured file becomes a MediaAsset AND a Track holding a
-        // single Clip that covers the whole asset on the timeline.
-        // PreviewCompositionBuilder iterates project.tracks (not assets), so
-        // skipping the track here means a recording can be saved but never
-        // previewed or exported. Phase 2 onwards mutates these tracks via
-        // EditCommands; Phase 1 just plumbs them in 1:1 with the assets.
+        // Each captured file becomes a MediaAsset that goes into project.assets.
+        // In single-recording mode (`appendTracksOnStop == true`) we ALSO
+        // create one Track per asset holding a single clip — Phase 1
+        // behavior, preserved verbatim so PreviewCompositionBuilder /
+        // ProjectView see a previewable timeline immediately after stop.
+        // In scenes mode (`appendTracksOnStop == false`) we skip the track
+        // creation: the scenes session model wraps the returned assetIDs in
+        // a `Take`, and `ScenesMerger` builds shared tracks at merge time.
+        var capturedAssetIDs: [MediaAssetID] = []
+
+        // Canonical recording length for the timeline. Tracks where the
+        // camera / mic / sysAudio writer started later than the screen (or
+        // stopped earlier) produce shorter files than the screen, but the
+        // user thinks of the recording as one wall-clock interval and
+        // expects every enabled track to span that full interval on the
+        // timeline. Use screenDuration when present (the most reliable
+        // signal — SCStream rarely warms up late); fall back to the
+        // wall-clock duration; fall back to the longest per-track duration
+        // for audio-only edge cases. PreviewComposition pads short sources
+        // with empty time (silence for audio, transparent for video) so a
+        // 3 s cam clip on a 10 s screen plays cam for 3 s then drops out,
+        // rather than appearing as a 3 s nub the user has to drag-extend
+        // by hand only to discover the file ends after 3 s of playback.
+        let canonicalDuration = pickCanonicalRecordingDuration(summary: summary)
+
         var screenAsset = MediaAsset(
             kind: .display,
             relativePath: relativePath(of: summary.outputs.screenURL, in: bundle),
@@ -281,7 +335,10 @@ final class RecordingService {
         // them.
         screenAsset.cursorRenderedSynthetically = true
         project.assets.append(screenAsset)
-        appendTrack(for: screenAsset, name: "Screen", kind: .screen, into: &project)
+        capturedAssetIDs.append(screenAsset.id)
+        if appendTracksOnStop {
+            appendTrack(for: screenAsset, name: "Screen", kind: .screen, timelineDuration: canonicalDuration, into: &project)
+        }
 
         if let camURL = summary.outputs.camURL {
             let camAsset = MediaAsset(
@@ -291,17 +348,35 @@ final class RecordingService {
                 nativeDuration: summary.camDuration ?? .zero
             )
             project.assets.append(camAsset)
-            appendTrack(for: camAsset, name: "Webcam", kind: .webcam, into: &project)
+            capturedAssetIDs.append(camAsset.id)
+            if appendTracksOnStop {
+                appendTrack(for: camAsset, name: "Webcam", kind: .webcam, timelineDuration: canonicalDuration, into: &project)
+            }
         }
-        if let micURL = summary.outputs.micURL {
+        // Only persist a mic asset when the writer actually produced audio.
+        // A nil `micDuration` means the mic writer never produced usable
+        // output (e.g. AAC `startWriting` rejected the device format with
+        // -11861, leaving a 0-byte mic-*.caf). Persisting it anyway puts a
+        // damaged asset into the project that the editor then fails to load
+        // a waveform for on every refresh. The writer failure is surfaced
+        // separately via `summary.writerErrors` → PostCaptureView. Scene-2's
+        // short-but-valid 0.117s capture has a positive duration and is kept.
+        if let micURL = summary.outputs.micURL,
+           let micDuration = summary.micDuration,
+           micDuration.seconds > 0 {
             let micAsset = MediaAsset(
                 kind: .microphone,
                 relativePath: relativePath(of: micURL, in: bundle),
                 captureStart: summary.captureStart,
-                nativeDuration: summary.micDuration ?? .zero
+                nativeDuration: micDuration
             )
             project.assets.append(micAsset)
-            appendTrack(for: micAsset, name: "Microphone", kind: .microphone, into: &project)
+            capturedAssetIDs.append(micAsset.id)
+            if appendTracksOnStop {
+                appendTrack(for: micAsset, name: "Microphone", kind: .microphone, timelineDuration: canonicalDuration, into: &project)
+            }
+        } else if summary.outputs.micURL != nil {
+            log.notice("skipping mic asset: writer produced no usable audio (micDuration=\(summary.micDuration?.seconds ?? -1))")
         }
         if let sysURL = summary.outputs.sysAudioURL {
             let sysAsset = MediaAsset(
@@ -311,7 +386,10 @@ final class RecordingService {
                 nativeDuration: summary.sysAudioDuration ?? .zero
             )
             project.assets.append(sysAsset)
-            appendTrack(for: sysAsset, name: "System Audio", kind: .systemAudio, into: &project)
+            capturedAssetIDs.append(sysAsset.id)
+            if appendTracksOnStop {
+                appendTrack(for: sysAsset, name: "System Audio", kind: .systemAudio, timelineDuration: canonicalDuration, into: &project)
+            }
         }
         try store.writeProject(project, to: bundle)
 
@@ -330,40 +408,91 @@ final class RecordingService {
             sysAudioDurationSeconds: summary.sysAudioDuration?.seconds,
             markerStillExists: FileManager.default.fileExists(atPath: markerURL.path),
             trackStats: summary.trackStats,
-            writerErrors: summary.writerErrors
+            writerErrors: summary.writerErrors,
+            assetIDs: capturedAssetIDs,
+            sessionID: currentSessionID ?? ""
         )
     }
 
-    /// Append a Track to the project containing a single Clip that covers
-    /// the full asset (sourceRange = timelineRange = [0, nativeDuration]).
-    /// Skipped if the asset has zero duration — that means the writer never
-    /// finalized any samples for this track (writer error or no input ever
-    /// arrived), and an empty clip would just trip up PreviewCompositionBuilder
-    /// with a zero-range insertTimeRange.
+    /// Append a Track to the project containing a single Clip whose
+    /// `sourceRange` covers the full underlying asset (`[0, nativeDuration)`)
+    /// AND whose `timelineRange` spans the canonical recording length
+    /// (`timelineDuration`, normally the screen's wall-clock duration).
+    /// Skipped if the asset itself has zero duration — that means the
+    /// writer never finalized any samples for this track (writer error
+    /// or no input ever arrived), and an empty clip would just trip up
+    /// PreviewCompositionBuilder with a zero-range insertTimeRange.
     ///
-    /// All four track types (screen / webcam / microphone / systemAudio)
-    /// share captureStart from the same CaptureSummary, so placing each
-    /// track's clip at timelineRange.start = 0 keeps them in sync.
-    /// Per-track captureStart drift handling is a Phase-4 concern (under
-    /// long recordings + clock-domain crossings, the SCStream and
-    /// AVCaptureSession bridges can land first samples ~tens of ms apart).
+    /// Why the two ranges can differ: when the cam / mic / sysAudio
+    /// pipeline starts later than SCStream (camera warm-up takes ~ a
+    /// second; audio drivers similar), the underlying file is shorter
+    /// than the screen recording. Without this padding the timeline
+    /// would show the cam clip as a 3 s nub on a 10 s screen, and
+    /// dragging its edge would extend `timelineRange` past `sourceRange`
+    /// with no underlying content — the preview would just go blank
+    /// after 3 s. Now the timeline clip claims the full 10 s up front,
+    /// and `PreviewCompositionBuilder.populateVideoTrack` /
+    /// `populateAudioTrack` insert the available source at
+    /// `timelineRange.start` and leave the tail empty (silence for
+    /// audio, transparent for video) when
+    /// `sourceRange.duration < timelineRange.duration && clip.speed == 1.0`.
+    /// `clip.speed` stays 1.0 — this is padding, NOT a speed change.
+    ///
+    /// Per-track captureStart drift handling (placing the cam clip a
+    /// few hundred ms later when its first sample landed late, so the
+    /// content is positioned in real time rather than the start of the
+    /// clip) is a Phase-4 concern — typical drift is too small to read
+    /// as a visible offset on playback, and the user-visible benefit
+    /// of "all enabled tracks span the whole recording" is what people
+    /// actually notice.
     private func appendTrack(
         for asset: MediaAsset,
         name: String,
         kind: TrackKind,
+        timelineDuration: RationalTime,
         into project: inout Project
     ) {
         guard asset.nativeDuration.value > 0 else {
             log.notice("appendTrack skipped — \(name, privacy: .public) has zero duration")
             return
         }
-        let range = TimeRange(start: .zero, duration: asset.nativeDuration)
+        let sourceRange = TimeRange(start: .zero, duration: asset.nativeDuration)
+        // Use the larger of canonical-timeline-duration and this asset's
+        // own duration so a single short audio-only recording (where the
+        // mic somehow outlasts the screen — rare but possible if SCStream
+        // dropped its last second) doesn't get its tail truncated.
+        let timelineDur: RationalTime = {
+            if asset.nativeDuration.seconds > timelineDuration.seconds {
+                return asset.nativeDuration
+            }
+            return timelineDuration
+        }()
+        let timelineRange = TimeRange(start: .zero, duration: timelineDur)
         let clip = Clip(
             assetID: asset.id,
-            sourceRange: range,
-            timelineRange: range
+            sourceRange: sourceRange,
+            timelineRange: timelineRange
         )
         project.tracks.append(Track(kind: kind, name: name, clips: [clip]))
+    }
+
+    /// Pick the canonical "recording length" for the timeline. Prefer the
+    /// screen recording's duration because SCStream rarely warms up late;
+    /// fall back to the wall-clock duration from start() to stop(); fall
+    /// back to the longest per-track duration for audio-only edge cases.
+    private func pickCanonicalRecordingDuration(summary: CaptureSummary) -> RationalTime {
+        if let screen = summary.screenDuration, screen.seconds > 0 {
+            return screen
+        }
+        if summary.duration.seconds > 0 {
+            return summary.duration
+        }
+        let perTrack = [summary.camDuration, summary.micDuration, summary.sysAudioDuration]
+            .compactMap { $0?.seconds }
+        if let longest = perTrack.max(), longest > 0 {
+            return .seconds(longest)
+        }
+        return .zero
     }
 
     private func relativePath(of url: URL, in bundle: ProjectBundle) -> String {
@@ -379,8 +508,28 @@ final class RecordingService {
         session = nil
         pipeline = nil
         bundle = nil
+        // Release the process-wide `ClickEventSource.live`'s CGEvent
+        // tap BEFORE nullifying our logger reference. Without this, a
+        // recording that failed AFTER click logger started but BEFORE
+        // stop()'s success path ran (e.g. AVCaptureSession stream
+        // failure → stop() throws → catch runs tearDown) left
+        // `LiveTapStorage.port` set, and every subsequent recording
+        // in this process aborted its click logger with
+        // `ClickEventSourceError.alreadyRunning`. The visible
+        // symptoms downstream: no clicks sidecar → auto-zoom and
+        // gesture buttons greyed in the editor, no synthetic cursor
+        // in preview, manual zoom anchors to the screen centre
+        // instead of the last cursor position. `ClickEventSource.live.stop`
+        // is idempotent (LiveTapStorage.stop nil-guards `port`) so
+        // this is safe even on the success path where the logger's
+        // own stop already cleared the tap.
+        if clickLogger != nil {
+            ClickEventSource.live.stop()
+        }
         clickLogger = nil
         clickSessionID = nil
+        currentSessionID = nil
+        appendTracksOnStop = true
     }
 
     private func humanReadable(_ error: Error) -> String {

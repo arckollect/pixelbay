@@ -181,6 +181,10 @@ struct PrecaptureView: View {
     /// ContentView's ProjectDocument loader. Phase 2 entry point for
     /// editing prior recordings.
     var onOpenProject: () -> Void
+    /// Phase 5 — opens the singleton Scene Recording window. The launcher
+    /// stays on the picker so the user can switch between single-shot and
+    /// multi-take recording without losing per-mode state.
+    var onSceneRecording: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -286,6 +290,10 @@ struct PrecaptureView: View {
             }
             .controlSize(.large)
             .keyboardShortcut("o", modifiers: .command)
+            Button(action: onSceneRecording) {
+                Label("Scene-based Recording", systemImage: "rectangle.stack.badge.play")
+            }
+            .controlSize(.large)
             Spacer()
             if model.isLoading {
                 HStack(spacing: 6) {
@@ -310,6 +318,7 @@ struct PrecaptureView: View {
         accessibilityGranted: false,
         onRequestAccessibility: {},
         onRecord: {},
-        onOpenProject: {}
+        onOpenProject: {},
+        onSceneRecording: {}
     )
 }

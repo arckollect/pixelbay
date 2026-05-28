@@ -12,6 +12,10 @@ private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "App")
 enum WindowID {
     static let launcher = "launcher"
     static let project = "project"
+    // Phase 5 — singleton scene-recording window. One instance at a time
+    // (uses `Window`, not `WindowGroup`) because every scenes session
+    // shares the same persistent .pixelbay bundle on disk.
+    static let scenes = "scenes"
 }
 
 extension KeyboardShortcuts.Name {
@@ -40,6 +44,9 @@ struct PixelbayAppApp: App {
     @State private var recording = RecordingService()
     @State private var hud = RecordingHUDController()
     @State private var appState = AppState()
+    // Slice A.2 — shared inter-window state pointing the next-opened
+    // Scenes window at a specific editor document for append-merge.
+    @State private var scenesAppendTarget = ScenesAppendTarget()
 
     var body: some Scene {
         // Launcher: singleton window for picker + post-capture + onboarding +
@@ -49,6 +56,7 @@ struct PixelbayAppApp: App {
         Window("Pixelbay", id: WindowID.launcher) {
             ContentView()
                 .environment(recording)
+                .environment(scenesAppendTarget)
                 .onAppear {
                     appState.bindHotkeys(recording: recording)
                     appState.installMenubar(recording: recording)
@@ -75,14 +83,37 @@ struct PixelbayAppApp: App {
             CommandGroup(replacing: .undoRedo) {
                 EditUndoRedoCommands()
             }
+            // Phase 5 — "Clean up unused takes" under the File menu.
+            // Operates on the focused project window's document; disabled
+            // when the focused project has nothing to clean (the helper
+            // is cheap and the visibility-gate avoids confusion when the
+            // menu item appears available but does nothing).
+            CommandGroup(after: .saveItem) {
+                CleanupUnusedTakesCommand()
+            }
         }
 
         // Project editor: one window per open .pixelbay bundle. SwiftUI
         // restores these on relaunch via the encoded ProjectWindowID.
         WindowGroup("Project", id: WindowID.project, for: ProjectWindowID.self) { $bundleID in
             ProjectWindow(bundleID: bundleID)
+                .environment(scenesAppendTarget)
         }
         .defaultSize(width: 1200, height: 800)
+
+        // Phase 5 — Scenes window. Singleton (`Window`, not `WindowGroup`)
+        // because there's exactly one persistent scenes-session bundle on
+        // disk per machine; opening the window twice would step on its
+        // own state. `.windowResizability(.contentSize)` lets slice 5.6's
+        // recording-HUD collapse animate the window between full and
+        // compact frame sizes.
+        Window("Scene Recording", id: WindowID.scenes) {
+            ScenesWindowView()
+                .environment(recording)
+                .environment(scenesAppendTarget)
+        }
+        .defaultSize(width: 760, height: 720)
+        .windowResizability(.contentSize)
     }
 
     // SwiftUI's onChange needs Equatable. RecordingService.Phase is Equatable
@@ -308,6 +339,24 @@ private struct SaveProjectCommand: View {
         }
         .keyboardShortcut("s", modifiers: .command)
         .disabled(document?.isDirty != true || document?.status == .saving)
+    }
+}
+
+// Phase 5 — "Clean up unused takes". Operates on the focused project
+// window's document via FocusedValue. Removes discarded scene takes'
+// media files + project.assets entries, plus orphan assets that aren't
+// referenced by any clip (post-merge cleanup). Disabled when there's
+// nothing to clean so the menu item doesn't appear to do nothing on
+// click.
+private struct CleanupUnusedTakesCommand: View {
+    @FocusedValue(\.openProjectDocument) private var document
+
+    var body: some View {
+        Button("Clean Up Unused Takes") {
+            guard let document else { return }
+            Task { await document.cleanupUnusedTakes() }
+        }
+        .disabled(document?.hasOrphanedAssetsOrTakes != true)
     }
 }
 

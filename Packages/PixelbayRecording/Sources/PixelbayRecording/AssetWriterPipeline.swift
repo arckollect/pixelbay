@@ -303,27 +303,43 @@ public final class AssetWriterPipeline: CaptureSink, @unchecked Sendable {
 
     // MARK: - Per-track entry points
 
+    /// Lower bound (seconds) below which a video track's first PTS is treated
+    /// as a pre-clock-lock sample rather than a real host-clock timestamp.
+    /// Host-clock PTS is seconds-since-boot — always far larger than this — so
+    /// 1 s is an enormous safety margin over the observed pre-lock values
+    /// (0 s and 0.033 s) while never excluding a genuine recording start.
+    private static let minPlausibleHostClockPTSSeconds: Double = 1.0
+
     private func handleSingleVideo(
         context: inout WriterContext?,
         url: URL,
         fileType: AVFileType,
         sampleBuffer: CMSampleBuffer
     ) throws {
-        // AVCaptureVideoDataOutput's very first sample after startRunning
-        // sometimes arrives before the session sync clock has locked,
-        // carrying PTS=0 with CMTimeFlags=[.valid] only (no HasBeenRounded
-        // — i.e., not yet converted into the host-clock domain). Subsequent
-        // samples then arrive with proper host-clock PTS in the 1e11+
-        // range, and starting the writer with `atSourceTime: 0` produces a
+        // AVCaptureVideoDataOutput's first sample(s) after startRunning can
+        // arrive before the session sync clock has locked into the host-clock
+        // domain. SCStream screen samples are host-clock from the very first
+        // frame, but the cam emits one or more pre-lock frames whose PTS is in
+        // a session-relative ~0-based domain — observed as pts=0 (cold start)
+        // AND pts=0.033 s (warm restart between scenes). Real host-clock PTS is
+        // seconds-since-boot, always far larger than any plausible recording (a
+        // running Mac's uptime is minutes-to-days). Starting the writer at such
+        // a tiny startPTS and then appending real host-clock samples produces a
         // .mov whose duration metadata is the host-clock value of the LAST
-        // sample (≈ 138,000 seconds / 38 hours when the machine has been
-        // up that long). Drop the suspect first sample so the writer
-        // doesn't latch onto the bad startPTS — single-frame loss, no
-        // user-visible artifact. HANDOFF §3.16 iter #14.
+        // sample (≈ 742,900 s / 8.6 days when the machine has been up that
+        // long); that corrupt asset duration flows into the merged project and
+        // destabilises the editor when the clip lands on the timeline. Drop any
+        // leading video sample whose PTS is implausibly small to be a host
+        // clock time, so the writer latches onto the first real clock-locked
+        // sample — single-frame loss, no user-visible artifact. The screen path
+        // also runs through here but its first PTS is always large, so it's
+        // unaffected. HANDOFF §3.16 iter #14 (broadened from the original
+        // `pts == 0` test after a between-scenes recording produced a 0.033 s
+        // pre-lock frame that slipped through and corrupted cam-*.mov).
         if context == nil {
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            if pts.value == 0 && !pts.flags.contains(.hasBeenRounded) {
-                log.notice("dropping suspect first video sample for \(url.lastPathComponent, privacy: .public): pts=\(pts.value)/\(pts.timescale) flags=\(pts.flags.rawValue)")
+            if pts.seconds < Self.minPlausibleHostClockPTSSeconds {
+                log.notice("dropping suspect pre-lock first video sample for \(url.lastPathComponent, privacy: .public): pts=\(pts.value)/\(pts.timescale) seconds=\(pts.seconds) flags=\(pts.flags.rawValue)")
                 return
             }
         }
@@ -634,8 +650,29 @@ public final class AssetWriterPipeline: CaptureSink, @unchecked Sendable {
         // instead; cancelWriting also guarantees no half-written file is
         // left behind.
         guard ctx.ready else {
+            // The writer can reach `.failed` during setup — e.g. an AAC
+            // `startWriting()` rejecting an unsupported mic format with
+            // -11861 — without ever becoming ready. `append(_:on:)` catches
+            // that throw and marks the track failed, but if we return no
+            // `writerError` here the failure is invisible to the caller:
+            // `writerErrors` stays empty, the recording is treated as fully
+            // successful, and a 0-byte mic asset gets persisted and then
+            // spams the editor with "media damaged" on every waveform load.
+            // Surface it so PostCaptureView can warn (the screen/cam tracks
+            // still survive — per-track isolation is unchanged). A writer
+            // that simply never started (status `.unknown`, e.g. a screen
+            // writer whose expected audio never arrived) is NOT an error.
+            var setupError: Error?
+            if ctx.writer.status == .failed {
+                let nsError = ctx.writer.error as NSError?
+                let detail = "domain=\(nsError?.domain ?? "?") code=\(nsError?.code ?? -1) desc=\(nsError?.localizedDescription ?? "nil") reason=\(nsError?.localizedFailureReason ?? "nil")"
+                setupError = RecordingError.writerFailed(
+                    "\(ctx.writer.outputURL.lastPathComponent): \(detail)"
+                )
+                log.error("writer \(ctx.writer.outputURL.lastPathComponent, privacy: .public) FAILED before ready: \(detail, privacy: .public)")
+            }
             ctx.writer.cancelWriting()
-            return FinalizeResult(videoStats: videoStats, audioStats: audioStats)
+            return FinalizeResult(videoStats: videoStats, audioStats: audioStats, writerError: setupError)
         }
         ctx.videoInput?.markAsFinished()
         ctx.audioInput?.markAsFinished()

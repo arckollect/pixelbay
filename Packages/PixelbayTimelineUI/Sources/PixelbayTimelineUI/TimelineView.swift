@@ -347,44 +347,44 @@ public final class TimelineNSView: NSView {
         // it's the standard sticky-header trade-off (top of lane 1 sits
         // briefly under the floating ruler as it scrolls past).
 
-        for track in layout.tracks {
-            // Header cell.
-            let header = CATextLayer()
-            header.frame = track.headerFrame
-            header.string = "\(track.name) (\(track.kind.rawValue))"
-            header.fontSize = 11
-            header.alignmentMode = .left
-            header.contentsScale = window?.backingScaleFactor ?? 2
-            header.foregroundColor = NSColor.secondaryLabelColor.cgColor
-            header.backgroundColor = NSColor.controlBackgroundColor.cgColor
-            layer.addSublayer(header)
-
-            // Lane background.
-            let lane = CALayer()
-            lane.frame = track.laneFrame
-            lane.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.4).cgColor
-            layer.addSublayer(lane)
-
-            // Clips.
-            for clip in track.clips {
-                let clipLayer = CALayer()
-                clipLayer.frame = clip.frame
-                clipLayer.cornerRadius = 4
-                clipLayer.borderWidth = clip.id == selectedClipID ? 2 : 1
-                clipLayer.borderColor = clip.id == selectedClipID
-                    ? NSColor.controlAccentColor.cgColor
-                    : NSColor.separatorColor.cgColor
-                clipLayer.backgroundColor = colorForKind(track.kind, selected: clip.id == selectedClipID).cgColor
-                layer.addSublayer(clipLayer)
-
-                // Audio tracks get a waveform overlay inside the clip
-                // body. Loading is async; while it's in flight the
-                // overlay just renders empty (the clip's tinted
-                // background is the placeholder).
-                if isAudioKind(track.kind) {
-                    addWaveformLayer(forClip: clip, clipFrame: clip.frame, kind: track.kind)
-                }
+        // Branch B (2026-05-27): render iterates `displayRows`. For a
+        // grouped row, draw the primary track's band only. For a
+        // singleTrack row, draw the physical track's clips as before.
+        // PiP/audio badges (`layout.groupedOverlapBadges`) are painted
+        // in a separate pass below so the badge always lands on top of
+        // the primary clip.
+        let tracksByID = Dictionary(uniqueKeysWithValues: layout.tracks.map { ($0.id, $0) })
+        for row in layout.displayRows {
+            switch row.kind {
+            case .effectsLane:
+                continue   // drawn in the dedicated effects pass below
+            case .singleTrack(let trackID, _):
+                guard let track = tracksByID[trackID] else { continue }
+                drawSingleTrackRow(track, in: layer)
+            case .groupedVideo(_, let primaryTrackID),
+                 .groupedAudio(_, let primaryTrackID):
+                drawGroupedRow(
+                    primaryTrackID: primaryTrackID,
+                    isVideoGroup: row.kind.isVideoGroup,
+                    tracksByID: tracksByID,
+                    in: layer
+                )
             }
+        }
+
+        // Badges last so they sit on top of clip layers regardless of
+        // draw order above.
+        for badge in layout.groupedOverlapBadges {
+            addOverlapBadge(
+                on: badge.anchorFrame,
+                isVideo: badge.kind == .video,
+                in: layer
+            )
+        }
+
+        // Disclosure chevrons for each grouped lane (Slice B.4).
+        for disclosure in layout.laneDisclosures {
+            addDisclosureChevron(disclosure, in: layer)
         }
 
         let effectsLane = layout.effectsLane
@@ -462,6 +462,137 @@ public final class TimelineNSView: NSView {
         case .trimEffectOut:
             guard let id = session.effectKeyframeID else { return .none }
             return .trimEffectKeyframeOut(id, deltaPixels: session.currentDeltaPixels)
+        }
+    }
+
+    /// Draws one physical-track row: header + lane background + clips +
+    /// optional waveform overlay. Used for `singleTrack` display rows
+    /// (expanded grouped child OR a track outside any group).
+    private func drawSingleTrackRow(_ track: TrackLayout, in layer: CALayer) {
+        let header = CATextLayer()
+        header.frame = track.headerFrame
+        header.string = "\(track.name) (\(track.kind.rawValue))"
+        header.fontSize = 11
+        header.alignmentMode = .left
+        header.contentsScale = window?.backingScaleFactor ?? 2
+        header.foregroundColor = NSColor.secondaryLabelColor.cgColor
+        header.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        layer.addSublayer(header)
+
+        let lane = CALayer()
+        lane.frame = track.laneFrame
+        lane.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.4).cgColor
+        layer.addSublayer(lane)
+
+        for clip in track.clips {
+            let clipLayer = CALayer()
+            clipLayer.frame = clip.frame
+            clipLayer.cornerRadius = 4
+            clipLayer.borderWidth = clip.id == selectedClipID ? 2 : 1
+            clipLayer.borderColor = clip.id == selectedClipID
+                ? NSColor.controlAccentColor.cgColor
+                : NSColor.separatorColor.cgColor
+            clipLayer.backgroundColor = colorForKind(track.kind, selected: clip.id == selectedClipID).cgColor
+            layer.addSublayer(clipLayer)
+            if isAudioKind(track.kind) {
+                addWaveformLayer(forClip: clip, clipFrame: clip.frame, kind: track.kind)
+            }
+        }
+    }
+
+    /// Draws a grouped (collapsed) row: the primary physical track's
+    /// clips become the lane's band. The secondary-track-overlap badges
+    /// are painted in a separate pass from the precomputed
+    /// `layout.groupedOverlapBadges` so they sit on top of the clip
+    /// layers and the layout-vs-renderer split stays clean.
+    private func drawGroupedRow(
+        primaryTrackID: TrackID,
+        isVideoGroup: Bool,
+        tracksByID: [TrackID: TrackLayout],
+        in layer: CALayer
+    ) {
+        guard let primary = tracksByID[primaryTrackID] else { return }
+
+        // Header label uses the group's friendly name.
+        let header = CATextLayer()
+        header.frame = primary.headerFrame
+        header.string = isVideoGroup ? "Video" : "Audio"
+        header.fontSize = 11
+        header.alignmentMode = .left
+        header.contentsScale = window?.backingScaleFactor ?? 2
+        header.foregroundColor = NSColor.labelColor.cgColor
+        header.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        layer.addSublayer(header)
+
+        // Lane background.
+        let lane = CALayer()
+        lane.frame = primary.laneFrame
+        lane.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.4).cgColor
+        layer.addSublayer(lane)
+
+        // Primary track clips form the visible band.
+        for clip in primary.clips {
+            let clipLayer = CALayer()
+            clipLayer.frame = clip.frame
+            clipLayer.cornerRadius = 4
+            clipLayer.borderWidth = clip.id == selectedClipID ? 2 : 1
+            clipLayer.borderColor = clip.id == selectedClipID
+                ? NSColor.controlAccentColor.cgColor
+                : NSColor.separatorColor.cgColor
+            clipLayer.backgroundColor = colorForKind(primary.kind, selected: clip.id == selectedClipID).cgColor
+            layer.addSublayer(clipLayer)
+            if isAudioKind(primary.kind) {
+                addWaveformLayer(forClip: clip, clipFrame: clip.frame, kind: primary.kind)
+            }
+        }
+    }
+
+    /// Renders the disclosure chevron for one grouped lane. SF Symbol
+    /// "chevron.right" when collapsed (points to the band), "chevron.down"
+    /// when expanded (points at the first child row). Drawn as a plain
+    /// CALayer with `NSImage` contents — same pattern as the PiP badge.
+    private func addDisclosureChevron(_ disclosure: LaneDisclosure, in layer: CALayer) {
+        let symbolName = disclosure.isCollapsed ? "chevron.right" : "chevron.down"
+        guard let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) else { return }
+        let chevron = CALayer()
+        chevron.frame = disclosure.hitFrame
+        chevron.contents = symbol
+        chevron.contentsGravity = .resizeAspect
+        chevron.contentsScale = window?.backingScaleFactor ?? 2
+        layer.addSublayer(chevron)
+    }
+
+    /// Adds a small icon-on-circle overlay anchored to the top-right of
+    /// `clipFrame`. Used to signal "there's a non-primary track clip
+    /// underlying this part of the grouped lane" — a video group shows
+    /// a camera glyph, an audio group shows a speaker glyph. Both are
+    /// SF Symbols rendered into a CALayer via NSImage.
+    private func addOverlapBadge(on clipFrame: CGRect, isVideo: Bool, in layer: CALayer) {
+        // Skip if the clip is too narrow to host the badge cleanly.
+        guard clipFrame.width >= 18 else { return }
+        let badgeSize: CGFloat = 14
+        let inset: CGFloat = 3
+        let badgeFrame = CGRect(
+            x: clipFrame.maxX - badgeSize - inset,
+            y: clipFrame.minY + inset,
+            width: badgeSize,
+            height: badgeSize
+        )
+        // Tinted circle background so the glyph reads against any
+        // clip color.
+        let bg = CALayer()
+        bg.frame = badgeFrame
+        bg.cornerRadius = badgeSize / 2
+        bg.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
+        layer.addSublayer(bg)
+        let symbolName = isVideo ? "videocam.fill" : "speaker.wave.2.fill"
+        if let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
+            let glyph = CALayer()
+            glyph.frame = badgeFrame.insetBy(dx: 2, dy: 2)
+            glyph.contents = symbol
+            glyph.contentsGravity = .resizeAspect
+            glyph.contentsScale = window?.backingScaleFactor ?? 2
+            layer.addSublayer(glyph)
         }
     }
 
@@ -711,6 +842,21 @@ public final class TimelineNSView: NSView {
         case .effectsLaneHeader:
             onSelectEffectKeyframe?(nil)
             dragSession = nil
+        case .laneDisclosure(let groupID):
+            // Branch B (Slice B.4): chevron click toggles the lane's
+            // collapse state. Reads the current value through
+            // `isLaneCollapsed` (which honours the smart-default seed
+            // for lanes the user hasn't touched yet) and flips it.
+            guard let project else {
+                dragSession = nil
+                return
+            }
+            let nowCollapsed = !project.isLaneCollapsed(groupID)
+            onApplyCommand?(SetLaneCollapsedCommand(
+                groupID: groupID,
+                collapsed: nowCollapsed
+            ))
+            dragSession = nil
         case .trackHeader, .emptyLane, .empty:
             onSelect?(nil)
             onSelectEffectKeyframe?(nil)
@@ -796,18 +942,41 @@ public final class TimelineNSView: NSView {
         case .move:
             guard let clipID = session.clipID else { return }
             // Move uses an absolute newTimelineStart, so we add delta to
-            // the clip's current start.
+            // the clip's current start. Clamped to t=0: the user cannot
+            // drag a clip past the start of the timeline (strict snap).
             guard let clip = project?.clip(clipID) else { return }
-            let newStart = RationalTime.seconds(
-                seconds(clip.timelineRange.start) + deltaSeconds
-            )
-            onApplyCommand?(MoveClipCommand(clipID: clipID, newTimelineStart: newStart))
+            let proposedStart = seconds(clip.timelineRange.start) + deltaSeconds
+            let newStart = RationalTime.seconds(max(0, proposedStart))
+            // Branch B (Slice B.5): if the lead clip's lane is
+            // collapsed, propagate the move to every overlapping clip
+            // on the lane's underlying physical tracks. Otherwise the
+            // single-clip command applies as before.
+            let groupIDs = project?.clipsOnCollapsedLaneOverlapping(clipID) ?? [clipID]
+            if groupIDs.count > 1 {
+                onApplyCommand?(MoveClipsGroupCommand(
+                    clipIDs: groupIDs,
+                    leadClipID: clipID,
+                    newTimelineStart: newStart
+                ))
+            } else {
+                onApplyCommand?(MoveClipCommand(clipID: clipID, newTimelineStart: newStart))
+            }
         case .trimIn:
             guard let clipID = session.clipID else { return }
-            onApplyCommand?(TrimClipInCommand(clipID: clipID, delta: delta))
+            let groupIDs = project?.clipsOnCollapsedLaneOverlapping(clipID) ?? [clipID]
+            if groupIDs.count > 1 {
+                onApplyCommand?(TrimClipsGroupCommand(clipIDs: groupIDs, delta: delta))
+            } else {
+                onApplyCommand?(TrimClipInCommand(clipID: clipID, delta: delta))
+            }
         case .trimOut:
             guard let clipID = session.clipID else { return }
-            onApplyCommand?(TrimClipOutCommand(clipID: clipID, delta: delta))
+            let groupIDs = project?.clipsOnCollapsedLaneOverlapping(clipID) ?? [clipID]
+            if groupIDs.count > 1 {
+                onApplyCommand?(TrimClipsOutGroupCommand(clipIDs: groupIDs, delta: delta))
+            } else {
+                onApplyCommand?(TrimClipOutCommand(clipID: clipID, delta: delta))
+            }
         case .moveEffect, .trimEffectIn, .trimEffectOut:
             guard let kfID = session.effectKeyframeID,
                   let original = project?.effects.first(where: { $0.id == kfID }) else { return }

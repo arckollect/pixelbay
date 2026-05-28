@@ -193,21 +193,18 @@ final class AVOutputBridge: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private let sink: (any CaptureSink)?
     private let errorContinuation: AsyncStream<CaptureError>.Continuation
     private let onFirstSample: @Sendable (RationalTime) -> Void
-    private let sourceClock: CMClock?
     private let lock = NSLock()
     private var firstSampleObserved = false
 
     init(
         sink: (any CaptureSink)?,
         errorContinuation: AsyncStream<CaptureError>.Continuation,
-        onFirstSample: @escaping @Sendable (RationalTime) -> Void,
-        sourceClock: CMClock?
+        onFirstSample: @escaping @Sendable (RationalTime) -> Void
     ) {
         self.sink = sink
         self.errorContinuation = errorContinuation
         self.onFirstSample = onFirstSample
-        self.sourceClock = sourceClock
-        log.info("AVOutputBridge init sink=\(sink != nil ? "present" : "nil", privacy: .public) sourceClock=\(sourceClock != nil ? "present" : "nil", privacy: .public)")
+        log.info("AVOutputBridge init sink=\(sink != nil ? "present" : "nil", privacy: .public)")
     }
 
     func captureOutput(
@@ -229,27 +226,52 @@ final class AVOutputBridge: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             return
         }
 
+        // AVCaptureVideoDataOutput's very first sample after startRunning can
+        // arrive with PTS=0 and flags lacking .hasBeenRounded — i.e. before
+        // the session sync clock has locked into the host-clock domain (the
+        // same "suspect" sample AssetWriterPipeline.handleSingleVideo drops,
+        // HANDOFF §3.16 iter #14). We must apply the identical test BEFORE
+        // latching the first-sample host time: latching on it sets
+        // captureStart to host-time 0, collapsing the whole recording's time
+        // origin. That throws the clicks sidecar's `timestamp - captureStart`
+        // alignment off by the machine's uptime, so the synthetic cursor,
+        // auto-zoom-from-clicks, and playhead-anchored manual zoom all read
+        // empty / centre. The suspect sample is still forwarded to the sink,
+        // which runs its own identical drop, so latching here is the only
+        // behaviour that changes.
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let isSuspectFirstVideo = track == .camVideo
+            && pts.value == 0
+            && !pts.flags.contains(.hasBeenRounded)
+
         var shouldFire = false
         lock.lock()
-        if !firstSampleObserved {
+        if !firstSampleObserved && !isSuspectFirstVideo {
             firstSampleObserved = true
             shouldFire = true
         }
         lock.unlock()
         if shouldFire {
-            // AVCaptureSession's PTS is in its synchronizationClock domain;
-            // convert to the host clock so it's directly comparable to
-            // SCStream samples (HANDOFF §6.5).
-            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            let hostClock = CMClockGetHostTimeClock()
-            let converted: CMTime
-            if let src = sourceClock {
-                converted = CMSyncConvertTime(pts, from: src, to: hostClock)
-            } else {
-                converted = pts
-            }
-            log.info("AVOutputBridge first sample track=\(String(describing: track), privacy: .public) pts=\(pts.value)/\(pts.timescale) sinkAvailable=\(self.sink != nil)")
-            onFirstSample(RationalTime(value: converted.value, timescale: converted.timescale))
+            // Latch the recording's host-clock origin from the instant the
+            // first real sample is observed, NOT from the sample's PTS. The
+            // AVCaptureSession PTS domain is unreliable as an origin: depending
+            // on warm-up state it arrives either already host-clock-locked (a
+            // huge seconds-since-boot value) OR in a session-relative ~0-based
+            // domain that hasn't yet locked to the host clock — observed in one
+            // process as scene 1 → 741956 s but scene 2 → 0.033 s. The
+            // documented normaliser is AVCaptureSession.synchronizationClock,
+            // but that reads nil at bridge-construction time (before
+            // startRunning) so any conversion silently no-ops and the 0-based
+            // domain leaks straight into captureStart, collapsing the
+            // clicks-sidecar alignment for that scene (no synthetic cursor, no
+            // auto-zoom, manual zoom centres). The delegate fires within a few
+            // ms of capture, so the host clock's current time IS the sample's
+            // host time to well inside the sub-second inter-track tolerance the
+            // timeline already accepts, and it stays directly comparable to
+            // SCStream's host-clock PTS (HANDOFF §6.5).
+            let hostNow = CMClockGetTime(CMClockGetHostTimeClock())
+            log.info("AVOutputBridge first sample track=\(String(describing: track), privacy: .public) pts=\(pts.value)/\(pts.timescale) hostNow=\(hostNow.value)/\(hostNow.timescale) sinkAvailable=\(self.sink != nil)")
+            onFirstSample(RationalTime(value: hostNow.value, timescale: hostNow.timescale))
         }
         sink?.append(sampleBuffer, on: track)
     }

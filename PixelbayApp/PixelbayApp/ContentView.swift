@@ -28,6 +28,7 @@ struct ContentView: View {
     )
     @State private var dismissedOnboarding = false
     @Environment(RecordingService.self) private var recording
+    @Environment(ScenesAppendTarget.self) private var scenesAppendTarget
     @Environment(\.openWindow) private var openWindow
     @State private var precaptureModel = PrecaptureModel()
     @State private var orphans = OrphanRecoveryModel()
@@ -121,6 +122,17 @@ struct ContentView: View {
                 },
                 onOpenProject: {
                     Task { await pickAndOpenProject() }
+                },
+                onSceneRecording: {
+                    // Launcher = "fresh scenes session" entry point. Clear
+                    // any append-target the editor's Scenes button may have
+                    // left behind so this session loads in standalone mode
+                    // — without this, a previously-closed project (even one
+                    // discarded without saving) would be reused as the merge
+                    // target and the new scenes would append into a stale
+                    // document instead of producing a fresh merged project.
+                    scenesAppendTarget.set(nil)
+                    openWindow(id: WindowID.scenes)
                 }
             )
             // The .failed phase reuses the picker but flashes a banner so the

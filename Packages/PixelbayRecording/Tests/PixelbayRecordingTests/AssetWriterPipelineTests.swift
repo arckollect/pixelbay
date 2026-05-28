@@ -51,6 +51,25 @@ final class AssetWriterPipelineTests: XCTestCase {
         bundleURL.appendingPathComponent("media").appendingPathComponent(AssetWriterPipeline.recordingMarkerFilename)
     }
 
+    /// A plausible host-clock PTS base in seconds (≈ machine uptime).
+    /// Production SCStream / locked-cam samples carry host-clock
+    /// (seconds-since-boot) timestamps, always far above
+    /// `AssetWriterPipeline.minPlausibleHostClockPTSSeconds`. The synthetic
+    /// `SampleBufferFactory` defaults to a ~0 origin, so any test exercising
+    /// the normal write path must offset its PTS into the host-clock domain
+    /// or the pipeline's pre-lock-frame drop (HANDOFF §3.16 iter #14) treats
+    /// every frame as suspect and discards it. Durations are deltas, so the
+    /// offset doesn't perturb any duration assertion.
+    private static let hostClockBaseSeconds: Int64 = 100_000
+
+    /// Build a host-clock-domain PTS for `frame` at `timescale`.
+    private func hostPTS(frame: Int, timescale: Int32) -> CMTime {
+        CMTime(
+            value: Self.hostClockBaseSeconds * Int64(timescale) + CMTimeValue(frame),
+            timescale: timescale
+        )
+    }
+
     // MARK: - Marker file
 
     func test_constructor_createsRecordingMarkerFile() throws {
@@ -95,7 +114,7 @@ final class AssetWriterPipelineTests: XCTestCase {
 
         let timescale: Int32 = 60
         for frame in 0..<6 {
-            let pts = CMTime(value: CMTimeValue(frame), timescale: timescale)
+            let pts = hostPTS(frame: frame, timescale: timescale)
             let sb = try SampleBufferFactory.videoSample(pts: pts)
             pipeline.append(sb, on: .camVideo)
         }
@@ -125,7 +144,7 @@ final class AssetWriterPipelineTests: XCTestCase {
         let pipeline = try AssetWriterPipeline(configuration: makeConfig())
 
         for frame in 0..<4 {
-            let pts = CMTime(value: CMTimeValue(frame), timescale: 60)
+            let pts = hostPTS(frame: frame, timescale: 60)
             let sb = try SampleBufferFactory.videoSample(pts: pts)
             pipeline.append(sb, on: .screenVideo)
         }
@@ -215,7 +234,7 @@ final class AssetWriterPipelineTests: XCTestCase {
         let pipeline = try AssetWriterPipeline(configuration: makeConfig(sysAudioURL: sysURL))
 
         for frame in 0..<4 {
-            let pts = CMTime(value: CMTimeValue(frame), timescale: 60)
+            let pts = hostPTS(frame: frame, timescale: 60)
             let sb = try SampleBufferFactory.videoSample(pts: pts)
             pipeline.append(sb, on: .screenVideo)
         }
@@ -270,17 +289,45 @@ final class AssetWriterPipelineTests: XCTestCase {
         let suspectBuf = try XCTUnwrap(rewritten)
         pipeline.append(suspectBuf, on: .camVideo)
 
-        // Real subsequent frames at host-clock-ish PTS with HasBeenRounded.
+        // Real subsequent frames at genuine host-clock PTS (seconds-since-boot).
         for frame in 1...4 {
-            let pts = CMTime(value: CMTimeValue(frame), timescale: 60)
+            let pts = hostPTS(frame: frame, timescale: 60)
             let sb = try SampleBufferFactory.videoSample(pts: pts)
             pipeline.append(sb, on: .camVideo)
         }
         let summary = try await pipeline.finish()
 
-        // Expected: writer started on frame 1 (PTS 1/60), last sample at
-        // frame 4 (PTS 4/60), duration = 3/60s. Without the iter-#14 drop,
-        // duration would be 4/60s (latched onto PTS 0).
+        // Expected: writer started on host-frame 1, last sample at host-frame
+        // 4, duration = 3/60s. Without the iter-#14 drop, the writer would
+        // latch onto PTS 0 and report a duration of ~hostClockBaseSeconds.
+        XCTAssertNotNil(summary.camDuration)
+        XCTAssertEqual(summary.camDuration?.seconds ?? .nan, 3.0 / 60.0, accuracy: 1e-6)
+    }
+
+    func test_handleSingleVideo_dropsWarmRestartPreLockFrame() async throws {
+        // Broadened iter-#14 case: between scenes, the cam can emit a
+        // pre-lock frame at a small *non-zero* PTS (observed 0.033 s) that
+        // the original `pts == 0` test let through, corrupting cam-*.mov.
+        // The `< minPlausibleHostClockPTSSeconds` rule must drop it too.
+        let camURL = bundleURL.appendingPathComponent("media/cam-test.mov")
+        let pipeline = try AssetWriterPipeline(configuration: makeConfig(camURL: camURL))
+
+        // Warm-restart pre-lock frame: PTS ≈ 0.033 s, well under 1 s.
+        let preLock = try SampleBufferFactory.videoSample(
+            pts: CMTime(value: 2, timescale: 60)
+        )
+        pipeline.append(preLock, on: .camVideo)
+
+        for frame in 1...4 {
+            let pts = hostPTS(frame: frame, timescale: 60)
+            let sb = try SampleBufferFactory.videoSample(pts: pts)
+            pipeline.append(sb, on: .camVideo)
+        }
+        let summary = try await pipeline.finish()
+
+        // The 0.033 s frame is dropped, so the writer latches onto the first
+        // host-clock frame; duration is the 3/60 s span of the real frames,
+        // not the ~hostClockBaseSeconds a mixed-domain latch would report.
         XCTAssertNotNil(summary.camDuration)
         XCTAssertEqual(summary.camDuration?.seconds ?? .nan, 3.0 / 60.0, accuracy: 1e-6)
     }

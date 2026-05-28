@@ -266,16 +266,43 @@ public enum PreviewCompositionBuilder {
             let timelineStart = cmTime(clip.timelineRange.start)
             let timelineDuration = cmTime(clip.timelineRange.duration)
             try mutableTrack.insertTimeRange(sourceRange, of: sourceTrack, at: timelineStart)
-            // Per-clip speed: when timelineRange.duration ≠ sourceRange.duration
-            // (i.e., clip.speed ≠ 1.0), retime the just-inserted segment
-            // to match the timeline duration. Skipped when equal so the
-            // tolerance for normal-speed clips stays exact.
-            if CMTimeCompare(sourceRange.duration, timelineDuration) != 0 && timelineDuration > .zero {
+            // Per-clip speed vs pad-with-empty disambiguation. When the
+            // source and timeline durations disagree there are two valid
+            // intents (speed change, or recording with a shorter file
+            // than the canonical timeline length). We use `clip.speed`
+            // to decide:
+            //
+            //   speed != 1.0 → user explicitly set a playback speed via
+            //     SetClipSpeedCommand; retime the inserted segment to
+            //     fill `timelineDuration`. This is the Phase 2 behavior.
+            //
+            //   speed == 1.0 → the recording pipeline produced a file
+            //     shorter than the canonical timeline length (cam / mic
+            //     / sysAudio writer warmed up late, or stopped early).
+            //     RecordingService.appendTrack pads `timelineRange.duration`
+            //     to the screen's wall-clock length so the timeline UI
+            //     shows the full recording, and we let
+            //     `insertTimeRange` write the available source at
+            //     `timelineStart`; the residual `[sourceEnd, timelineEnd]`
+            //     stays empty (transparent on a video track, silence on
+            //     audio). The playback experience: cam plays normally
+            //     for as long as it has frames, then drops out to a
+            //     transparent PiP. No re-scaling / no slowdown.
+            if timelineDuration > .zero
+                && CMTimeCompare(sourceRange.duration, timelineDuration) != 0
+                && clip.speed != 1.0
+            {
                 mutableTrack.scaleTimeRange(
                     CMTimeRange(start: timelineStart, duration: sourceRange.duration),
                     toDuration: timelineDuration
                 )
             }
+            // speed == 1.0 + duration mismatch → pad case. We intentionally
+            // do NOT scaleTimeRange; the empty tail past
+            // `timelineStart + sourceRange.duration` renders transparent in
+            // the AVMutableComposition, which is exactly what we want for
+            // a cam clip whose underlying file is shorter than the screen
+            // recording.
             if !inserted {
                 firstNaturalSize = try await sourceTrack.load(.naturalSize)
                 firstTransform = try await sourceTrack.load(.preferredTransform)
@@ -304,6 +331,16 @@ public enum PreviewCompositionBuilder {
         }
         var inserted = false
         let inputParams = AVMutableAudioMixInputParameters(track: mutableTrack)
+        // Defensive: AVMutableScheduledAudioParameters throws
+        // NSInvalidArgumentException ("The timeRange of a ramp must not
+        // overlap the timeRange of an existing ramp") if two clips on
+        // the same track produce overlapping volume ramps. Pre-fix
+        // scenes-merged projects on disk are known to violate this when
+        // the underlying mic / sysAudio files were longer than the
+        // screen recording. Track the previous ramp's end and clamp /
+        // skip the current ramp if it would overlap, rather than
+        // crashing the entire load.
+        var previousRampEnd: CMTime?
         for clip in track.clips {
             guard let asset = project.assets.first(where: { $0.id == clip.assetID }) else { continue }
             let url = bundleURL.appendingPathComponent(asset.relativePath)
@@ -321,15 +358,34 @@ public enum PreviewCompositionBuilder {
             // range. setVolumeRamp with start == end gives a flat-volume
             // segment. Multiple non-overlapping segments compose into the
             // full audio mix for that track.
-            let timelineRange = CMTimeRange(
+            var rampRange = CMTimeRange(
                 start: timelineStart,
                 duration: cmTime(clip.timelineRange.duration)
             )
+            if let prevEnd = previousRampEnd, CMTimeCompare(rampRange.start, prevEnd) < 0 {
+                let clampedStart = prevEnd
+                let originalEnd = CMTimeRangeGetEnd(rampRange)
+                if CMTimeCompare(clampedStart, originalEnd) >= 0 {
+                    // Entire ramp falls inside the previous one; skip
+                    // setting a ramp for this clip. The underlying
+                    // audio still mixes at the track's default volume,
+                    // so playback isn't silent — we just lose the
+                    // per-clip volume control for the overlap region.
+                    log.notice("populateAudioTrack: clip ramp [\(rampRange.start.seconds), \(originalEnd.seconds)] fully overlaps previous ramp ending at \(prevEnd.seconds); skipping ramp")
+                    inserted = true
+                    continue
+                }
+                rampRange = CMTimeRange(
+                    start: clampedStart,
+                    duration: CMTimeSubtract(originalEnd, clampedStart)
+                )
+            }
             inputParams.setVolumeRamp(
                 fromStartVolume: Float(max(0, clip.volume)),
                 toEndVolume: Float(max(0, clip.volume)),
-                timeRange: timelineRange
+                timeRange: rampRange
             )
+            previousRampEnd = CMTimeRangeGetEnd(rampRange)
             inserted = true
         }
         guard inserted else { return nil }

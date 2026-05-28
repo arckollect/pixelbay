@@ -236,6 +236,83 @@ final class PreviewCompositionTests: XCTestCase {
         XCTAssertEqual(preview.duration.seconds, 0.5, accuracy: 0.05)
     }
 
+    func test_build_shortSourceWithPaddedTimeline_doesNotStretchVideo() async throws {
+        // Repro of the cam-clip-too-short bug. A 10s screen recording with
+        // a 3s webcam: RecordingService now pads the webcam clip's
+        // timelineRange to 10s so the timeline UI shows it as 10s and
+        // the user can edit it without surprise. With `clip.speed == 1.0`
+        // the compositor must NOT scaleTimeRange (which would slow the
+        // 3s webcam to fill 10s); it should leave the [3s, 10s] tail
+        // empty/transparent and the resulting composition should be 10s
+        // long, not 30s.
+        let screenURL = bundleURL.appendingPathComponent("media/screen.mov")
+        try writeSilentVideo(to: screenURL, durationSeconds: 10.0, size: CGSize(width: 640, height: 360))
+        let camURL = bundleURL.appendingPathComponent("media/cam.mov")
+        try writeSilentVideo(to: camURL, durationSeconds: 3.0, size: CGSize(width: 320, height: 240))
+
+        let screenAssetID = MediaAssetID.generate()
+        let screenAsset = MediaAsset(
+            id: screenAssetID,
+            kind: .display,
+            relativePath: "media/screen.mov",
+            nativeDuration: RationalTime.seconds(10)
+        )
+        let camAssetID = MediaAssetID.generate()
+        let camAsset = MediaAsset(
+            id: camAssetID,
+            kind: .webcam,
+            relativePath: "media/cam.mov",
+            nativeDuration: RationalTime.seconds(3)
+        )
+        let screenClip = Clip(
+            assetID: screenAssetID,
+            sourceRange: TimeRange(start: .zero, duration: .seconds(10)),
+            timelineRange: TimeRange(start: .zero, duration: .seconds(10))
+        )
+        // The bug-fix clip: timelineRange = 10s, sourceRange = 3s,
+        // speed = 1.0 (the default). Composition should be 10s long
+        // with the first 3s carrying cam content.
+        let camClip = Clip(
+            assetID: camAssetID,
+            sourceRange: TimeRange(start: .zero, duration: .seconds(3)),
+            timelineRange: TimeRange(start: .zero, duration: .seconds(10))
+        )
+        var project = Project(name: "Padded cam")
+        project.assets = [screenAsset, camAsset]
+        project.tracks = [
+            Track(kind: .screen, name: "Screen", clips: [screenClip]),
+            Track(kind: .webcam, name: "Webcam", clips: [camClip])
+        ]
+
+        let preview = try await PreviewCompositionBuilder.build(project: project, bundleURL: bundleURL)
+        // Composition duration is the longer of the two tracks' ranges,
+        // which is 10s. Were the compositor to scale the 3s cam to 10s
+        // it would still report 10s (the scaling is on the cam track
+        // only), so this assertion alone doesn't prove the fix. The
+        // stronger check is that the cam composition track has exactly
+        // 3s of content and a 7s trailing empty range — see below.
+        XCTAssertEqual(preview.duration.seconds, 10.0, accuracy: 0.05)
+
+        // Inspect the AVMutableComposition's webcam track to confirm the
+        // inserted source span is 3s (not stretched to 10s) and the
+        // overall track range still reaches 10s via the implicit
+        // trailing empty time.
+        let webcamTracks = preview.composition.tracks(withMediaType: .video)
+            .filter { $0.timeRange.duration.seconds < 9.5 || $0.timeRange.duration.seconds > 10.5 ? false : true }
+        // ^ both tracks span up to 10s; pick by segments.
+        // Find the cam track: it has exactly one non-empty segment of 3s.
+        let camTrack = preview.composition.tracks(withMediaType: .video).first {
+            $0.segments.contains(where: { !$0.isEmpty && $0.timeMapping.target.duration.seconds > 2.5 && $0.timeMapping.target.duration.seconds < 3.5 })
+        }
+        XCTAssertNotNil(camTrack, "webcam track should keep the 3s source segment without scaling")
+        if let camTrack {
+            let nonEmpty = camTrack.segments.filter { !$0.isEmpty }
+            XCTAssertEqual(nonEmpty.count, 1, "exactly one non-empty cam segment")
+            XCTAssertEqual(nonEmpty.first?.timeMapping.target.duration.seconds ?? 0, 3.0, accuracy: 0.1)
+        }
+        _ = webcamTracks
+    }
+
     func test_build_noAudioTracks_yieldsNilAudioMix() async throws {
         // Pure-video project (no microphone / systemAudio / voiceover
         // tracks) → audioMix is nil so AVPlayer / AVAssetExportSession

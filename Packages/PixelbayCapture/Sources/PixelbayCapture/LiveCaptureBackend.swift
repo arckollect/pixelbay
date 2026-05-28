@@ -45,6 +45,13 @@ public actor LiveCaptureBackend: CaptureBackend {
     private var avRuntimeErrorObserver: NSObjectProtocol?
     private var firstSampleTime: RationalTime?
     private var firstSampleWaiters: [CheckedContinuation<RationalTime, Error>] = []
+    /// AVCaptureSession-specific first-sample observer. The global
+    /// `firstSampleTime` latches on WHICHEVER bridge fires first (typically
+    /// SCStream), so we can't reuse it to gate "wait for camera warm-up
+    /// before SCStream starts". This separate slot tracks the first AV
+    /// sample only.
+    private var firstAVSampleTime: RationalTime?
+    private var firstAVSampleWaiters: [CheckedContinuation<RationalTime, Error>] = []
     private var sessionStartWallClock: Date?
 
     public init(
@@ -183,9 +190,11 @@ public actor LiveCaptureBackend: CaptureBackend {
                 sink: sink,
                 errorContinuation: errorContinuation,
                 onFirstSample: { [weak self] hostTime in
-                    Task { await self?.recordFirstSample(hostTime) }
-                },
-                sourceClock: s.synchronizationClock
+                    Task {
+                        await self?.recordFirstSample(hostTime)
+                        await self?.recordFirstAVSample(hostTime)
+                    }
+                }
             )
             do {
                 if let cam = camera {
@@ -287,6 +296,51 @@ public actor LiveCaptureBackend: CaptureBackend {
             }
         }
 
+        // Capture-pipeline ordering fix (2026-05-27): start AVCaptureSession
+        // FIRST and wait for its first sample BEFORE starting SCStream.
+        //
+        // The previous order (SCStream first, then session.startRunning)
+        // produced cam / mic files that were noticeably shorter than the
+        // screen recording: SCStream emits its first sample within ~200ms
+        // of `startCapture()`, but the camera + microphone need ~1–2 s of
+        // hardware warm-up after `session.startRunning()` returns before
+        // the AVOutputBridge sees its first sample. The AssetWriter for
+        // each track starts its session at THAT track's first PTS, so
+        // the cam.mov / mic.caf files captured (T_stop − T_first_cam) =
+        // (T_stop − T_screen_first − warmupGap) of content while
+        // screen.mov captured the full (T_stop − T_screen_first).
+        //
+        // Serializing the warm-up here means cam/mic are already
+        // producing samples by the time SCStream starts, so all four
+        // tracks land first samples within ~tens of ms of each other.
+        // The user-visible cost is a ~1–2 s wait between "Record" being
+        // pressed and recording actually starting; RecordingService's
+        // `.preparing` phase already surfaces this. Acceptable trade-off
+        // for tracks-of-equal-length on the timeline.
+        //
+        // If there's no AVCaptureSession (screen-only recording), skip
+        // straight to SCStream.
+        self.stream = stream
+        self.streamBridge = scBridge
+        self.avSession = session
+        self.avBridge = bridge
+
+        if let session = session {
+            session.startRunning()
+            log.info("AVCaptureSession.startRunning called isRunning=\(session.isRunning) inputs=\(session.inputs.count) outputs=\(session.outputs.count)")
+            // Wait for the AVCaptureSession's first sample before kicking
+            // off SCStream. Bounded by `firstSampleTimeout` (default 5s)
+            // so an unresponsive camera doesn't hang the recording start
+            // forever; on timeout we proceed with SCStream anyway and
+            // accept the misalignment for that recording.
+            do {
+                let avFirst = try await awaitFirstAVSample()
+                log.info("AVCaptureSession first sample observed at PTS \(avFirst.value)/\(avFirst.timescale); proceeding to SCStream")
+            } catch {
+                log.notice("AVCaptureSession first-sample wait failed (\(String(describing: error), privacy: .public)); starting SCStream anyway")
+            }
+        }
+
         do {
             try await stream.startCapture()
             log.info("SCStream.startCapture returned (capturesAudio=\(plan.includeSystemAudio))")
@@ -294,15 +348,7 @@ public actor LiveCaptureBackend: CaptureBackend {
             log.error("SCStream.startCapture threw: \(error.localizedDescription, privacy: .public)")
             throw Self.mapSCStreamStartError(error)
         }
-        session?.startRunning()
-        if let session = session {
-            log.info("AVCaptureSession.startRunning called isRunning=\(session.isRunning) inputs=\(session.inputs.count) outputs=\(session.outputs.count)")
-        }
 
-        self.stream = stream
-        self.streamBridge = scBridge
-        self.avSession = session
-        self.avBridge = bridge
         self.sessionStartWallClock = Date()
 
         let firstSample = try await awaitFirstSample()
@@ -393,6 +439,40 @@ public actor LiveCaptureBackend: CaptureBackend {
         let timeout = firstSampleTimeout
         for w in waiters {
             w.resume(throwing: CaptureError.streamFailed(message: "No sample buffer observed within \(timeout)s of stream start"))
+        }
+    }
+
+    // MARK: - AVCaptureSession-specific first-sample tracking
+
+    private func recordFirstAVSample(_ hostTime: RationalTime) {
+        guard firstAVSampleTime == nil else { return }
+        firstAVSampleTime = hostTime
+        let waiters = firstAVSampleWaiters
+        firstAVSampleWaiters = []
+        for w in waiters {
+            w.resume(returning: hostTime)
+        }
+    }
+
+    private func awaitFirstAVSample() async throws -> RationalTime {
+        if let existing = firstAVSampleTime { return existing }
+        let timeout = firstSampleTimeout
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<RationalTime, Error>) in
+            firstAVSampleWaiters.append(cont)
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                await self?.failPendingFirstAVSampleWaiters()
+            }
+        }
+    }
+
+    private func failPendingFirstAVSampleWaiters() {
+        guard firstAVSampleTime == nil else { return }
+        let waiters = firstAVSampleWaiters
+        firstAVSampleWaiters = []
+        let timeout = firstSampleTimeout
+        for w in waiters {
+            w.resume(throwing: CaptureError.streamFailed(message: "No AVCaptureSession sample observed within \(timeout)s of session.startRunning()"))
         }
     }
 

@@ -2,7 +2,7 @@
 
 A native macOS screen recorder and non-linear video editor.
 
-Status: **Phase 1 (MVP) — scaffolding.** See the roadmap for the full roadmap.
+Status: **Phases 1–3 shipped; Phase 4 next.** See [`PLAN.md`](PLAN.md) for the full roadmap and [`HANDOFF.md`](HANDOFF.md) for the session-state cursor.
 
 ## Requirements
 
@@ -55,4 +55,4 @@ swift test
 
 ## Phase 1 Scope
 
-See the roadmap. v0.1 records (display **or** window) + webcam + mic + system audio, plays back with a fixed default layout (cam bottom-right), and exports H.264 MP4 at one preset. No timeline editing yet.
+See [`PLAN.md`](PLAN.md). v0.1 records (display **or** window) + webcam + mic + system audio, plays back with a fixed default layout (cam bottom-right), and exports H.264 MP4 at one preset. No timeline editing yet.

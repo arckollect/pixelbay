@@ -451,6 +451,32 @@ public enum MouseTrajectory {
             let prev = samples[i - 1]
             let dtTotal = max(0.0, s.t - prevT)
             if dtTotal <= 0 {
+                // Scenes-merge defense: ScenesMerger places clips
+                // back-to-back, so scene N's last sample and scene
+                // N+1's first sample land at the same timeline time
+                // with potentially very different cursor positions
+                // (separate recording sessions). Without this branch
+                // the spring would carry over its anchor from scene N
+                // and chase scene N+1's position over the next dt —
+                // visible camera lag at every scene cut. SNAP the
+                // anchor to the new sample's position so the spring
+                // resumes from the right place; velocity resets so
+                // the cross-scene step doesn't bleed into the next
+                // iteration as fake high speed. Single-shot recordings
+                // never trip this (their trajectory has strictly
+                // monotonic timestamps), so the existing single-shot
+                // behavior is preserved.
+                let dx = s.x - anchorX
+                let dy = s.y - anchorY
+                if (dx * dx + dy * dy) > (0.05 * 0.05) {
+                    anchorX = s.x
+                    anchorY = s.y
+                    vx = 0
+                    vy = 0
+                    prevT = s.t
+                    result.append(ZoomTrajectorySample(t: s.t, x: anchorX, y: anchorY))
+                    continue
+                }
                 result.append(ZoomTrajectorySample(t: s.t, x: anchorX, y: anchorY))
                 continue
             }

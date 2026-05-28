@@ -131,6 +131,107 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         XCTAssertThrowsError(try UpdateEffectKeyframeCommand(keyframeID: kf.id, newValue: bad).apply(to: &project))
     }
 
+    /// Re-stamping the ID in `UpdateEffectKeyframeCommand` used to drop
+    /// `trajectory`, `origin`, `anchorMode`, and `followLeadSeconds` —
+    /// silently flipping a manual / pinned / lead-shifted keyframe to the
+    /// auto + followCursor + 0 defaults. Regression guard.
+    func test_update_preservesAllFields_whenReStampingID() throws {
+        var (project, _) = EditorFixture.minimalSingleClip()
+        let kf = EffectKeyframe(
+            kind: .zoom,
+            timelineRange: TimeRange(start: .seconds(1), duration: .seconds(2)),
+            origin: .manualHotkey,
+            anchorMode: .pinned,
+            followLeadSeconds: 0.18
+        )
+        _ = try AddEffectKeyframeCommand(keyframe: kf).apply(to: &project)
+        let updated = EffectKeyframe(
+            id: .generate(), // different id — triggers re-stamp branch
+            kind: .zoom,
+            timelineRange: kf.timelineRange,
+            zoomFactor: 2.5,
+            origin: .manualHotkey,
+            anchorMode: .pinned,
+            followLeadSeconds: 0.18
+        )
+        _ = try UpdateEffectKeyframeCommand(keyframeID: kf.id, newValue: updated).apply(to: &project)
+        XCTAssertEqual(project.effects[0].id, kf.id)
+        XCTAssertEqual(project.effects[0].origin, .manualHotkey)
+        XCTAssertEqual(project.effects[0].anchorMode, .pinned)
+        XCTAssertEqual(project.effects[0].followLeadSeconds, 0.18, accuracy: 0.001)
+    }
+
+    // MARK: - AddZoomAtPlayhead (slice #11.e)
+
+    func test_addZoomAtPlayhead_insertsOneManualHotkeyKeyframe() throws {
+        var (project, _) = EditorFixture.minimalSingleClip()
+        let command = AddZoomAtPlayheadCommand(
+            timelineTime: 2.0,
+            centerX: 0.4,
+            centerY: 0.6
+        )
+        _ = try command.apply(to: &project)
+        XCTAssertEqual(project.effects.count, 1)
+        let kf = project.effects[0]
+        XCTAssertEqual(kf.kind, .zoom)
+        XCTAssertEqual(kf.origin, .manualHotkey)
+        XCTAssertEqual(kf.anchorMode, .followCursor)
+        XCTAssertEqual(kf.centerX, 0.4, accuracy: 0.001)
+        XCTAssertEqual(kf.centerY, 0.6, accuracy: 0.001)
+        // Snappy envelope: 0.3 in + 0.6 hold + 0.5 out = 1.4s total.
+        XCTAssertEqual(kf.timelineRange.start.seconds, 2.0, accuracy: 0.001)
+        XCTAssertEqual(kf.timelineRange.duration.seconds, 1.4, accuracy: 0.001)
+    }
+
+    func test_addZoomAtPlayhead_clampsAnchorToUnitSquare() throws {
+        var (project, _) = EditorFixture.minimalSingleClip()
+        _ = try AddZoomAtPlayheadCommand(
+            timelineTime: 1.0,
+            centerX: 1.7,    // out of range — should clamp to 1.0
+            centerY: -0.5    // negative — should clamp to 0.0
+        ).apply(to: &project)
+        XCTAssertEqual(project.effects[0].centerX, 1.0)
+        XCTAssertEqual(project.effects[0].centerY, 0.0)
+    }
+
+    func test_addZoomAtPlayhead_inverseRemovesKeyframe() throws {
+        var (project, _) = EditorFixture.minimalSingleClip()
+        let inverse = try AddZoomAtPlayheadCommand(timelineTime: 1.5).apply(to: &project)
+        XCTAssertEqual(project.effects.count, 1)
+        _ = try inverse.apply(to: &project)
+        XCTAssertTrue(project.effects.isEmpty)
+    }
+
+    func test_addZoomAtPlayhead_throws_whenInsideExistingZoom() throws {
+        var (project, _) = EditorFixture.minimalSingleClip()
+        let existing = EffectKeyframe(
+            kind: .zoom,
+            timelineRange: TimeRange(start: .seconds(1.5), duration: .seconds(2.0))
+        )
+        _ = try AddEffectKeyframeCommand(keyframe: existing).apply(to: &project)
+        XCTAssertThrowsError(
+            try AddZoomAtPlayheadCommand(timelineTime: 2.0).apply(to: &project)
+        )
+        XCTAssertEqual(project.effects.count, 1, "no new keyframe added on overlap")
+    }
+
+    func test_addZoomAtPlayhead_throws_whenPastTimelineEnd() throws {
+        var (project, _) = EditorFixture.minimalSingleClip()
+        XCTAssertThrowsError(
+            try AddZoomAtPlayheadCommand(
+                timelineTime: 9.9, // 9.9 + 1.4s envelope spills past 10s end
+                timelineDuration: 10.0
+            ).apply(to: &project)
+        )
+        XCTAssertTrue(project.effects.isEmpty)
+    }
+
+    func test_addZoomAtPlayhead_negativeTimeClampsToZero() throws {
+        var (project, _) = EditorFixture.minimalSingleClip()
+        _ = try AddZoomAtPlayheadCommand(timelineTime: -1.0).apply(to: &project)
+        XCTAssertEqual(project.effects[0].timelineRange.start.seconds, 0.0)
+    }
+
     // MARK: - GenerateAutoZoomFromClicks
 
     func test_autoZoom_widelySpacedClicks_generatesOneKeyframePerCluster() throws {
