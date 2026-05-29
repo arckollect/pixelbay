@@ -463,13 +463,13 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../Packages/PixelbayEditor;
 		};
-		E4A57D102FD0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayDesignSystem" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = ../Packages/PixelbayDesignSystem;
-		};
 		E4A57C212FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayTimelineUI" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../Packages/PixelbayTimelineUI;
+		};
+		E4A57D102FD0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayDesignSystem" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/PixelbayDesignSystem;
 		};
 /* End XCLocalSwiftPackageReference section */
 

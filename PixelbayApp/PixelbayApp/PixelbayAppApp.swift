@@ -67,6 +67,11 @@ struct PixelbayAppApp: App {
                 }
         }
         .defaultSize(width: 920, height: 640)
+        // Track each route's content size: the New Recording picker is an
+        // intrinsically-sized floating bar (see LauncherWindowChrome), while
+        // onboarding / placeholder / post-capture carry their own minimum
+        // frames. Without this the window would stay 920×640 behind the bar.
+        .windowResizability(.contentSize)
         .commands {
             // File menu: ⌘N hops back to the launcher and clears any
             // post-capture state so the user lands on the picker. ⌘O opens

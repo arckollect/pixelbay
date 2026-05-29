@@ -186,134 +186,255 @@ struct PrecaptureView: View {
     /// stays on the picker so the user can switch between single-shot and
     /// multi-take recording without losing per-mode state.
     var onSceneRecording: () -> Void
+    /// Closes the floating bar (dismisses the launcher window). The menubar
+    /// status item's "Show Pixelbay" brings it back.
+    var onClose: () -> Void = {}
 
+    // Screen-Studio-style floating hover bar. The launcher window is restyled
+    // (borderless, floating, bottom-centred) by `LauncherWindowChrome` while
+    // this view is on screen; here we just render the bar itself with a
+    // transparent margin so the drop shadow has room.
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                Text("New Recording")
-                    .font(Theme.Font.pageTitle)
-                    .foregroundStyle(Theme.Color.textPrimary)
-                Text("Pick the display, camera, and microphone to record. Pixelbay's own windows are excluded automatically.")
-                    .font(Theme.Font.body)
-                    .foregroundStyle(Theme.Color.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if let loadError = model.loadError {
-                HStack(alignment: .top, spacing: Theme.Spacing.sm) {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.Color.warning)
-                    Text(loadError).font(Theme.Font.body).foregroundStyle(Theme.Color.textPrimary)
-                    Spacer()
-                    Button("Retry") { Task { await model.loadAvailableSources() } }
-                        .buttonStyle(.pbSecondary)
-                }
-                .padding(Theme.Spacing.md)
-                .background(Theme.Color.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.medium)
-                        .strokeBorder(Theme.Color.warning.opacity(0.35), lineWidth: Theme.Stroke.hairline)
-                )
-            }
-
-            sourceCard
+        HStack(spacing: Theme.Spacing.sm) {
+            closeButton
+            barDivider
+            sourceSegment
+            barDivider
+            cameraControl
+            micControl
+            systemAudioControl
+            barDivider
+            sceneButton
             recordButton
-            Spacer(minLength: 0)
+            barDivider
+            overflowMenu
         }
-        .padding(40)
-        .frame(minWidth: 620, minHeight: 460)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Theme.Color.bgBase)
+        .padding(.horizontal, Theme.Spacing.md)
+        .padding(.vertical, Theme.Spacing.sm)
+        .frame(height: 64)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
+                .fill(Theme.Color.bgElevated)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
+                .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+        )
+        .shadow(color: .black.opacity(0.5), radius: 22, y: 10)
+        .padding(Theme.Spacing.xl)          // transparent margin for the shadow
+        .fixedSize()                         // window sizes to the bar (contentSize)
+        .tint(Theme.Color.accent)
         .task { await model.loadAvailableSources() }
     }
 
-    private var sourceCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Picker("Display", selection: $model.selectedDisplayID) {
+    // MARK: - Bar pieces
+
+    private var barDivider: some View {
+        PBDivider(.vertical).frame(height: 34)
+    }
+
+    private var closeButton: some View {
+        Button(action: onClose) {
+            Image(systemName: "xmark")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(Theme.Color.bgElevated)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Theme.Color.textPrimary))
+        }
+        .buttonStyle(.plain)
+        .help("Close — reopen from the menu bar")
+    }
+
+    // Source-type segment. Only Display records today; Window / Area / Device
+    // are Phase-4 deferred so they render dimmed + non-interactive with a
+    // "coming soon" tooltip (matches the Screen Studio layout).
+    private var sourceSegment: some View {
+        HStack(spacing: Theme.Spacing.xs) {
+            Menu {
                 if model.displays.isEmpty {
-                    Text("No displays available").tag(CGDirectDisplayID?.none)
+                    Text("No displays available")
                 }
                 ForEach(model.displays) { display in
-                    Text(display.localizedName).tag(CGDirectDisplayID?.some(display.id))
+                    Button {
+                        model.selectedDisplayID = display.id
+                    } label: {
+                        sourceMenuItem(display.localizedName, checked: display.id == model.selectedDisplayID)
+                    }
                 }
+            } label: {
+                sourceTile(icon: "display", title: "Display", selected: true, enabled: true)
             }
-            .pickerStyle(.menu)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Choose which display to record")
 
-            Picker("Camera", selection: $model.selectedCameraID) {
-                Text("None").tag(String?.none)
-                ForEach(model.cameras) { cam in
-                    Text(cam.localizedName).tag(String?.some(cam.id))
-                }
-            }
-            .pickerStyle(.menu)
-
-            Picker("Microphone", selection: $model.selectedMicrophoneID) {
-                Text("None").tag(String?.none)
-                ForEach(model.microphones) { mic in
-                    Text(displayedMicLabel(mic)).tag(String?.some(mic.id))
-                }
-            }
-            .pickerStyle(.menu)
-
-            Toggle("Capture system audio", isOn: $model.includeSystemAudio)
-            clickLogToggle
+            sourceTile(icon: "macwindow", title: "Window", selected: false, enabled: false)
+                .help("Window capture — coming soon")
+            sourceTile(icon: "rectangle.dashed", title: "Area", selected: false, enabled: false)
+                .help("Area capture — coming soon")
+            sourceTile(icon: "iphone", title: "Device", selected: false, enabled: false)
+                .help("Device capture — coming soon")
         }
-        .tint(Theme.Color.accent)
-        .pbCard(elevated: true)
     }
 
-    @ViewBuilder
-    private var clickLogToggle: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle("Log mouse clicks (for auto-zoom in Phase 3b)", isOn: $model.logClicks)
+    private func sourceTile(icon: String, title: String, selected: Bool, enabled: Bool) -> some View {
+        VStack(spacing: 3) {
+            Image(systemName: icon).font(.system(size: 17, weight: .regular))
+            Text(title).font(Theme.Font.caption)
+        }
+        .foregroundStyle(selected ? Theme.Color.accent : (enabled ? Theme.Color.textPrimary : Theme.Color.textTertiary))
+        .frame(width: 58, height: 46)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.small)
+                .fill(selected ? Theme.Color.accent.opacity(0.16) : Color.clear)
+        )
+        .opacity(enabled ? 1 : 0.5)
+    }
+
+    private var cameraControl: some View {
+        Menu {
+            Button { model.selectedCameraID = nil } label: {
+                sourceMenuItem("None", checked: model.selectedCameraID == nil)
+            }
+            ForEach(model.cameras) { cam in
+                Button { model.selectedCameraID = cam.id } label: {
+                    sourceMenuItem(cam.localizedName, checked: cam.id == model.selectedCameraID)
+                }
+            }
+        } label: {
+            inlineControl(
+                icon: model.selectedCameraID == nil ? "video.slash.fill" : "video.fill",
+                title: cameraTitle,
+                color: model.selectedCameraID == nil ? Theme.Color.textSecondary : Theme.Color.textPrimary
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private var micControl: some View {
+        Menu {
+            Button { model.selectedMicrophoneID = nil } label: {
+                sourceMenuItem("None", checked: model.selectedMicrophoneID == nil)
+            }
+            ForEach(model.microphones) { mic in
+                Button { model.selectedMicrophoneID = mic.id } label: {
+                    sourceMenuItem(displayedMicLabel(mic), checked: mic.id == model.selectedMicrophoneID)
+                }
+            }
+        } label: {
+            inlineControl(
+                icon: model.selectedMicrophoneID == nil ? "mic.slash.fill" : "mic.fill",
+                title: micTitle,
+                color: model.selectedMicrophoneID == nil ? Theme.Color.textSecondary : Theme.Color.textPrimary
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private var systemAudioControl: some View {
+        Button {
+            model.includeSystemAudio.toggle()
+        } label: {
+            inlineControl(
+                icon: model.includeSystemAudio ? "speaker.wave.2.fill" : "speaker.slash.fill",
+                title: "System audio",
+                color: model.includeSystemAudio ? Theme.Color.accent : Theme.Color.textSecondary
+            )
+        }
+        .buttonStyle(.plain)
+        .help(model.includeSystemAudio ? "System audio will be recorded" : "System audio is off")
+    }
+
+    private var sceneButton: some View {
+        Button(action: onSceneRecording) {
+            inlineControl(icon: "rectangle.stack.badge.play", title: "Scenes", color: Theme.Color.textPrimary)
+        }
+        .buttonStyle(.plain)
+        .help("Scene-based recording — record takes and merge")
+    }
+
+    private var recordButton: some View {
+        Button(action: onRecord) {
+            HStack(spacing: Theme.Spacing.xs) {
+                Image(systemName: "record.circle.fill")
+                Text("Record").font(Theme.Font.bodyEmphasized)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, Theme.Spacing.lg)
+            .frame(height: 40)
+            .background(Capsule().fill(Theme.Color.recordingRed))
+            .opacity(model.canRecord ? 1 : 0.45)
+        }
+        .buttonStyle(.plain)
+        .disabled(!model.canRecord)
+        .keyboardShortcut(.defaultAction)
+        .help(model.canRecord ? "Start recording" : "Pick a display first")
+    }
+
+    private var overflowMenu: some View {
+        Menu {
+            Toggle("Log mouse clicks (auto-zoom)", isOn: $model.logClicks)
                 .disabled(!accessibilityGranted)
             if !accessibilityGranted {
-                HStack(spacing: Theme.Spacing.xs) {
-                    Text("Requires Accessibility permission.")
-                        .font(Theme.Font.caption)
-                        .foregroundStyle(Theme.Color.textSecondary)
-                    Button("Grant in Settings…") {
-                        onRequestAccessibility()
-                    }
-                    .buttonStyle(.link)
-                    .font(Theme.Font.caption)
-                }
+                Button("Grant Accessibility…") { onRequestAccessibility() }
             }
+            Divider()
+            Button("Open Project…") { onOpenProject() }
+                .keyboardShortcut("o", modifiers: .command)
+        } label: {
+            HStack(spacing: 2) {
+                Image(systemName: "gearshape.fill").font(.system(size: 14))
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(Theme.Color.textSecondary)
+            .frame(height: 44)
+            .padding(.horizontal, Theme.Spacing.xs)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    // MARK: - Shared label builders
+
+    private func inlineControl(icon: String, title: String, color: Color) -> some View {
+        HStack(spacing: Theme.Spacing.xs) {
+            Image(systemName: icon).font(.system(size: 14))
+            Text(title)
+                .font(Theme.Font.bodyEmphasized)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, Theme.Spacing.sm)
+        .frame(height: 44)
+        .frame(maxWidth: 160)
+        .contentShape(Rectangle())
+    }
+
+    private func sourceMenuItem(_ text: String, checked: Bool) -> some View {
+        HStack {
+            if checked { Image(systemName: "checkmark") }
+            Text(text)
         }
     }
 
-    @ViewBuilder
-    private var recordButton: some View {
-        HStack {
-            Button(action: onRecord) {
-                Label("Record", systemImage: "record.circle.fill")
-                    .font(.title2.bold())
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 12)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(Theme.Color.recordingRed)
-            .controlSize(.large)
-            .keyboardShortcut(.defaultAction)
-            .disabled(!model.canRecord)
-            Button(action: onOpenProject) {
-                Label("Open Project…", systemImage: "folder")
-            }
-            .controlSize(.large)
-            .keyboardShortcut("o", modifiers: .command)
-            Button(action: onSceneRecording) {
-                Label("Scene-based Recording", systemImage: "rectangle.stack.badge.play")
-            }
-            .controlSize(.large)
-            Spacer()
-            if model.isLoading {
-                HStack(spacing: Theme.Spacing.xs) {
-                    ProgressView().controlSize(.small)
-                    Text("Loading sources…")
-                        .font(Theme.Font.body)
-                        .foregroundStyle(Theme.Color.textSecondary)
-                }
-            }
-        }
+    private var cameraTitle: String {
+        guard let id = model.selectedCameraID,
+              let cam = model.cameras.first(where: { $0.id == id }) else { return "No camera" }
+        return cam.localizedName
+    }
+
+    private var micTitle: String {
+        guard let id = model.selectedMicrophoneID,
+              let mic = model.microphones.first(where: { $0.id == id }) else { return "No microphone" }
+        return mic.localizedName
     }
 
     private func displayedMicLabel(_ mic: PrecaptureModel.DeviceChoice) -> String {

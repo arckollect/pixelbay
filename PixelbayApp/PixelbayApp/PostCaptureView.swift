@@ -40,7 +40,6 @@ struct PostCaptureView: View {
         }
         .padding(32)
         .frame(minWidth: 720, minHeight: 540)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.Color.bgBase)
         .task(id: result.bundleURL) {
             await loadIntoPlayer()

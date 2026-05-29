@@ -31,6 +31,7 @@ struct ContentView: View {
     @Environment(RecordingService.self) private var recording
     @Environment(ScenesAppendTarget.self) private var scenesAppendTarget
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
     @State private var precaptureModel = PrecaptureModel()
     @State private var orphans = OrphanRecoveryModel()
 
@@ -44,6 +45,7 @@ struct ContentView: View {
                 }
             }
         }
+        .background(LauncherWindowChrome(isBar: isPickerRoute))
         .task { orphans.scan() }
         .onReceive(NotificationCenter.default.publisher(for: .pixelbayNewRecordingRequested)) { _ in
             // ⌘N (or "New Recording" menu item) clears any post-capture
@@ -56,6 +58,17 @@ struct ContentView: View {
             set: { newValue in if !newValue { orphans.dismiss() } }
         )) {
             OrphanRecoverySheet(model: orphans)
+        }
+    }
+
+    /// True when the launcher is showing the New Recording picker — the only
+    /// route that renders as the floating hover bar. Onboarding, the
+    /// recording placeholder, and post-capture keep normal window chrome.
+    private var isPickerRoute: Bool {
+        guard dismissedOnboarding, permissions.requiredSatisfied else { return false }
+        switch recording.phase {
+        case .recording, .stopping, .stopped: return false
+        default: return true
         }
     }
 
@@ -134,6 +147,11 @@ struct ContentView: View {
                     // document instead of producing a fresh merged project.
                     scenesAppendTarget.set(nil)
                     openWindow(id: WindowID.scenes)
+                },
+                onClose: {
+                    // Hover bar ✕ — hide the launcher. The menubar status
+                    // item's "Show Pixelbay" reopens it.
+                    dismissWindow(id: WindowID.launcher)
                 }
             )
             // The .failed phase reuses the picker but flashes a banner so the
@@ -172,7 +190,6 @@ struct ContentView: View {
         }
         .padding(40)
         .frame(minWidth: 620, minHeight: 460)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.Color.bgBase)
     }
 
