@@ -4,7 +4,7 @@ DEVELOPER_DIR ?= /Applications/Xcode-26.4.0.app/Contents/Developer
 SWIFT_TEST := DEVELOPER_DIR="$(DEVELOPER_DIR)" xcrun swift test
 XCODEBUILD := DEVELOPER_DIR="$(DEVELOPER_DIR)" xcodebuild
 
-PACKAGES := PixelbayCore PixelbayPermissions PixelbayCapture PixelbayRecording PixelbayCompositor PixelbayPlayback PixelbayInputCapture PixelbayEditor PixelbayTimelineUI
+PACKAGES := PixelbayCore PixelbayDesignSystem PixelbayPermissions PixelbayCapture PixelbayRecording PixelbayCompositor PixelbayPlayback PixelbayInputCapture PixelbayEditor PixelbayTimelineUI
 
 .PHONY: help test test-% build clean ci release-dryrun
 
