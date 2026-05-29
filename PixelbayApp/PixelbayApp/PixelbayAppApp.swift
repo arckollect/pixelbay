@@ -61,6 +61,7 @@ struct PixelbayAppApp: App {
                 .onAppear {
                     appState.bindHotkeys(recording: recording)
                     appState.installMenubar(recording: recording)
+                    appState.observeEditorWindows(recording: recording)
                 }
                 .onChange(of: phaseTag(recording.phase)) { _, _ in
                     appState.respondToPhaseChange(recording: recording, hud: hud)
@@ -149,6 +150,8 @@ final class AppState {
     private var menubarStartItem: NSMenuItem?
     private var menubarStopItem: NSMenuItem?
     private var hotkeysBound = false
+    private var editorObservers: [NSObjectProtocol] = []
+    private weak var recording: RecordingService?
 
     func bindHotkeys(recording: RecordingService) {
         guard !hotkeysBound else { return }
@@ -213,16 +216,111 @@ final class AppState {
     }
 
     func respondToPhaseChange(recording: RecordingService, hud: RecordingHUDController) {
+        self.recording = recording   // reconcileLauncher + window observers read phase
+        // During capture the floating HUD is the only Pixelbay UI; the launcher
+        // window is hidden (see reconcileLauncher) so the old "Recording in
+        // progress" placeholder never shows.
         switch recording.phase {
         case .recording, .stopping:
             hud.show(service: recording)
         default:
             hud.hide()
         }
+        reconcileScenesWindow()
+        reconcileLauncher()
         refreshMenubar(recording: recording)
         if let symbol = menubarSymbol(for: recording.phase) {
             statusItem?.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Pixelbay")
         }
+    }
+
+    // The singleton launcher NSWindow, found by the scene id SwiftUI stamps
+    // onto `window.identifier` — same lookup MenubarTarget.showLauncherWindow
+    // uses. nil if the user closed it (picker ✕); callers no-op in that case.
+    private func launcherWindow() -> NSWindow? {
+        NSApp.windows.first { $0.identifier?.rawValue.contains(WindowID.launcher) == true }
+    }
+
+    private func hideLauncher() {
+        launcherWindow()?.orderOut(nil)
+    }
+
+    private func showLauncher() {
+        launcherWindow()?.makeKeyAndOrderFront(nil)
+    }
+
+    private func scenesWindow() -> NSWindow? {
+        NSApp.windows.first { $0.identifier?.rawValue.contains(WindowID.scenes) == true }
+    }
+
+    // The Scenes window (if open) is hidden during capture so the floating HUD
+    // is the only UI — same treatment as the launcher, and replacing the old
+    // in-window collapse HUD (two HUDs at once). It reappears once the take
+    // ends so the user can review it / record the next scene. Driven only by
+    // recording phase (not editor key/close events), so it never fights a user
+    // closing the window.
+    private func reconcileScenesWindow() {
+        guard let scenes = scenesWindow() else { return }
+        switch recording?.phase {
+        case .recording?, .stopping?, .preparing?:
+            scenes.orderOut(nil)
+        default:
+            scenes.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    // A project/scenes editor "owns the screen": while one is open the floating
+    // picker bar would just overlay it. True if any such window is visible.
+    private func hasOpenEditorWindow() -> Bool {
+        NSApp.windows.contains { window in
+            guard window.isVisible, let id = window.identifier?.rawValue else { return false }
+            return id.contains(WindowID.project) || id.contains(WindowID.scenes)
+        }
+    }
+
+    // Single source of truth for launcher visibility. Idempotent — safe to call
+    // from any trigger (phase change, editor opened/closed). The launcher is
+    // hidden while a recording is live (the HUD is the only UI) OR while a
+    // project/scenes editor is open (it would otherwise float over the editor —
+    // the post-capture → "Edit Project" case); otherwise it's shown (picker /
+    // post-capture). Driving this off real window key/close events (not a
+    // best-effort poll after openWindow) avoids the open-race where the editor
+    // window isn't in NSApp.windows yet.
+    private func reconcileLauncher() {
+        switch recording?.phase {
+        case .recording?, .stopping?, .preparing?:
+            hideLauncher()
+        default:
+            hasOpenEditorWindow() ? hideLauncher() : showLauncher()
+        }
+    }
+
+    // Reconcile when a project/scenes editor opens (becomes key → it's now in
+    // the window list, so the launcher hides) or closes (→ the launcher comes
+    // back, matching "close the editor to record again"). willClose fires while
+    // the window is still listed, so that path reconciles on the next tick.
+    func observeEditorWindows(recording: RecordingService) {
+        guard editorObservers.isEmpty else { return }
+        self.recording = recording
+        let center = NotificationCenter.default
+        func isEditor(_ note: Notification) -> Bool {
+            let id = (note.object as? NSWindow)?.identifier?.rawValue ?? ""
+            return id.contains(WindowID.project) || id.contains(WindowID.scenes)
+        }
+        editorObservers.append(center.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard isEditor(note) else { return }
+            Task { @MainActor [weak self] in self?.reconcileLauncher() }
+        })
+        editorObservers.append(center.addObserver(
+            forName: NSWindow.willCloseNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard isEditor(note) else { return }
+            // Defer: the closing window is still in NSApp.windows during
+            // willClose; reconcile once it's gone.
+            Task { @MainActor [weak self] in self?.reconcileLauncher() }
+        })
     }
 
     private func refreshMenubar(recording: RecordingService) {

@@ -61,21 +61,12 @@ struct ScenesWindowView: View {
 
     @ViewBuilder
     private func readyView(model: ScenesSessionModel) -> some View {
-        if case .recordingScene(let sceneIndex, let startedAt) = model.phase {
-            // Compact HUD — the window's .windowResizability(.contentSize)
-            // animates the frame down to the compact size while the
-            // recording is live. Stop is wired through RecordingService
-            // (existing HUD + ⌃⌘. hotkey both work); a button here gives
-            // an additional surface if the user is looking at the
-            // collapsed window.
-            recordingHUDBody(
-                model: model,
-                sceneIndex: sceneIndex,
-                startedAt: startedAt
-            )
-        } else {
-            fullBody(model: model)
-        }
+        // No compact in-window HUD: while a scene is recording the whole Scenes
+        // window is hidden (AppState.reconcileScenesWindow) so the floating
+        // RecordingHUD — which shows the "Scene N" label and Stop — is the only
+        // capture UI, matching the single-recording flow. The window always
+        // renders its full body; it reappears (here) once the take finishes.
+        fullBody(model: model)
     }
 
     private func fullBody(model: ScenesSessionModel) -> some View {
@@ -162,48 +153,6 @@ struct ScenesWindowView: View {
             .padding(.horizontal, 20)
             .padding(.top, 16)
         }
-    }
-
-    private func recordingHUDBody(
-        model: ScenesSessionModel,
-        sceneIndex: Int,
-        startedAt: Date
-    ) -> some View {
-        // Compact one-line state per decision #8. The window-frame collapse
-        // happens because of `.windowResizability(.contentSize)` on the
-        // Window declaration plus the smaller `.frame(...)` applied here.
-        HStack(spacing: Theme.Spacing.md) {
-            Image(systemName: "record.circle.fill")
-                .foregroundStyle(Theme.Color.recordingRed)
-                .imageScale(.large)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Recording Scene \(sceneIndex + 1)")
-                    .font(Theme.Font.cardTitle)
-                    .foregroundStyle(Theme.Color.textPrimary)
-                TimelineView(.periodic(from: startedAt, by: 0.1)) { context in
-                    Text(elapsedLabel(context.date.timeIntervalSince(startedAt)))
-                        .font(Theme.Font.monoTimecode)
-                        .foregroundStyle(Theme.Color.textSecondary)
-                }
-            }
-            Spacer(minLength: 12)
-            Button("Stop") {
-                Task { await recording.stop() }
-            }
-            .buttonStyle(.pbDestructive)
-            .keyboardShortcut(.return, modifiers: [])
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, Theme.Spacing.md)
-        .frame(width: 320, height: 64)
-        .background(Theme.Color.bgDeep)
-    }
-
-    private func elapsedLabel(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds.rounded(.down)))
-        let m = total / 60
-        let s = total % 60
-        return String(format: "Elapsed %d:%02d", m, s)
     }
 
     private var header: some View {

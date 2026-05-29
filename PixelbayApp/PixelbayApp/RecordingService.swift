@@ -101,10 +101,33 @@ final class RecordingService {
     /// default) or only append it to `project.assets` (scenes mode). Resets
     /// to true in `tearDown()`.
     private var appendTracksOnStop: Bool = true
+    /// The last self-allocating `StartRequest` (nil for scenes-mode recordings
+    /// that record into an existing bundle). `restart()` re-issues it to begin
+    /// a fresh take with identical settings after discarding the current one.
+    private var lastRequest: StartRequest?
+    /// False while recording into a caller-supplied bundle (scenes mode) — the
+    /// bundle is shared across takes, so Discard/Restart must not delete it.
+    private var ownsBundle = true
+    /// Non-nil while recording a scene ("Scene N"); drives the HUD to show the
+    /// label and hide Discard/Restart. nil for normal single recordings.
+    private(set) var sceneLabel: String?
 
     var isRecording: Bool {
         if case .recording = phase { return true }
         return false
+    }
+
+    /// Bundle URLs owned by an in-flight recording (set from `prepareBundle()`
+    /// / `start(existingBundle:)` until `tearDown()` clears it on stop or
+    /// failure). Orphan recovery consults this so it NEVER flags or discards
+    /// the live bundle as an interrupted recording — the
+    /// `media/.recording-in-progress` marker that orphan detection keys on is
+    /// *expected* while recording, and deleting the bundle mid-recording
+    /// destroys the capture (project.json vanishes → stop() throws
+    /// ProjectBundleError). See OrphanRecoveryModel.
+    var activeBundleURLs: Set<URL> {
+        guard let bundle else { return [] }
+        return [bundle.url]
     }
 
     var canStartRecording: Bool {
@@ -118,13 +141,25 @@ final class RecordingService {
     /// scenes-session bundle instead of allocating a fresh one. The default
     /// `nil` preserves Phase 1–4 single-recording behavior (one bundle per
     /// recording at `~/Library/Application Support/Pixelbay/Recordings/rec-*`).
-    func start(_ request: StartRequest, existingBundle: ProjectBundle? = nil) async {
+    func start(_ request: StartRequest, existingBundle: ProjectBundle? = nil, sceneLabel: String? = nil) async {
         guard canStartRecording else {
             log.notice("start() ignored — phase=\(String(describing: self.phase), privacy: .public)")
             return
         }
         phase = .preparing
         appendTracksOnStop = request.appendTracks
+        // Remember the request so Restart can re-issue an identical take after
+        // discarding the current one (the HUD doesn't hold the StartRequest).
+        // Scenes mode passes an existingBundle, which Restart wouldn't have —
+        // only remember requests that allocate their own bundle.
+        lastRequest = existingBundle == nil ? request : nil
+        // Scenes mode records into a SHARED persistent bundle (existingBundle):
+        // we don't own it, so Discard/Restart (which delete the bundle) must be
+        // refused — they'd wipe every other take. The HUD also hides those
+        // buttons in scenes mode; `sceneLabel` non-nil is the scenes-mode flag
+        // the HUD reads to show "Scene N" and drop Discard/Restart.
+        self.ownsBundle = (existingBundle == nil)
+        self.sceneLabel = sceneLabel
         do {
             let bundle = try existingBundle ?? prepareBundle()
             let audio: AudioSource = request.micID.map { .external(deviceUniqueID: $0) } ?? .none
@@ -268,6 +303,58 @@ final class RecordingService {
     func acknowledgeResult() {
         guard canStartRecording else { return }
         phase = .idle
+    }
+
+    /// Throw away the in-flight recording: stop capture, drop the click sidecar,
+    /// delete the whole `.pixelbay` bundle, and return to `.idle` (the launcher
+    /// reopens on the picker). Unlike `stop()`, produces no `Result` and leaves
+    /// nothing on disk.
+    func discard() async {
+        guard case .recording = phase, ownsBundle else { return }
+        await teardownAndDeleteBundle()
+        phase = .idle
+        log.info("recording discarded")
+    }
+
+    /// Discard the current take and immediately begin a fresh one with the same
+    /// settings. Stays in recording-adjacent phases throughout (no trip through
+    /// `.idle`), so the launcher never flashes back in between takes.
+    func restart() async {
+        guard case .recording = phase, ownsBundle else { return }
+        let request = lastRequest
+        await teardownAndDeleteBundle()
+        guard let request else {
+            // No re-issuable request (e.g. scenes mode) — fall back to idle.
+            phase = .idle
+            log.notice("restart() had no stored request — discarded only")
+            return
+        }
+        log.info("restarting recording")
+        await start(request)
+    }
+
+    /// Shared cleanup for `discard()`/`restart()`: finalize the writers (so file
+    /// handles release cleanly), drop the click logger's recording without
+    /// writing a sidecar, tear down session state, and delete the bundle
+    /// directory — which also removes the `.recording-in-progress` marker so
+    /// OrphanRecovery won't later flag it. Leaves `phase == .stopping`; the
+    /// caller sets the next phase.
+    private func teardownAndDeleteBundle() async {
+        phase = .stopping
+        let bundleURL = bundle?.url
+        // Finalize then delete: simpler and safe versus cancelling writers
+        // mid-flight (which the capture API doesn't expose). The summary is
+        // discarded.
+        if let session {
+            _ = try? await session.stop()
+        }
+        if let logger = clickLogger {
+            _ = await logger.stop()
+        }
+        tearDown()
+        if let bundleURL {
+            try? FileManager.default.removeItem(at: bundleURL)
+        }
     }
 
     // MARK: - Helpers
@@ -530,6 +617,8 @@ final class RecordingService {
         clickSessionID = nil
         currentSessionID = nil
         appendTracksOnStop = true
+        ownsBundle = true
+        sceneLabel = nil
     }
 
     private func humanReadable(_ error: Error) -> String {

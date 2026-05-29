@@ -305,7 +305,7 @@ final class ScenesSessionModel {
         }
 
         phase = .recordingScene(sceneIndex: index, startedAt: Date())
-        await recording.start(request, existingBundle: bundle)
+        await recording.start(request, existingBundle: bundle, sceneLabel: "Scene \(index + 1)")
 
         // Wait for the user to stop. `recording.stop()` is called from the
         // HUD button or the ⌃⌘. hotkey — we just observe phase here. Poll

@@ -5,11 +5,13 @@ import SwiftUI
 
 private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "RecordingHUD")
 
-// Floating panel that shows elapsed time + Stop while a recording is live.
-// Mounted as an NSPanel so it floats above other windows without stealing
-// focus. Pixelbay's bundle ID is added to SCContentFilter's
-// excludingApplications (RecordingService.start) so this panel — along with
-// the picker and post-capture sheet — never appears inside screen.mov.
+// Floating glass bar shown while a recording is live — the only Pixelbay UI on
+// screen during capture (the launcher window is ordered out; see
+// AppState.respondToPhaseChange). Mounted as a borderless NSPanel so it floats
+// above other windows without stealing focus and never enters the window list
+// that screen.mov captures. Pixelbay's bundle ID is added to SCContentFilter's
+// excludingApplications (RecordingService.start) so this panel — along with the
+// picker and post-capture sheet — never appears inside screen.mov.
 @MainActor
 final class RecordingHUDController {
     private var panel: NSPanel?
@@ -22,43 +24,40 @@ final class RecordingHUDController {
             return
         }
         let view = RecordingHUDView(service: service)
-        let host = NSHostingController(rootView: view)
-        // Do NOT enable .preferredContentSize: the HUD body contains a
-        // SwiftUI TimelineView(.periodic(every: 0.1)) which forces a
-        // SwiftUI re-evaluation 10×/s. With .preferredContentSize the
-        // host pushes a fresh size up to the panel during AppKit's own
-        // constraint pass, which AppKit treats as an infinite layout
-        // loop and aborts with NSGenericException ("more Update
-        // Constraints in Window passes than there are views").
-        // Instead, the panel owns the size; SwiftUI fits within it.
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 222, height: 68),
-            styleMask: [.titled, .nonactivatingPanel, .hudWindow, .utilityWindow],
+            contentRect: NSRect(x: 0, y: 0, width: 384, height: 76),
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        panel.title = "Recording"
-        panel.contentViewController = host
+        // Host the SwiftUI view with NSHostingView (NOT NSHostingController +
+        // contentViewController) and clear `sizingOptions`, so the view NEVER
+        // pushes a size up to the window. The HUD body runs a 10×/s
+        // TimelineView(.periodic(by: 0.1)); if the host is allowed to drive
+        // window size, that size-push fires inside AppKit's layout pass on
+        // every tick and AppKit aborts with NSGenericException ("more Update
+        // Constraints in Window passes than there are views"). The panel owns a
+        // fixed size; the hosting view fills it via autoresizing + the SwiftUI
+        // root's maxWidth/maxHeight. (The old .titled/.hudWindow panel happened
+        // to suppress the size-push; the borderless panel does not, so it must
+        // be disabled explicitly.)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.sizingOptions = []
+        hostingView.frame = NSRect(origin: .zero, size: NSSize(width: 384, height: 76))
+        hostingView.autoresizingMask = [.width, .height]
+        panel.contentView = hostingView
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
+        // Borderless + clear so the SwiftUI bar draws its own rounded glass
+        // and shadow — same chrome as the launcher picker bar.
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
         panel.isMovableByWindowBackground = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
-        panel.standardWindowButton(.closeButton)?.isHidden = true
-        panel.center()
-        // Default to top-right of the main screen so it doesn't sit on top
-        // of whatever the user is recording.
-        if let screenFrame = NSScreen.main?.visibleFrame {
-            let frame = panel.frame
-            let origin = NSPoint(
-                x: screenFrame.maxX - frame.width - 24,
-                y: screenFrame.maxY - frame.height - 24
-            )
-            panel.setFrameOrigin(origin)
-        }
+        Self.positionBottomCentre(panel)
         panel.orderFrontRegardless()
         self.panel = panel
         log.info("HUD panel shown")
@@ -70,11 +69,28 @@ final class RecordingHUDController {
         self.panel = nil
         log.info("HUD panel hidden")
     }
+
+    // Bottom-centre of the main screen, 24pt above the dock/menu-bar-inset edge
+    // — mirrors LauncherWindowChrome.positionBottomCentre so the HUD lands where
+    // the picker bar did, rather than pinned to a corner.
+    private static func positionBottomCentre(_ panel: NSPanel) {
+        guard let visible = NSScreen.main?.visibleFrame else { return }
+        let size = panel.frame.size
+        let origin = NSPoint(
+            x: visible.midX - size.width / 2,
+            y: visible.minY + 24
+        )
+        panel.setFrameOrigin(origin)
+    }
 }
 
 private struct RecordingHUDView: View {
     @Bindable var service: RecordingService
     @State private var pulse = false
+
+    private var barShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
+    }
 
     var body: some View {
         Group {
@@ -90,33 +106,71 @@ private struct RecordingHUDView: View {
         .padding(.horizontal, Theme.Spacing.md)
         .padding(.vertical, Theme.Spacing.sm)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.Color.bgDeep)
+        .glassBar(barShape)
+        .overlay(barShape.strokeBorder(Color.white.opacity(0.12), lineWidth: Theme.Stroke.regular))
+        .shadow(color: .black.opacity(0.45), radius: 16, y: 8)
+        .padding(Theme.Spacing.sm)   // transparent margin inside the panel so the shadow isn't clipped
     }
 
     private func liveBody(startedAt: Date) -> some View {
         HStack(spacing: Theme.Spacing.md) {
-            Circle()
-                .fill(Theme.Color.recordingRed)
-                .frame(width: 10, height: 10)
-                .opacity(pulse ? 0.3 : 1)
-                .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: pulse)
-                .onAppear { pulse = true }
-                .accessibilityHidden(true)
-            TimelineView(.periodic(from: startedAt, by: 0.1)) { context in
-                Text(formatElapsed(startedAt: startedAt, now: context.date))
-                    .font(Theme.Font.monoTimecodeLarge)
-                    .foregroundStyle(Theme.Color.textPrimary)
-                    .monospacedDigit()
+            // Timer group: pulsing record dot + (scene label) + elapsed time.
+            HStack(spacing: Theme.Spacing.sm) {
+                Circle()
+                    .fill(Theme.Color.recordingRed)
+                    .frame(width: 9, height: 9)
+                    .opacity(pulse ? 0.3 : 1)
+                    .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: pulse)
+                    .onAppear { pulse = true }
+                    .accessibilityHidden(true)
+                // Scenes mode: which scene is recording. nil for normal takes.
+                if let sceneLabel = service.sceneLabel {
+                    Text(sceneLabel)
+                        .font(Theme.Font.cardTitle)
+                        .foregroundStyle(Theme.Color.textPrimary)
+                }
+                TimelineView(.periodic(from: startedAt, by: 0.1)) { context in
+                    Text(formatElapsed(startedAt: startedAt, now: context.date))
+                        .font(Theme.Font.monoTimecodeLarge)
+                        .foregroundStyle(service.sceneLabel == nil ? Theme.Color.textPrimary : Theme.Color.textSecondary)
+                        .monospacedDigit()
+                }
             }
-            Spacer(minLength: 0)
-            Button {
-                Task { await service.stop() }
-            } label: {
-                Label("Stop", systemImage: "stop.fill")
-                    .labelStyle(.titleAndIcon)
+
+            PBDivider(.vertical).frame(height: 28)
+
+            // Actions group. Scenes records into a shared bundle, so Discard /
+            // Restart (which delete the recording) are omitted there — only
+            // Stop. Normal single recordings get the full Restart · Discard ·
+            // Stop set.
+            HStack(spacing: Theme.Spacing.sm) {
+                if service.sceneLabel == nil {
+                    Button {
+                        Task { await service.restart() }
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                    }
+                    .buttonStyle(.pbCompact)
+                    .help("Restart — discard this take and start over")
+
+                    Button {
+                        Task { await service.discard() }
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.pbCompact)
+                    .help("Discard — delete this recording")
+                }
+
+                Button {
+                    Task { await service.stop() }
+                } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.pbDestructive)
+                .keyboardShortcut(.return, modifiers: [])
             }
-            .buttonStyle(.pbDestructive)
-            .keyboardShortcut(.return, modifiers: [])
         }
     }
 
@@ -134,5 +188,30 @@ private struct RecordingHUDView: View {
         let minutes = Int(total) / 60
         let seconds = total - Double(minutes * 60)
         return String(format: "%02d:%05.2f", minutes, seconds)
+    }
+}
+
+// Frosted dark-glass background, clipped to the bar shape — same recipe as the
+// launcher picker bar (PrecaptureView.glassBar). Deliberately NOT macOS 26's
+// `.glassEffect`: that re-samples the desktop every frame and renders broken
+// (flat opaque rectangle) while the window is dragged or reconfigured. An
+// `NSVisualEffectView`-backed material is rock-solid across drags and window
+// changes, and with the dark wash + faint top sheen reads as the same premium
+// dark glass.
+private extension View {
+    func glassBar(_ shape: RoundedRectangle) -> some View {
+        self.background {
+            ZStack {
+                shape.fill(.ultraThinMaterial)
+                shape.fill(Color.black.opacity(0.28))
+                shape.fill(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.10), .clear],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                )
+            }
+        }
     }
 }

@@ -45,8 +45,14 @@ struct ContentView: View {
                 }
             }
         }
-        .background(LauncherWindowChrome(isBar: isPickerRoute))
-        .task { orphans.scan() }
+        .background(LauncherWindowChrome(isBar: isPickerRoute, isOnboarding: isOnboardingRoute))
+        .task {
+            // Teach orphan recovery which bundle is live so it never flags or
+            // discards the active recording (its in-progress marker otherwise
+            // reads as an interrupted recording). Lazily queried at scan time.
+            orphans.activeBundleURLs = { [weak recording] in recording?.activeBundleURLs ?? [] }
+            orphans.scan()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .pixelbayNewRecordingRequested)) { _ in
             // ⌘N (or "New Recording" menu item) clears any post-capture
             // state so the launcher lands on the picker. The launcher
@@ -59,6 +65,12 @@ struct ContentView: View {
         )) {
             OrphanRecoverySheet(model: orphans)
         }
+    }
+
+    /// True while the onboarding scene is showing — drives the edge-to-edge
+    /// transparent-titlebar window chrome so the dark surface reaches the top.
+    private var isOnboardingRoute: Bool {
+        !(dismissedOnboarding && permissions.requiredSatisfied)
     }
 
     /// True when the launcher is showing the New Recording picker — the only
@@ -119,8 +131,6 @@ struct ContentView: View {
                     recording.acknowledgeResult()
                 }
             )
-        case .recording, .stopping:
-            recordingPlaceholder
         default:
             PrecaptureView(
                 model: precaptureModel,
@@ -172,25 +182,6 @@ struct ContentView: View {
                 }
             }
         }
-    }
-
-    private var recordingPlaceholder: some View {
-        VStack(spacing: Theme.Spacing.lg) {
-            Image(systemName: "record.circle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(Theme.Color.recordingRed)
-            Text("Recording in progress")
-                .font(Theme.Font.pageTitle)
-                .foregroundStyle(Theme.Color.textPrimary)
-            Text("Use the floating HUD to stop. Pixelbay's own windows are excluded from screen.mov.")
-                .font(Theme.Font.body)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(Theme.Color.textSecondary)
-                .padding(.horizontal, 40)
-        }
-        .padding(40)
-        .frame(minWidth: 620, minHeight: 460)
-        .background(Theme.Color.bgBase)
     }
 
     private func failureBanner(_ message: String) -> some View {
