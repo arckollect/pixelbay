@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Foundation
 import PixelbayCore
+import PixelbayDesignSystem
 import PixelbayPlayback
 import SwiftUI
 import UniformTypeIdentifiers
@@ -28,8 +29,9 @@ struct ExportSheet: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Export Recording")
                     .font(.title2.bold())
+                    .foregroundStyle(Theme.Color.textPrimary)
                 Text("High — 1080p H.264 MP4. Single preset for v0.1; the preset matrix lands in Phase 4.")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.Color.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -42,6 +44,8 @@ struct ExportSheet: View {
         }
         .padding(24)
         .frame(minWidth: 480, minHeight: 200)
+        .background(Theme.Color.bgBase)
+        .tint(Theme.Color.accent)
         .task {
             if !pickedDestination {
                 pickedDestination = true
@@ -54,7 +58,7 @@ struct ExportSheet: View {
     private var statusPanel: some View {
         if let preExportError {
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+                Image(systemName: "xmark.octagon.fill").foregroundStyle(Theme.Color.danger)
                 Text(preExportError).font(.callout)
             }
         } else {
@@ -68,42 +72,42 @@ struct ExportSheet: View {
         case .idle:
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)
-                Text("Choose where to save…").foregroundStyle(.secondary)
+                Text("Choose where to save…").foregroundStyle(Theme.Color.textSecondary)
             }
         case .preparing:
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)
-                Text("Preparing…").foregroundStyle(.secondary)
+                Text("Preparing…").foregroundStyle(Theme.Color.textSecondary)
             }
         case .exporting(let progress):
             VStack(alignment: .leading, spacing: 6) {
                 ProgressView(value: progress)
                 Text("\(Int(progress * 100))%")
                     .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
         case .finished(let url):
             HStack(spacing: 10) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.Color.accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Exported")
                     Text(url.lastPathComponent)
                         .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.Color.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
             }
         case .failed(let message):
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+                Image(systemName: "xmark.octagon.fill").foregroundStyle(Theme.Color.danger)
                 Text(message)
                     .font(.callout)
             }
         case .cancelled:
             HStack(spacing: 10) {
-                Image(systemName: "xmark.circle").foregroundStyle(.secondary)
-                Text("Export cancelled").foregroundStyle(.secondary)
+                Image(systemName: "xmark.circle").foregroundStyle(Theme.Color.textSecondary)
+                Text("Export cancelled").foregroundStyle(Theme.Color.textSecondary)
             }
         }
     }

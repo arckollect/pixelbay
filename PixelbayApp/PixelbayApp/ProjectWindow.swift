@@ -1,6 +1,7 @@
 import AppKit
 import OSLog
 import PixelbayCore
+import PixelbayDesignSystem
 import SwiftUI
 
 private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "ProjectWindow")
@@ -43,6 +44,8 @@ struct ProjectWindow: View {
             }
         }
         .frame(minWidth: 1000, minHeight: 700)
+        .background(Theme.Color.bgBase)
+        .tint(Theme.Color.accent)
         .task(id: bundleID) {
             await loadDocument()
         }
@@ -68,7 +71,7 @@ struct ProjectWindow: View {
     private var loadingPlaceholder: some View {
         VStack(spacing: 12) {
             ProgressView().controlSize(.large)
-            Text("Loading project…").foregroundStyle(.secondary)
+            Text("Loading project…").foregroundStyle(Theme.Color.textSecondary)
         }
     }
 
@@ -76,11 +79,12 @@ struct ProjectWindow: View {
         VStack(spacing: 12) {
             Image(systemName: "folder.badge.questionmark")
                 .font(.system(size: 36))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.Color.textSecondary)
             Text("No project loaded")
                 .font(.title3)
+                .foregroundStyle(Theme.Color.textPrimary)
             Text("Open a project from the launcher window to edit.")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.Color.textSecondary)
         }
         .padding(40)
     }
@@ -89,12 +93,13 @@ struct ProjectWindow: View {
         VStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 36))
-                .foregroundStyle(.orange)
+                .foregroundStyle(Theme.Color.warning)
             Text("Couldn't open project")
                 .font(.title3.bold())
+                .foregroundStyle(Theme.Color.textPrimary)
             Text(message)
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.Color.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
             Button("Close Window") { dismissWindow() }

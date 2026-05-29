@@ -168,6 +168,11 @@ final class PrecaptureModel {
 
 struct PrecaptureView: View {
     @Bindable var model: PrecaptureModel
+    // Hosting window + drag anchor, so we can move the floating bar ourselves
+    // (see `windowDrag`) instead of relying on AppKit's background drag, which
+    // breaks the Liquid Glass backdrop mid-drag.
+    @State private var hostWindow: NSWindow?
+    @State private var dragAnchor: (window: CGPoint, mouse: CGPoint)?
     /// True iff the user has granted the Accessibility permission. The
     /// click-logger Toggle is shown either way so users discover the
     /// feature, but it's disabled (with a "Grant in Settings" hint) when
@@ -212,22 +217,51 @@ struct PrecaptureView: View {
         .padding(.horizontal, Theme.Spacing.md)
         .padding(.vertical, Theme.Spacing.sm)
         .frame(height: 64)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
-                .fill(Theme.Color.bgElevated)
-        )
+        // Liquid Glass (macOS 26): a translucent, dark-tinted glass panel —
+        // not a flat fill — so the desktop reads faintly through it. The
+        // bar window is borderless + clear (LauncherWindowChrome), so the
+        // material has real backdrop to refract. Falls back to a frosted
+        // material on pre-26 systems (deployment target is 14.6).
+        .glassBar(barShape)
         .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
-                .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+            barShape.strokeBorder(Color.white.opacity(0.12), lineWidth: Theme.Stroke.regular)
         )
-        .shadow(color: .black.opacity(0.5), radius: 22, y: 10)
+        .shadow(color: .black.opacity(0.45), radius: 22, y: 10)
         .padding(Theme.Spacing.xl)          // transparent margin for the shadow
         .fixedSize()                         // window sizes to the bar (contentSize)
-        .tint(Theme.Color.accent)
+        .tint(.white)                        // white menu labels — no orange accent
+        .background(WindowAccessor { hostWindow = $0 })   // shared helper (ProjectWindow.swift)
+        .gesture(windowDrag)
         .task { await model.loadAvailableSources() }
     }
 
+    /// Moves the floating bar window by following the absolute mouse position
+    /// on screen. We anchor to the window origin + mouse location at drag start
+    /// and apply the delta, so the window can't chase the pointer into a
+    /// feedback loop. Runs on the normal runloop (unlike AppKit's blocking
+    /// background drag), keeping the Liquid Glass backdrop live throughout.
+    private var windowDrag: some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { _ in
+                guard let window = hostWindow else { return }
+                let mouse = NSEvent.mouseLocation        // global, bottom-left origin
+                let anchor = dragAnchor ?? (window.frame.origin, mouse)
+                if dragAnchor == nil { dragAnchor = anchor }
+                window.setFrameOrigin(
+                    NSPoint(
+                        x: anchor.window.x + (mouse.x - anchor.mouse.x),
+                        y: anchor.window.y + (mouse.y - anchor.mouse.y)
+                    )
+                )
+            }
+            .onEnded { _ in dragAnchor = nil }
+    }
+
     // MARK: - Bar pieces
+
+    private var barShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
+    }
 
     private var barDivider: some View {
         PBDivider(.vertical).frame(height: 34)
@@ -283,11 +317,11 @@ struct PrecaptureView: View {
             Image(systemName: icon).font(.system(size: 17, weight: .regular))
             Text(title).font(Theme.Font.caption)
         }
-        .foregroundStyle(selected ? Theme.Color.accent : (enabled ? Theme.Color.textPrimary : Theme.Color.textTertiary))
+        .foregroundStyle(selected ? Theme.Color.textPrimary : (enabled ? Theme.Color.textPrimary : Theme.Color.textTertiary))
         .frame(width: 58, height: 46)
         .background(
             RoundedRectangle(cornerRadius: Theme.Radius.small)
-                .fill(selected ? Theme.Color.accent.opacity(0.16) : Color.clear)
+                .fill(selected ? Color.white.opacity(0.14) : Color.clear)
         )
         .opacity(enabled ? 1 : 0.5)
     }
@@ -343,7 +377,7 @@ struct PrecaptureView: View {
             inlineControl(
                 icon: model.includeSystemAudio ? "speaker.wave.2.fill" : "speaker.slash.fill",
                 title: "System audio",
-                color: model.includeSystemAudio ? Theme.Color.accent : Theme.Color.textSecondary
+                color: model.includeSystemAudio ? Theme.Color.textPrimary : Theme.Color.textSecondary
             )
         }
         .buttonStyle(.plain)
@@ -442,6 +476,34 @@ struct PrecaptureView: View {
             return "\(mic.localizedName) (virtual loopback — typically silent)"
         }
         return mic.localizedName
+    }
+}
+
+// Frosted dark-glass bar background, clipped to the bar shape.
+//
+// We deliberately do NOT use macOS 26's `.glassEffect` here. That effect
+// re-samples the desktop backdrop every frame and renders broken — a flat,
+// opaque, full-bounds rectangle that loses the tint and rounded shape —
+// whenever sampling stalls: while the window is dragged, and when the launcher
+// window is reconfigured on the way back from a recording. An
+// `NSVisualEffectView`-backed material (`.ultraThinMaterial`) is rock-solid
+// across drags, occlusion, and window-style changes, and with the dark wash +
+// faint top sheen reads as the same premium dark glass.
+private extension View {
+    func glassBar(_ shape: RoundedRectangle) -> some View {
+        self.background {
+            ZStack {
+                shape.fill(.ultraThinMaterial)
+                shape.fill(Color.black.opacity(0.28))
+                shape.fill(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.10), .clear],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                )
+            }
+        }
     }
 }
 

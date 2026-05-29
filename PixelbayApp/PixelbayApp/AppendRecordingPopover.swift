@@ -3,6 +3,7 @@ import CoreGraphics
 import Foundation
 import OSLog
 import PixelbayCore
+import PixelbayDesignSystem
 import SwiftUI
 
 private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "AppendRecordingPopover")
@@ -61,7 +62,7 @@ struct AppendRecordingPopover: View {
             if let lastErrorMessage {
                 Text(lastErrorMessage)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Theme.Color.danger)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -93,7 +94,7 @@ struct AppendRecordingPopover: View {
                 .font(.headline)
             Text("Append a new recording to the end of this project's timeline.")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.Color.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Picker("Display", selection: $selectedDisplayID) {
@@ -133,7 +134,7 @@ struct AppendRecordingPopover: View {
                     Label("Start", systemImage: "record.circle.fill")
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.red)
+                .tint(Theme.Color.recordingRed)
                 .disabled(selectedDisplayID == nil || localPhase != .picking)
             }
         }
@@ -145,7 +146,7 @@ struct AppendRecordingPopover: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 Image(systemName: "record.circle.fill")
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Theme.Color.recordingRed)
                     .imageScale(.large)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Recording…").font(.headline)
@@ -153,7 +154,7 @@ struct AppendRecordingPopover: View {
                         TimelineView(.periodic(from: startedAt, by: 0.1)) { ctx in
                             Text(elapsedLabel(ctx.date.timeIntervalSince(startedAt)))
                                 .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Theme.Color.textSecondary)
                         }
                     }
                 }
@@ -161,7 +162,7 @@ struct AppendRecordingPopover: View {
             }
             Text("The new recording will append after the existing timeline content when you click Stop.")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.Color.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Spacer()

@@ -45,6 +45,29 @@ public final class PermissionViewModel {
     }
 }
 
+// MARK: - Onboarding tone
+//
+// This scene established the app's visual language (Figma Frame 4, file
+// pVbhIXw3Pkv1ZGWPRbF9Yy): a neutral near-black surface that fills the whole
+// window, lighter neutral rows, a system-blue accent. The app-wide `Theme`
+// palette was since retoned to match, so `Tone` is now a thin, onboarding-local
+// alias over the shared tokens (plus the white-opacity text ramp this screen
+// uses) rather than a departure from them.
+private enum Tone {
+    // Surfaces + accent now derive from the shared design tokens — the app-wide
+    // Theme palette was retoned to this same neutral graphite + system-blue
+    // language, so onboarding and the rest of the app share one source of truth.
+    static let bg        = Theme.Color.bgBase     // #181818
+    static let row       = Theme.Color.bgElevated // #282828
+    static let title     = Color.white
+    static let subtitle  = Color.white.opacity(0.55)
+    static let rowBody   = Color.white.opacity(0.50)
+    static let granted   = Color.white.opacity(0.45)
+    static let accent     = Theme.Color.accent
+    static let accentText = Color.white
+    static let accentBg   = Theme.Color.accent.opacity(0.16)
+}
+
 // First-launch onboarding scene. Renders one row per permission with the
 // current status and a Grant button. The "Quit & Relaunch" CTA appears only
 // when at least one row is in .requiresRelaunch — the documented Screen
@@ -68,10 +91,13 @@ public struct OnboardingView: View {
 
     public var body: some View {
         ZStack {
-            Theme.Color.bgBase.ignoresSafeArea()
-            VStack(spacing: Theme.Spacing.xl) {
+            // Full-bleed neutral surface — the window *is* the card.
+            Tone.bg.ignoresSafeArea()
+
+            VStack(spacing: 26) {
                 hero
-                VStack(spacing: Theme.Spacing.md) {
+
+                VStack(spacing: 14) {
                     ForEach(PermissionKind.allCases, id: \.self) { kind in
                         PermissionRowView(
                             kind: kind,
@@ -81,21 +107,19 @@ public struct OnboardingView: View {
                         )
                     }
                 }
-                .frame(maxWidth: 520)
 
                 if viewModel.anyRequiresRelaunch {
                     relaunchBanner
-                        .frame(maxWidth: 520)
                 }
 
-                Spacer(minLength: 0)
                 ctaSection
-                    .frame(maxWidth: 520)
+                    .padding(.top, 8)
             }
-            .padding(.horizontal, 40)
-            .padding(.vertical, Theme.Spacing.xxl)
+            .frame(maxWidth: 480)
+            .padding(.horizontal, 48)
+            .padding(.vertical, 56)
         }
-        .frame(minWidth: 560, minHeight: 560)
+        .frame(minWidth: 660, minHeight: 680)
         .task {
             await viewModel.refresh()
             // Poll every 1.5s while visible so a Settings-side grant flips
@@ -109,36 +133,46 @@ public struct OnboardingView: View {
     }
 
     private var hero: some View {
-        VStack(spacing: Theme.Spacing.md) {
+        VStack(spacing: 20) {
             Image(nsImage: NSApplication.shared.applicationIconImage)
                 .resizable()
-                .frame(width: 96, height: 96)
+                .frame(width: 84, height: 84)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.5), radius: 16, y: 8)
                 .accessibilityHidden(true)
-            Text("Welcome to Pixelbay")
-                .font(Theme.Font.displayTitle)
-                .foregroundStyle(Theme.Color.textPrimary)
-            Text("Grant access so Pixelbay can record your screen, webcam, and audio.")
-                .font(Theme.Font.body)
-                .foregroundStyle(Theme.Color.textSecondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(spacing: 8) {
+                Text("Welcome to Pixelbay")
+                    .font(.system(size: 42, weight: .heavy, design: .rounded))
+                    .foregroundStyle(Tone.title)
+                    .multilineTextAlignment(.center)
+                Text("Grant access so Pixelbay can record your screen, webcam, and audio.")
+                    .font(.system(size: 13, weight: .regular, design: .rounded))
+                    .foregroundStyle(Tone.subtitle)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, Theme.Spacing.lg)
     }
 
     @ViewBuilder
     private var ctaSection: some View {
-        VStack(spacing: Theme.Spacing.sm) {
-            Button("Continue") { onContinue() }
-                .buttonStyle(.pbPrimary)
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .keyboardShortcut(.defaultAction)
-                .disabled(!viewModel.requiredSatisfied)
+        VStack(spacing: 10) {
+            CaptureContinueButton(
+                disabled: !viewModel.requiredSatisfied,
+                action: onContinue
+            )
+            .keyboardShortcut(.defaultAction)
+
             if !viewModel.requiredSatisfied {
                 Text("Grant the required permissions above to continue.")
-                    .font(Theme.Font.caption)
-                    .foregroundStyle(Theme.Color.textTertiary)
+                    .font(.system(size: 11, weight: .regular, design: .rounded))
+                    .foregroundStyle(Tone.rowBody)
             }
         }
     }
@@ -150,11 +184,11 @@ public struct OnboardingView: View {
                 .foregroundStyle(Theme.Color.warning)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Restart required")
-                    .font(Theme.Font.cardTitle)
-                    .foregroundStyle(Theme.Color.textPrimary)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Tone.title)
                 Text("Screen Recording was just granted. Pixelbay must relaunch to use it.")
-                    .font(Theme.Font.caption)
-                    .foregroundStyle(Theme.Color.textSecondary)
+                    .font(.system(size: 11, weight: .regular, design: .rounded))
+                    .foregroundStyle(Tone.subtitle)
             }
             Spacer()
             Button("Quit & Relaunch") {
@@ -163,9 +197,9 @@ public struct OnboardingView: View {
             .buttonStyle(.pbSecondary)
         }
         .padding(Theme.Spacing.md)
-        .background(Theme.Color.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.large))
+        .background(Theme.Color.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.large)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Theme.Color.warning.opacity(0.35), lineWidth: Theme.Stroke.hairline)
         )
     }
@@ -178,39 +212,45 @@ private struct PermissionRowView: View {
     let onOpenSettings: () -> Void
 
     var body: some View {
-        HStack(spacing: Theme.Spacing.md) {
+        HStack(spacing: 14) {
             iconBadge
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(kind.humanReadableName)
-                    .font(Theme.Font.bodyEmphasized)
-                    .foregroundStyle(Theme.Color.textPrimary)
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Tone.title)
                 Text(kind.rationale)
-                    .font(Theme.Font.caption)
-                    .foregroundStyle(Theme.Color.textSecondary)
+                    .font(.system(size: 11.5, weight: .regular, design: .rounded))
+                    .foregroundStyle(Tone.rowBody)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer()
+            Spacer(minLength: 12)
             actionButton
                 .transition(.asymmetric(
                     insertion: .scale.combined(with: .opacity),
                     removal: .opacity
                 ))
         }
-        .pbCard(elevated: true, padding: Theme.Spacing.md)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+        .frame(minHeight: 68)
+        .background(Tone.row, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .animation(.smooth, value: status)
     }
 
-    /// SF Symbol for the permission, on a tinted circle whose colour
-    /// reflects the current status (accent until acted on, green/red/amber
-    /// once resolved).
+    /// SF Symbol for the permission on a quiet neutral circle. The badge stays
+    /// monochrome regardless of status — premium over loud colour — and the
+    /// trailing action/label carries the status instead. Denied is the one
+    /// exception: it tints to draw the eye toward the fix.
     private var iconBadge: some View {
-        ZStack {
+        let tint = (status == .denied) ? Theme.Color.danger : Tone.accent
+        let bg = (status == .denied) ? Theme.Color.danger.opacity(0.16) : Tone.accentBg
+        return ZStack {
             Circle()
-                .fill(statusColor.opacity(0.18))
-                .frame(width: 36, height: 36)
+                .fill(bg)
+                .frame(width: 38, height: 38)
             Image(systemName: symbolName)
                 .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(statusColor)
+                .foregroundStyle(tint)
         }
     }
 
@@ -223,25 +263,16 @@ private struct PermissionRowView: View {
         }
     }
 
-    private var statusColor: Color {
-        switch status {
-        case .granted: return Theme.Color.success
-        case .denied: return Theme.Color.danger
-        case .requiresRelaunch: return Theme.Color.warning
-        case .notDetermined: return Theme.Color.accent
-        }
-    }
-
     @ViewBuilder
     private var actionButton: some View {
         switch status {
         case .granted:
             Label("Granted", systemImage: "checkmark")
-                .font(Theme.Font.caption)
-                .foregroundStyle(Theme.Color.success)
+                .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                .foregroundStyle(Tone.granted)
         case .requiresRelaunch:
             Text("Relaunch needed")
-                .font(Theme.Font.caption)
+                .font(.system(size: 11.5, weight: .medium, design: .rounded))
                 .foregroundStyle(Theme.Color.warning)
         case .denied:
             Button("Open Settings", action: onOpenSettings)
@@ -250,6 +281,134 @@ private struct PermissionRowView: View {
             Button("Grant", action: onGrant)
                 .buttonStyle(.pbPrimary)
         }
+    }
+}
+
+// MARK: - Animated "capture" Continue button
+//
+// Borrows the layered, hover-reactive feel of the Uiverse "documents" button
+// but reworks it around a camera: on hover the camera face tilts forward and a
+// freshly-captured frame slides up from behind it — reading as a screen
+// capture. Pressing dips the whole control (scale 0.95). Disabled, dimmed, and
+// motion-frozen while required permissions are still outstanding.
+private struct CaptureContinueButton: View {
+    var disabled: Bool
+    var action: () -> Void
+
+    @State private var hovering = false
+
+    private var active: Bool { hovering && !disabled }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                ApertureIcon(active: active)
+                    .frame(width: 24, height: 24)
+                Text("Continue")
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Tone.accentText)
+            }
+            .padding(.horizontal, 22)
+            .frame(height: 48)
+            .frame(minWidth: 210)
+            .background(glassTile)
+        }
+        .buttonStyle(PressableScaleButtonStyle())
+        .disabled(disabled)
+        .opacity(disabled ? 0.5 : 1)
+        .onHover { hovering = $0 }
+        .animation(.spring(response: 0.32, dampingFraction: 0.72), value: active)
+    }
+
+    /// Premium dark "Liquid Glass" tile: an elevated near-black surface lit by
+    /// two key-lights glinting off the top-left and bottom-right corners — the
+    /// rest of the rim falls into shadow. Same beveled-glass read as the
+    /// app-icon tile. Hover lifts the corner glints, sheen, and shadow together.
+    private var glassTile: some View {
+        let shape = RoundedRectangle(cornerRadius: 7, style: .continuous)
+        return shape
+            // Elevated dark base.
+            .fill(Color(red: 0.145, green: 0.145, blue: 0.155))
+            // Very subtle face sheen so it isn't dead flat.
+            .overlay(
+                shape.fill(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.06), .clear],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                )
+            )
+            // Faint full rim for edge definition in the shadowed stretches.
+            .overlay(shape.strokeBorder(Color.white.opacity(0.07), lineWidth: 1))
+            // Two corner key-lights: top-left and bottom-right glints.
+            .overlay(cornerGlint(.topLeading, shape: shape))
+            .overlay(cornerGlint(.bottomTrailing, shape: shape))
+            .compositingGroup()
+            .shadow(color: .black.opacity(0.55), radius: active ? 16 : 9, y: active ? 8 : 4)
+    }
+
+    /// A bright rim segment radiating from one corner and fading toward the
+    /// centre — masking the full-perimeter stroke down to a single glint.
+    private func cornerGlint(_ corner: UnitPoint, shape: RoundedRectangle) -> some View {
+        shape
+            .strokeBorder(Color.white.opacity(active ? 0.98 : 0.78), lineWidth: 1.2)
+            .mask(
+                RadialGradient(
+                    gradient: Gradient(colors: [.white, .white.opacity(0)]),
+                    center: corner,
+                    startRadius: 0,
+                    endRadius: active ? 52 : 42
+                )
+            )
+    }
+}
+
+/// A camera-aperture iris built from overlapping blades. At rest it sits at a
+/// comfortable f-stop; on hover the blades swing inward and swirl, tightening
+/// the opening — a "pull focus" gesture. Echoes the app-icon aperture mark.
+/// White blades on the accent CTA; the opening lets the blue show through as
+/// the iris centre.
+private struct ApertureIcon: View {
+    var active: Bool
+
+    private let bladeCount = 6
+    private let bladeLength: CGFloat = 8
+    private let bladeThickness: CGFloat = 3.5
+    // Tangential lean gives the blades their pinwheel/iris cant rather than
+    // pointing straight at the centre like spokes.
+    private let bladeLean: CGFloat = 2.2
+
+    // Centre-to-blade-midpoint distance. Smaller = tighter opening (focused).
+    private var reach: CGFloat { active ? 4.5 : 6 }
+    private var spin: Double { active ? -24 : 0 }
+
+    var body: some View {
+        ZStack {
+            // Faint lens ring framing the iris.
+            Circle()
+                .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
+                .frame(width: 23, height: 23)
+
+            ForEach(0..<bladeCount, id: \.self) { i in
+                Capsule(style: .continuous)
+                    .fill(Color.white)
+                    .frame(width: bladeThickness, height: bladeLength)
+                    .offset(x: bladeLean, y: -reach)
+                    .rotationEffect(.degrees(Double(i) / Double(bladeCount) * 360 + spin))
+            }
+        }
+        .frame(width: 24, height: 24)
+        .animation(.spring(response: 0.34, dampingFraction: 0.72), value: active)
+    }
+}
+
+/// Press-to-dip scaling, matching the Uiverse button's `:active` transform.
+private struct PressableScaleButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.95 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: configuration.isPressed)
     }
 }
 #endif

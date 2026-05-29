@@ -2,6 +2,7 @@ import Foundation
 import OSLog
 import Observation
 import PixelbayCore
+import PixelbayDesignSystem
 import PixelbayRecording
 import SwiftUI
 
@@ -26,6 +27,14 @@ final class OrphanRecoveryModel {
 
     var orphans: [OrphanBundle] = []
     var isPresented: Bool = false
+
+    /// Supplies the bundle URLs currently owned by an in-flight recording.
+    /// Wired from `ContentView` to `RecordingService.activeBundleURLs` so the
+    /// scan never treats the live recording's bundle as an orphan — its
+    /// in-progress marker is expected mid-recording, and discarding it would
+    /// delete the capture out from under the writer pipeline. Evaluated lazily
+    /// at scan/discard time so it always reflects the current recording state.
+    var activeBundleURLs: () -> Set<URL> = { [] }
 
     func scan() {
         let url = OrphanRecoveryModel.recordingsDirectory()
@@ -62,6 +71,17 @@ final class OrphanRecoveryModel {
             }
         }
 
+        // Never surface the bundle that's actively being recorded. Its
+        // in-progress marker (Pass 2) legitimately matches the orphan
+        // heuristic while recording is live; discarding it would delete the
+        // capture mid-flight (project.json vanishes → stop() throws).
+        let activePaths = Set(activeBundleURLs().map { $0.standardizedFileURL.path })
+        if !activePaths.isEmpty {
+            for url in found.keys where activePaths.contains(url.standardizedFileURL.path) {
+                found[url] = nil
+            }
+        }
+
         orphans = found.values.sorted { ($0.modifiedAt ?? .distantPast) > ($1.modifiedAt ?? .distantPast) }
         isPresented = !orphans.isEmpty
         log.info("orphan scan found=\(self.orphans.count)")
@@ -72,6 +92,16 @@ final class OrphanRecoveryModel {
     }
 
     func discard(_ orphan: OrphanBundle) {
+        // Safety net: refuse to delete a bundle that's actively recording,
+        // even if it somehow slipped into the list. Deleting the live bundle
+        // destroys the in-flight capture.
+        let activePaths = Set(activeBundleURLs().map { $0.standardizedFileURL.path })
+        if activePaths.contains(orphan.url.standardizedFileURL.path) {
+            log.error("refusing to discard active recording bundle url=\(orphan.url.path, privacy: .public)")
+            orphans.removeAll(where: { $0.id == orphan.id })
+            if orphans.isEmpty { isPresented = false }
+            return
+        }
         do {
             try FileManager.default.removeItem(at: orphan.url)
             orphans.removeAll(where: { $0.id == orphan.id })
@@ -118,8 +148,9 @@ struct OrphanRecoverySheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Unfinished recordings found")
                     .font(.title2.bold())
+                    .foregroundStyle(Theme.Color.textPrimary)
                 Text("These recordings ended unexpectedly. Inspect them in Finder, or discard.")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
             ForEach(model.orphans) { orphan in
                 row(orphan: orphan)
@@ -132,21 +163,24 @@ struct OrphanRecoverySheet: View {
         }
         .padding(24)
         .frame(minWidth: 520)
+        .background(Theme.Color.bgBase)
+        .tint(Theme.Color.accent)
     }
 
     private func row(orphan: OrphanRecoveryModel.OrphanBundle) -> some View {
         HStack(alignment: .center, spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(Theme.Color.warning)
             VStack(alignment: .leading, spacing: 2) {
                 Text(orphan.url.lastPathComponent)
                     .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(Theme.Color.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let date = orphan.modifiedAt {
                     Text("Modified \(formatted(date))")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.Color.textSecondary)
                 }
             }
             Spacer()
@@ -154,7 +188,7 @@ struct OrphanRecoverySheet: View {
             Button("Discard") { model.discard(orphan) }
         }
         .padding(10)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 6))
+        .background(Theme.Color.bgElevated, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 
     private func formatted(_ date: Date) -> String {

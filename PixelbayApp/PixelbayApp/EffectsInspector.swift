@@ -277,7 +277,7 @@ struct EffectsInspector: View {
                 Spacer()
                 Text(String(format: "%.2f×", liveValue))
                     .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
             Slider(
                 value: Binding<Double>(

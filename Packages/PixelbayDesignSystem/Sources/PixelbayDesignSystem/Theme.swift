@@ -9,8 +9,11 @@ import AppKit
 // sides never drift: edit a hex once and both namespaces follow.
 //
 // PALETTE TONE — the whole app's tone is the `Palette` enum below. To retone
-// (e.g. warm neutral → neutral graphite → cool slate) edit those hex strings
-// and nothing else. The starting palette is "warm neutral".
+// (e.g. neutral graphite → warm neutral → cool slate) edit those hex strings
+// and nothing else. The current palette is "Neutral graphite + system blue",
+// matching the onboarding module: near-black surfaces, white-led text, a
+// system-blue accent used sparingly, monochrome status (blue = info, red =
+// error/record), and a blue-family ramp for the timeline lanes.
 //
 // UPGRADE PATH — these are static `enum` tokens, so they do NOT react to a
 // runtime palette switch. If a Settings palette toggle is ever wanted, refactor
@@ -26,48 +29,51 @@ extension Theme {
     /// Raw hex literals — the one place to change the app's tone.
     /// Alternatives noted inline (neutral graphite / cool slate).
     enum Palette {
-        // Surfaces — warm neutral. Graphite: 1E1E1E/181818/2A2A2A. Slate: 1A1D21/141619/24282E.
-        static let bgBase      = "#262624"
-        static let bgDeep      = "#1F1F1E"
-        static let bgElevated  = "#2F2F2D"
-        static let bgInsetCard = "#222220"
+        // Surfaces — neutral graphite (matches onboarding Tone: bg #181818,
+        // row #282828). The warm variant was 262624/1F1F1E/2F2F2D/222220.
+        static let bgBase      = "#181818"   // primary window background (== Tone.bg)
+        static let bgDeep      = "#121212"   // deepest: toolbars, timeline header, inspector pane
+        static let bgElevated  = "#282828"   // raised surfaces / cards / secondary buttons (== Tone.row)
+        static let bgInsetCard = "#1F1F1F"   // card interiors
 
-        // Borders
-        static let borderSubtle = "#3A3A37"
-        static let borderStrong = "#4A4A46"
+        // Borders — neutral
+        static let borderSubtle = "#2E2E2E"
+        static let borderStrong = "#3D3D3D"
 
-        // Text
-        static let textPrimary   = "#F0EFE6"
-        static let textSecondary = "#B8B5A8"
-        static let textTertiary  = "#83817A"
+        // Text — white-led neutral (matches onboarding white / white-opacity)
+        static let textPrimary   = "#FFFFFF"
+        static let textSecondary = "#9A9A9A"
+        static let textTertiary  = "#6B6B6B"
 
-        // Accent + status
-        static let accent       = "#D97757"
-        static let accentMuted  = "#A85C42"
-        static let success      = "#7FB069"
-        static let warning      = "#E0A458"
-        static let danger       = "#D96A5B"
-        static let recordingRed = "#E5484D"
+        // Accent + status — system blue accent; monochrome status (blue = info /
+        // affirmative, red = error / record). No green or amber (see onboarding:
+        // "Granted" is neutral, only denial/danger tints).
+        static let accent       = "#0A84FF"   // macOS dark system blue
+        static let accentMuted  = "#0A6FD8"
+        static let success      = "#0A84FF"   // was green; now informational blue
+        static let warning      = "#0A84FF"   // was amber; caution now via icon + copy
+        static let danger       = "#FF453A"   // macOS system red
+        static let recordingRed = "#FF453A"
 
-        // Track roles (timeline lanes). Tuned to read on the dark surfaces
-        // while keeping the original hue semantics (video=blue, mic=green…).
-        static let trackVideo       = "#5B8DEF"
-        static let trackWebcam      = "#46C3C9"
-        static let trackMic         = "#6FBF73"
-        static let trackSystemAudio = "#54C7A0"
-        static let trackVoiceover   = "#E0A458"
-        static let trackOverlay     = "#9D7CD8"
-        static let trackEffects     = "#E06C9F"
+        // Track roles (timeline lanes) — blue-family monochrome ramp. Distinct
+        // shades keep lanes tellable apart while staying within the accent family.
+        static let trackVideo       = "#0A84FF"
+        static let trackWebcam      = "#5AB0FF"
+        static let trackMic         = "#2E6FE0"
+        static let trackSystemAudio = "#7FC0FF"
+        static let trackVoiceover   = "#1B5FC0"
+        static let trackOverlay     = "#9FCBFF"
+        static let trackEffects     = "#4D8FE8"
 
-        // Effect-keyframe roles
-        static let effectZoomAuto   = "#E3C04B"
-        static let effectZoomManual = "#56C2D6"
-        static let effectTalkingHead = "#7C83D8"
+        // Effect-keyframe roles — blue-family
+        static let effectZoomAuto   = "#5AB0FF"
+        static let effectZoomManual = "#7FC0FF"
+        static let effectTalkingHead = "#2E6FE0"
 
         // Timeline chrome
-        static let timelineRuler    = "#1A1A19"
-        static let timelinePlayhead = "#D97757"
-        static let waveformFill     = "#8A887E"
+        static let timelineRuler    = "#141414"   // neutral (was warm)
+        static let timelinePlayhead = "#0A84FF"   // accent blue (was orange)
+        static let waveformFill     = "#6E6E6E"   // neutral gray (was warm gray)
     }
 }
 
