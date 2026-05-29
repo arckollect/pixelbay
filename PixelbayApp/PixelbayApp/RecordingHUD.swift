@@ -1,5 +1,6 @@
 import AppKit
 import OSLog
+import PixelbayDesignSystem
 import SwiftUI
 
 private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "RecordingHUD")
@@ -73,6 +74,7 @@ final class RecordingHUDController {
 
 private struct RecordingHUDView: View {
     @Bindable var service: RecordingService
+    @State private var pulse = false
 
     var body: some View {
         Group {
@@ -85,21 +87,25 @@ private struct RecordingHUDView: View {
                 EmptyView()
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Theme.Spacing.md)
+        .padding(.vertical, Theme.Spacing.sm)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.Color.bgDeep)
     }
 
     private func liveBody(startedAt: Date) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Theme.Spacing.md) {
             Circle()
-                .fill(.red)
+                .fill(Theme.Color.recordingRed)
                 .frame(width: 10, height: 10)
-                .opacity(0.95)
+                .opacity(pulse ? 0.3 : 1)
+                .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: pulse)
+                .onAppear { pulse = true }
                 .accessibilityHidden(true)
             TimelineView(.periodic(from: startedAt, by: 0.1)) { context in
                 Text(formatElapsed(startedAt: startedAt, now: context.date))
-                    .font(.system(.title3, design: .monospaced))
+                    .font(Theme.Font.monoTimecodeLarge)
+                    .foregroundStyle(Theme.Color.textPrimary)
                     .monospacedDigit()
             }
             Spacer(minLength: 0)
@@ -109,17 +115,17 @@ private struct RecordingHUDView: View {
                 Label("Stop", systemImage: "stop.fill")
                     .labelStyle(.titleAndIcon)
             }
-            .controlSize(.regular)
+            .buttonStyle(.pbDestructive)
             .keyboardShortcut(.return, modifiers: [])
         }
     }
 
     private var stoppingBody: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Theme.Spacing.sm) {
             ProgressView().controlSize(.small)
             Text("Finalising writers…")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Color.textSecondary)
         }
     }
 

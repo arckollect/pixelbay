@@ -1,6 +1,7 @@
 import AppKit
 import OSLog
 import PixelbayCore
+import PixelbayDesignSystem
 import PixelbayPermissions
 import SwiftUI
 
@@ -88,6 +89,8 @@ struct ScenesWindowView: View {
             bottomBar(model: model)
         }
         .frame(minWidth: 760, minHeight: 720)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Theme.Color.bgBase)
         .alert(
             "Merge \(mergedSceneCount(in: model)) of \(model.session.scenes.count) scenes?",
             isPresented: $mergeConfirmationPresented
@@ -147,14 +150,15 @@ struct ScenesWindowView: View {
                 .scrollContentBackground(.hidden)
                 .frame(maxHeight: 240)
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: Theme.Spacing.xs) {
                     Image(systemName: "clock.arrow.circlepath")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.Color.textSecondary)
                     Text("History (\(model.historyRows.count) merged \(model.historyRows.count == 1 ? "scene" : "scenes"))")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .font(Theme.Font.cardTitle)
+                        .foregroundStyle(Theme.Color.textSecondary)
                 }
             }
+            .tint(Theme.Color.accent)
             .padding(.horizontal, 20)
             .padding(.top, 16)
         }
@@ -168,29 +172,31 @@ struct ScenesWindowView: View {
         // Compact one-line state per decision #8. The window-frame collapse
         // happens because of `.windowResizability(.contentSize)` on the
         // Window declaration plus the smaller `.frame(...)` applied here.
-        HStack(spacing: 14) {
+        HStack(spacing: Theme.Spacing.md) {
             Image(systemName: "record.circle.fill")
-                .foregroundStyle(.red)
+                .foregroundStyle(Theme.Color.recordingRed)
                 .imageScale(.large)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Recording Scene \(sceneIndex + 1)")
-                    .font(.headline)
+                    .font(Theme.Font.cardTitle)
+                    .foregroundStyle(Theme.Color.textPrimary)
                 TimelineView(.periodic(from: startedAt, by: 0.1)) { context in
                     Text(elapsedLabel(context.date.timeIntervalSince(startedAt)))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .font(Theme.Font.monoTimecode)
+                        .foregroundStyle(Theme.Color.textSecondary)
                 }
             }
             Spacer(minLength: 12)
             Button("Stop") {
                 Task { await recording.stop() }
             }
-            .controlSize(.large)
+            .buttonStyle(.pbDestructive)
             .keyboardShortcut(.return, modifiers: [])
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 12)
+        .padding(.vertical, Theme.Spacing.md)
         .frame(width: 320, height: 64)
+        .background(Theme.Color.bgDeep)
     }
 
     private func elapsedLabel(_ seconds: TimeInterval) -> String {
@@ -201,22 +207,27 @@ struct ScenesWindowView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             Text("Scene Recording")
-                .font(.largeTitle.bold())
+                .font(Theme.Font.pageTitle)
+                .foregroundStyle(Theme.Color.textPrimary)
             Text("Record one scene at a time. Re-record to add another take. Merge stitches the active takes into a normal Pixelbay project.")
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Color.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 20)
         .padding(.top, 24)
+        .padding(.bottom, Theme.Spacing.md)
+        .background(Theme.Color.bgDeep)
     }
 
     @ViewBuilder
     private func defaultsCard(model: ScenesSessionModel) -> some View {
         DefaultsBlock(model: model, catalog: catalog, permissions: permissions)
-            .padding(16)
-            .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
+            .tint(Theme.Color.accent)
+            .pbCard(elevated: true)
     }
 
     private func sceneList(model: ScenesSessionModel) -> some View {
@@ -240,13 +251,13 @@ struct ScenesWindowView: View {
     }
 
     private func bottomBar(model: ScenesSessionModel) -> some View {
-        HStack {
+        HStack(spacing: Theme.Spacing.md) {
             Button {
                 model.addScene()
             } label: {
                 Label("Add Scene", systemImage: "plus")
             }
-            .controlSize(.large)
+            .buttonStyle(.pbSecondary)
 
             Menu {
                 Button("Clean Up Unused Takes") {
@@ -260,6 +271,7 @@ struct ScenesWindowView: View {
             .menuIndicator(.hidden)
             .controlSize(.large)
             .fixedSize()
+            .tint(Theme.Color.accent)
 
             Spacer()
 
@@ -269,12 +281,11 @@ struct ScenesWindowView: View {
             } label: {
                 Label("Merge", systemImage: "rectangle.stack.fill")
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .buttonStyle(.pbPrimary)
             .disabled(!hasAnyRecordedTake(model: model))
         }
         .padding(20)
-        .background(.background.tertiary)
+        .background(Theme.Color.bgDeep)
     }
 
     private func hasDiscardedTakes(model: ScenesSessionModel) -> Bool {
@@ -284,31 +295,36 @@ struct ScenesWindowView: View {
     // MARK: - Loading / failure
 
     private var loadingView: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: Theme.Spacing.md) {
             ProgressView()
             Text("Opening scenes bundle…")
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Color.textSecondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.Color.bgBase)
     }
 
     private func failureView(_ message: String) -> some View {
-        VStack(spacing: 14) {
+        VStack(spacing: Theme.Spacing.md) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 36))
-                .foregroundStyle(.orange)
+                .foregroundStyle(Theme.Color.warning)
             Text("Couldn't open scenes bundle")
-                .font(.title3.bold())
+                .font(Theme.Font.sectionTitle)
+                .foregroundStyle(Theme.Color.textPrimary)
             Text(message)
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Color.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
             Button("Retry") {
                 Task { await loadModel() }
             }
-            .controlSize(.large)
+            .buttonStyle(.pbSecondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.Color.bgBase)
     }
 
     // MARK: - Helpers
@@ -362,10 +378,10 @@ private struct DefaultsBlock: View {
     let permissions: PermissionViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             Text("Default sources for new scenes")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.cardTitle)
+                .foregroundStyle(Theme.Color.textSecondary)
             displayPicker
             cameraPicker
             microphonePicker
@@ -414,8 +430,8 @@ private struct DefaultsBlock: View {
                 .disabled(!accessibilityGranted)
             if !accessibilityGranted {
                 Text("Requires Accessibility permission.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
         }
     }

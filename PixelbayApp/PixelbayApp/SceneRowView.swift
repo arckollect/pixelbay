@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import PixelbayCore
+import PixelbayDesignSystem
 import SwiftUI
 
 // Phase 5 — one row in the Scenes window list. Mirrors the clip-row visual
@@ -28,9 +29,9 @@ struct SceneRowView: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: Theme.Spacing.md) {
             thumbnail
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 header
                 descriptionField
                 if scene.takes.count > 1 {
@@ -41,8 +42,8 @@ struct SceneRowView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             actionColumn
         }
-        .padding(12)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
+        .tint(Theme.Color.accent)
+        .pbCard()
         .onAppear {
             draftDescription = scene.description
         }
@@ -70,23 +71,24 @@ struct SceneRowView: View {
     // MARK: - Pieces
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.xs) {
             Text("Scene \(sceneIndex + 1)")
-                .font(.headline)
+                .font(Theme.Font.cardTitle)
+                .foregroundStyle(Theme.Color.textPrimary)
             if scene.sourceOverride.hasAnyOverride {
                 Text("Custom")
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 6)
+                    .font(Theme.Font.caption)
+                    .padding(.horizontal, Theme.Spacing.xs)
                     .padding(.vertical, 2)
-                    .background(.tint.opacity(0.18), in: Capsule())
-                    .foregroundStyle(.tint)
+                    .background(Theme.Color.accent.opacity(0.18), in: Capsule())
+                    .foregroundStyle(Theme.Color.accent)
                     .accessibilityLabel("Uses custom source overrides")
             }
             Spacer()
             if let take = scene.activeTake {
                 Text(durationLabel(take.durationSeconds))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.monoTimecode)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
         }
     }
@@ -95,7 +97,8 @@ struct SceneRowView: View {
         TextField("Describe this scene…", text: $draftDescription, axis: .vertical)
             .textFieldStyle(.plain)
             .lineLimit(1...3)
-            .font(.callout)
+            .font(Theme.Font.body)
+            .foregroundStyle(Theme.Color.textPrimary)
             // Persist on commit / focus loss to avoid keystroke-rate
             // writes (the model also debounces, but a per-character
             // update churns @Observable subscribers unnecessarily).
@@ -151,7 +154,7 @@ struct SceneRowView: View {
     }
 
     private var actionColumn: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: Theme.Spacing.sm) {
             recordButton
             Button(role: .destructive) {
                 confirmDeletePresented = true
@@ -159,6 +162,7 @@ struct SceneRowView: View {
                 Image(systemName: "trash")
             }
             .buttonStyle(.borderless)
+            .tint(Theme.Color.danger)
             .help("Delete this scene")
         }
         .frame(width: 110)
@@ -173,7 +177,7 @@ struct SceneRowView: View {
                 .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
-        .tint(scene.takes.isEmpty ? .red : .accentColor)
+        .tint(scene.takes.isEmpty ? Theme.Color.recordingRed : Theme.Color.accent)
         .controlSize(.regular)
         .disabled(model.phase != .idle)
     }
@@ -183,8 +187,8 @@ struct SceneRowView: View {
     @ViewBuilder
     private var thumbnail: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(.background.tertiary)
+            RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                .fill(Theme.Color.bgBase)
             if let path = scene.activeTake?.thumbnailRelativePath,
                let nsImage = loadThumbnail(relativePath: path)
             {
@@ -192,17 +196,17 @@ struct SceneRowView: View {
                     .resizable()
                     .scaledToFill()
                     .frame(width: 56, height: 56)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
             } else {
                 Image(systemName: "video.fill")
                     .imageScale(.large)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.Color.textTertiary)
             }
         }
         .frame(width: 56, height: 56)
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(.separator, lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                .stroke(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
         )
     }
 

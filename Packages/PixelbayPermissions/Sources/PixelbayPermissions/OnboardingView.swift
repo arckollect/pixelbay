@@ -1,6 +1,8 @@
 #if canImport(SwiftUI) && canImport(AppKit)
 import SwiftUI
+import AppKit
 import Observation
+import PixelbayDesignSystem
 
 // SwiftUI-side bridge for the actor-isolated PermissionCoordinator. Holds the
 // observable status snapshot the view binds to, and forwards user actions to
@@ -65,38 +67,35 @@ public struct OnboardingView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Welcome to Pixelbay")
-                    .font(.largeTitle.bold())
-                Text("Grant access so Pixelbay can record your screen, webcam, and audio.")
-                    .foregroundStyle(.secondary)
-            }
-
-            VStack(spacing: 12) {
-                ForEach(PermissionKind.allCases, id: \.self) { kind in
-                    PermissionRowView(
-                        kind: kind,
-                        status: viewModel.statuses[kind] ?? .notDetermined,
-                        onGrant: { Task { await viewModel.request(kind) } },
-                        onOpenSettings: { Task { await viewModel.openSettings(for: kind) } }
-                    )
+        ZStack {
+            Theme.Color.bgBase.ignoresSafeArea()
+            VStack(spacing: Theme.Spacing.xl) {
+                hero
+                VStack(spacing: Theme.Spacing.md) {
+                    ForEach(PermissionKind.allCases, id: \.self) { kind in
+                        PermissionRowView(
+                            kind: kind,
+                            status: viewModel.statuses[kind] ?? .notDetermined,
+                            onGrant: { Task { await viewModel.request(kind) } },
+                            onOpenSettings: { Task { await viewModel.openSettings(for: kind) } }
+                        )
+                    }
                 }
-            }
+                .frame(maxWidth: 520)
 
-            if viewModel.anyRequiresRelaunch {
-                relaunchBanner
-            }
+                if viewModel.anyRequiresRelaunch {
+                    relaunchBanner
+                        .frame(maxWidth: 520)
+                }
 
-            HStack {
-                Spacer()
-                Button("Continue") { onContinue() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!viewModel.requiredSatisfied)
+                Spacer(minLength: 0)
+                ctaSection
+                    .frame(maxWidth: 520)
             }
+            .padding(.horizontal, 40)
+            .padding(.vertical, Theme.Spacing.xxl)
         }
-        .padding(40)
-        .frame(minWidth: 540, minHeight: 480)
+        .frame(minWidth: 560, minHeight: 560)
         .task {
             await viewModel.refresh()
             // Poll every 1.5s while visible so a Settings-side grant flips
@@ -109,26 +108,66 @@ public struct OnboardingView: View {
         }
     }
 
+    private var hero: some View {
+        VStack(spacing: Theme.Spacing.md) {
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .frame(width: 96, height: 96)
+                .accessibilityHidden(true)
+            Text("Welcome to Pixelbay")
+                .font(Theme.Font.displayTitle)
+                .foregroundStyle(Theme.Color.textPrimary)
+            Text("Grant access so Pixelbay can record your screen, webcam, and audio.")
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Color.textSecondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, Theme.Spacing.lg)
+    }
+
+    @ViewBuilder
+    private var ctaSection: some View {
+        VStack(spacing: Theme.Spacing.sm) {
+            Button("Continue") { onContinue() }
+                .buttonStyle(.pbPrimary)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!viewModel.requiredSatisfied)
+            if !viewModel.requiredSatisfied {
+                Text("Grant the required permissions above to continue.")
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textTertiary)
+            }
+        }
+    }
+
     private var relaunchBanner: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Theme.Spacing.md) {
             Image(systemName: "arrow.clockwise.circle.fill")
                 .font(.title2)
-                .foregroundStyle(.orange)
+                .foregroundStyle(Theme.Color.warning)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Restart required")
-                    .font(.headline)
+                    .font(Theme.Font.cardTitle)
+                    .foregroundStyle(Theme.Color.textPrimary)
                 Text("Screen Recording was just granted. Pixelbay must relaunch to use it.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
             Spacer()
             Button("Quit & Relaunch") {
                 AppRelauncher.quitAndRelaunch()
             }
-            .controlSize(.large)
+            .buttonStyle(.pbSecondary)
         }
-        .padding(12)
-        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .padding(Theme.Spacing.md)
+        .background(Theme.Color.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.large))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.large)
+                .strokeBorder(Theme.Color.warning.opacity(0.35), lineWidth: Theme.Stroke.hairline)
+        )
     }
 }
 
@@ -139,35 +178,57 @@ private struct PermissionRowView: View {
     let onOpenSettings: () -> Void
 
     var body: some View {
-        HStack(spacing: 14) {
-            statusIcon
-                .font(.title2)
-                .frame(width: 28)
+        HStack(spacing: Theme.Spacing.md) {
+            iconBadge
             VStack(alignment: .leading, spacing: 2) {
                 Text(kind.humanReadableName)
-                    .font(.headline)
+                    .font(Theme.Font.bodyEmphasized)
+                    .foregroundStyle(Theme.Color.textPrimary)
                 Text(kind.rationale)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             actionButton
+                .transition(.asymmetric(
+                    insertion: .scale.combined(with: .opacity),
+                    removal: .opacity
+                ))
         }
-        .padding(12)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
+        .pbCard(elevated: true, padding: Theme.Spacing.md)
+        .animation(.smooth, value: status)
     }
 
-    @ViewBuilder
-    private var statusIcon: some View {
+    /// SF Symbol for the permission, on a tinted circle whose colour
+    /// reflects the current status (accent until acted on, green/red/amber
+    /// once resolved).
+    private var iconBadge: some View {
+        ZStack {
+            Circle()
+                .fill(statusColor.opacity(0.18))
+                .frame(width: 36, height: 36)
+            Image(systemName: symbolName)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(statusColor)
+        }
+    }
+
+    private var symbolName: String {
+        switch kind {
+        case .screenRecording: return "rectangle.inset.filled.badge.record"
+        case .camera: return "camera.fill"
+        case .microphone: return "mic.fill"
+        case .accessibility: return "hand.tap.fill"
+        }
+    }
+
+    private var statusColor: Color {
         switch status {
-        case .granted:
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-        case .denied:
-            Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
-        case .requiresRelaunch:
-            Image(systemName: "arrow.clockwise.circle.fill").foregroundStyle(.orange)
-        case .notDetermined:
-            Image(systemName: "circle.dashed").foregroundStyle(.secondary)
+        case .granted: return Theme.Color.success
+        case .denied: return Theme.Color.danger
+        case .requiresRelaunch: return Theme.Color.warning
+        case .notDetermined: return Theme.Color.accent
         }
     }
 
@@ -175,13 +236,19 @@ private struct PermissionRowView: View {
     private var actionButton: some View {
         switch status {
         case .granted:
-            Text("Granted").foregroundStyle(.secondary)
+            Label("Granted", systemImage: "checkmark")
+                .font(Theme.Font.caption)
+                .foregroundStyle(Theme.Color.success)
         case .requiresRelaunch:
-            Text("Relaunch needed").foregroundStyle(.orange)
+            Text("Relaunch needed")
+                .font(Theme.Font.caption)
+                .foregroundStyle(Theme.Color.warning)
         case .denied:
             Button("Open Settings", action: onOpenSettings)
+                .buttonStyle(.pbSecondary)
         case .notDetermined:
             Button("Grant", action: onGrant)
+                .buttonStyle(.pbPrimary)
         }
     }
 }

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import PixelbayCore
+import PixelbayDesignSystem
 import SwiftUI
 
 // Slice A.2 — read-only-ish row for previously-merged scenes in the editor's
@@ -20,16 +21,17 @@ struct SceneHistoryRowView: View {
     @State private var draftDescription: String = ""
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: Theme.Spacing.md) {
             thumbnail
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 header
                 descriptionField
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(12)
-        .background(.background.secondary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+        .tint(Theme.Color.accent)
+        .pbCard()
+        .opacity(0.85)
         .onAppear {
             draftDescription = row.description
         }
@@ -41,19 +43,20 @@ struct SceneHistoryRowView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.xs) {
             Text("Scene \(historyIndex + 1)")
-                .font(.headline)
+                .font(Theme.Font.cardTitle)
+                .foregroundStyle(Theme.Color.textPrimary)
             Text("merged")
-                .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 6)
+                .font(Theme.Font.caption)
+                .padding(.horizontal, Theme.Spacing.xs)
                 .padding(.vertical, 2)
-                .background(Color.secondary.opacity(0.15), in: Capsule())
-                .foregroundStyle(.secondary)
+                .background(Theme.Color.bgElevated, in: Capsule())
+                .foregroundStyle(Theme.Color.textSecondary)
             Spacer()
             Text(durationLabel(row.durationSeconds))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.monoTimecode)
+                .foregroundStyle(Theme.Color.textSecondary)
         }
     }
 
@@ -61,7 +64,8 @@ struct SceneHistoryRowView: View {
         TextField("Describe this scene…", text: $draftDescription, axis: .vertical)
             .textFieldStyle(.plain)
             .lineLimit(1...3)
-            .font(.callout)
+            .font(Theme.Font.body)
+            .foregroundStyle(Theme.Color.textPrimary)
             // Commit on Enter or focus-loss. Each commit dispatches one
             // SetClipExtraCommand per clip in the group through the
             // editor's command pipeline — the editor's revision bumps and
@@ -86,8 +90,8 @@ struct SceneHistoryRowView: View {
     @ViewBuilder
     private var thumbnail: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(.background.tertiary)
+            RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                .fill(Theme.Color.bgBase)
             if let path = row.thumbnailRelativePath,
                let nsImage = loadThumbnail(relativePath: path)
             {
@@ -95,17 +99,17 @@ struct SceneHistoryRowView: View {
                     .resizable()
                     .scaledToFill()
                     .frame(width: 48, height: 48)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
             } else {
                 Image(systemName: "rectangle.stack")
                     .imageScale(.large)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.Color.textTertiary)
             }
         }
         .frame(width: 48, height: 48)
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(.separator, lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                .stroke(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
         )
     }
 
