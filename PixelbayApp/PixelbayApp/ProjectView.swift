@@ -1,6 +1,7 @@
 import AppKit
 import CoreMedia
 import PixelbayCore
+import PixelbayDesignSystem
 import PixelbayEditor
 import PixelbayPlayback
 import PixelbayTimelineUI
@@ -49,22 +50,24 @@ struct ProjectView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
-            Divider()
+            PBDivider()
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
                     previewPane
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    Divider()
+                    PBDivider()
                     timelinePane
                         .frame(minHeight: 280, maxHeight: 420)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                Divider()
+                PBDivider(.vertical)
                 inspectorPane
                     .frame(width: 320)
             }
         }
         .frame(minWidth: 1000, minHeight: 700)
+        .background(Theme.Color.bgBase)
+        .tint(Theme.Color.accent)
         // Note: focusedSceneValue(\.openProjectDocument, document) is set
         // by the enclosing ProjectWindow, not here — that way the document
         // is published once per scene from the natural owner.
@@ -106,7 +109,7 @@ struct ProjectView: View {
     // MARK: - Toolbar
 
     private var toolbar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Theme.Spacing.sm) {
             // Slice A.2 — "Scenes" entry point. Sets the shared
             // ScenesAppendTarget singleton to this document's bundleURL,
             // then opens the singleton scenes window. The window snapshots
@@ -119,8 +122,9 @@ struct ProjectView: View {
             } label: {
                 Label("Scenes", systemImage: "rectangle.stack.badge.play")
             }
+            .buttonStyle(.pbCompact)
             .help("Add more scenes to this project")
-            Divider().frame(height: 22)
+            PBDivider(.vertical).frame(height: 20)
             // Toolbar Undo/Redo are visible affordances; the keyboard
             // shortcuts (⌘Z / ⇧⌘Z) live on the Edit menu via
             // EditUndoRedoCommands so a focused TextField doesn't shadow
@@ -130,6 +134,7 @@ struct ProjectView: View {
             } label: {
                 Label("Undo", systemImage: "arrow.uturn.backward")
             }
+            .buttonStyle(.pbCompact)
             .disabled(!document.canUndo)
             .help(document.undoActionName.map { "Undo \($0)" } ?? "Undo")
             Button {
@@ -137,9 +142,10 @@ struct ProjectView: View {
             } label: {
                 Label("Redo", systemImage: "arrow.uturn.forward")
             }
+            .buttonStyle(.pbCompact)
             .disabled(!document.canRedo)
             .help(document.redoActionName.map { "Redo \($0)" } ?? "Redo")
-            Divider().frame(height: 22)
+            PBDivider(.vertical).frame(height: 20)
             // Save shortcut lives on the File menu's SaveProjectCommand
             // (FocusedValue-bound), so this button is just an in-window
             // affordance that mirrors document state.
@@ -148,6 +154,7 @@ struct ProjectView: View {
             } label: {
                 Label(document.isDirty ? "Save (modified)" : "Save", systemImage: "tray.and.arrow.down")
             }
+            .buttonStyle(.pbPrimary)
             .disabled(!document.isDirty || document.status == .saving)
             Spacer()
             Button {
@@ -155,6 +162,7 @@ struct ProjectView: View {
             } label: {
                 Label("Reveal", systemImage: "folder")
             }
+            .buttonStyle(.pbCompact)
             // Branch B (Slice B.4) — bulk toggle of every grouped lane.
             // Reads the smart-default seed to decide which direction the
             // button toggles to. INSERTION ORDER: this is the LAST item
@@ -174,12 +182,14 @@ struct ProjectView: View {
                         : "chevron.right.square"
                 )
             }
+            .buttonStyle(.pbCompact)
             .help(allLanesCollapsed
                   ? "Expand every grouped lane to show underlying tracks"
                   : "Collapse every grouped lane into Video / Audio bands")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Theme.Spacing.lg)
+        .padding(.vertical, Theme.Spacing.sm)
+        .background(Theme.Color.bgDeep)
     }
 
     /// True when every known lane group is currently collapsed (per the
@@ -195,33 +205,42 @@ struct ProjectView: View {
     private var previewPane: some View {
         switch player.status {
         case .idle, .loading:
-            VStack(spacing: 8) {
+            VStack(spacing: Theme.Spacing.sm) {
                 ProgressView().controlSize(.small)
-                Text("Loading preview…").foregroundStyle(.secondary)
+                Text("Loading preview…")
+                    .font(Theme.Font.body)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.Color.bgBase)
         case .failed(let message):
-            VStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            VStack(spacing: Theme.Spacing.sm) {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.Color.warning)
                 Text("Preview unavailable: \(message)")
+                    .font(Theme.Font.body)
                     .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.Color.textSecondary)
                     .padding(.horizontal, 40)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.Color.bgBase)
         case .ready:
-            VStack(spacing: 8) {
+            VStack(spacing: Theme.Spacing.md) {
                 PreviewPlayerView(player: player)
-                    .background(Color.black, in: RoundedRectangle(cornerRadius: 6))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .background(Theme.Color.bgBase, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                            .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+                    )
                 playbackControls
             }
-            .padding(16)
+            .padding(Theme.Spacing.lg)
         }
     }
 
     private var playbackControls: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Theme.Spacing.md) {
             Button {
                 player.togglePlayPause()
             } label: {
@@ -231,8 +250,8 @@ struct ProjectView: View {
             .controlSize(.large)
             .keyboardShortcut(.space, modifiers: [])
             Text(formatTime(player.currentTime.seconds))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.monoTimecode)
+                .foregroundStyle(Theme.Color.textSecondary)
                 .frame(width: 60, alignment: .trailing)
             Slider(
                 value: Binding<Double>(
@@ -245,8 +264,8 @@ struct ProjectView: View {
                 in: 0...1
             )
             Text(formatTime(player.duration.seconds))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.monoTimecode)
+                .foregroundStyle(Theme.Color.textSecondary)
                 .frame(width: 60, alignment: .leading)
         }
     }
@@ -255,17 +274,17 @@ struct ProjectView: View {
 
     private var timelinePane: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
+            HStack(spacing: Theme.Spacing.sm) {
                 Text("Timeline")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.cardTitle)
+                    .foregroundStyle(Theme.Color.textSecondary)
                 Spacer()
                 // Track-height (row size) control. Lets the user condense
                 // tracks when the project has many of them (so they all
                 // fit in the visible pane without vertical scrolling) or
                 // expand to give waveforms more room.
                 Image(systemName: "rectangle.compress.vertical")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.Color.textSecondary)
                     .help("Condense tracks")
                 Slider(
                     value: $trackHeight,
@@ -274,11 +293,11 @@ struct ProjectView: View {
                 .frame(width: 110)
                 .help("Adjust track row height")
                 Image(systemName: "rectangle.expand.vertical")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.Color.textSecondary)
                     .help("Expand tracks")
-                Divider().frame(height: 16)
+                PBDivider(.vertical).frame(height: 16)
                 Image(systemName: "minus.magnifyingglass")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.Color.textSecondary)
                 Slider(
                     value: $pixelsPerSecond,
                     in: TimelineLayoutCalculator.minPixelsPerSecond...TimelineLayoutCalculator.maxPixelsPerSecond
@@ -286,8 +305,8 @@ struct ProjectView: View {
                 .frame(width: 140)
                 .help("Zoom timeline")
                 Image(systemName: "plus.magnifyingglass")
-                    .foregroundStyle(.secondary)
-                Divider().frame(height: 16)
+                    .foregroundStyle(Theme.Color.textSecondary)
+                PBDivider(.vertical).frame(height: 16)
                 // Slice A.3 — "+" entry point for a single-shot append
                 // recording. Anchored at the right edge of the timeline
                 // header so the user reads it as "add to the end of this
@@ -299,7 +318,7 @@ struct ProjectView: View {
                 } label: {
                     Image(systemName: "plus.circle.fill")
                         .imageScale(.large)
-                        .foregroundStyle(.tint)
+                        .foregroundStyle(Theme.Color.accent)
                 }
                 .buttonStyle(.plain)
                 .help("Record more — appends to the timeline tail")
@@ -312,8 +331,9 @@ struct ProjectView: View {
                     )
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.horizontal, Theme.Spacing.md)
+            .padding(.vertical, Theme.Spacing.xs)
+            .background(Theme.Color.bgDeep)
             // TimelineView wraps an NSScrollView internally — no SwiftUI
             // ScrollView here. SwiftUI's ScrollView didn't agree with
             // `TimelineNSView.isFlipped` and parked the default scroll
@@ -342,41 +362,50 @@ struct ProjectView: View {
                 }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(.background.secondary)
+            .background(Theme.Color.bgDeep)
         }
     }
 
     // MARK: - Inspector pane
 
     private var inspectorPane: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            projectInspector
-            Divider()
-            layoutInspector
-            Divider()
-            effectsInspector
-            Divider()
-            tracksAndClipsList
-            Divider()
-            clipInspector
-            Spacer(minLength: 0)
-            if case .failed(let message) = document.status {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
-                    Text(message).font(.callout)
-                    Spacer()
-                    Button("Dismiss") { document.acknowledgeError() }
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                projectInspector
+                PBDivider()
+                layoutInspector
+                PBDivider()
+                effectsInspector
+                PBDivider()
+                tracksAndClipsList
+                PBDivider()
+                clipInspector
+                Spacer(minLength: 0)
+                if case .failed(let message) = document.status {
+                    HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+                        Image(systemName: "xmark.octagon.fill").foregroundStyle(Theme.Color.danger)
+                        Text(message).font(Theme.Font.body).foregroundStyle(Theme.Color.textPrimary)
+                        Spacer()
+                        Button("Dismiss") { document.acknowledgeError() }
+                            .buttonStyle(.pbGhost)
+                    }
+                    .padding(Theme.Spacing.sm)
+                    .background(Theme.Color.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                            .strokeBorder(Theme.Color.danger.opacity(0.35), lineWidth: Theme.Stroke.hairline)
+                    )
                 }
-                .padding(8)
-                .background(.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
             }
+            .padding(Theme.Spacing.lg)
         }
-        .padding(16)
+        .frame(maxHeight: .infinity)
+        .background(Theme.Color.bgDeep)
     }
 
     private var projectInspector: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Project").font(.headline)
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            PBSectionHeader("Project")
             HStack {
                 TextField("Name", text: $editingName)
                     .textFieldStyle(.roundedBorder)
@@ -432,15 +461,15 @@ struct ProjectView: View {
     }
 
     private var tracksAndClipsList: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Clips").font(.headline)
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            PBSectionHeader("Clips")
             if document.project.tracks.flatMap(\.clips).isEmpty {
                 Text("This project has no clips.")
-                    .foregroundStyle(.secondary)
-                    .font(.callout)
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .font(Theme.Font.body)
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 4) {
+                    LazyVStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                         ForEach(document.project.tracks) { track in
                             Section {
                                 ForEach(track.clips) { clip in
@@ -448,9 +477,9 @@ struct ProjectView: View {
                                 }
                             } header: {
                                 Text("\(track.name) (\(track.kind.rawValue))")
-                                    .font(.caption.bold())
-                                    .foregroundStyle(.secondary)
-                                    .padding(.top, 4)
+                                    .font(Theme.Font.caption)
+                                    .foregroundStyle(Theme.Color.textTertiary)
+                                    .padding(.top, Theme.Spacing.xs)
                             }
                         }
                     }
@@ -462,15 +491,16 @@ struct ProjectView: View {
 
     private func clipRow(track: Track, clip: Clip) -> some View {
         let isSelected = clip.id == selectedClipID
-        return HStack(spacing: 8) {
+        return HStack(spacing: Theme.Spacing.sm) {
             Image(systemName: clip.id == selectedClipID ? "play.circle.fill" : "play.circle")
-                .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(HierarchicalShapeStyle.secondary))
+                .foregroundStyle(isSelected ? Theme.Color.accent : Theme.Color.textSecondary)
             VStack(alignment: .leading, spacing: 0) {
                 Text(clip.id.rawValue.prefix(8) + "…")
-                    .font(.system(.caption, design: .monospaced))
+                    .font(Theme.Font.monoTimecode)
+                    .foregroundStyle(Theme.Color.textPrimary)
                 Text(formatRange(clip.timelineRange))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
             Spacer()
             Button {
@@ -480,13 +510,13 @@ struct ProjectView: View {
                 Image(systemName: "trash")
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Theme.Color.textTertiary)
             .help("Remove clip")
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
-        .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 4))
+        .padding(.horizontal, Theme.Spacing.sm)
+        .padding(.vertical, Theme.Spacing.xs)
+        .background(isSelected ? Theme.Color.accent.opacity(0.18) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: Theme.Radius.small))
         .contentShape(Rectangle())
         .onTapGesture { selectedClipID = clip.id }
     }
@@ -494,17 +524,17 @@ struct ProjectView: View {
     @ViewBuilder
     private var clipInspector: some View {
         if let clipID = selectedClipID, let clip = document.project.clip(clipID) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Clip").font(.headline)
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                PBSectionHeader("Clip")
                 volumeSlider(for: clip)
                 speedSlider(for: clip)
             }
         } else {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Clip").font(.headline)
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                PBSectionHeader("Clip")
                 Text("Select a clip from the list to edit.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.body)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
         }
     }
@@ -516,13 +546,15 @@ struct ProjectView: View {
         let liveValue = previewVolumes[clip.id] ?? min(clip.volume, 2.0)
         let clipID = clip.id
         let committedValue = clip.volume
-        return VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             HStack {
                 Text("Volume")
+                    .font(Theme.Font.body)
+                    .foregroundStyle(Theme.Color.textPrimary)
                 Spacer()
                 Text(String(format: "%.0f%%", liveValue * 100))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.monoTimecode)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
             Slider(
                 value: Binding<Double>(
@@ -544,13 +576,15 @@ struct ProjectView: View {
         let liveValue = previewSpeeds[clip.id] ?? min(max(clip.speed, 0.25), 4.0)
         let clipID = clip.id
         let committedValue = clip.speed
-        return VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             HStack {
                 Text("Speed")
+                    .font(Theme.Font.body)
+                    .foregroundStyle(Theme.Color.textPrimary)
                 Spacer()
                 Text(String(format: "%.2f×", liveValue))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.monoTimecode)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
             Slider(
                 value: Binding<Double>(

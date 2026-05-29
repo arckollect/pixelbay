@@ -3,6 +3,7 @@ import CoreMedia
 import Foundation
 import PixelbayCapture
 import PixelbayCore
+import PixelbayDesignSystem
 import PixelbayPlayback
 import SwiftUI
 
@@ -24,7 +25,7 @@ struct PostCaptureView: View {
     @State private var showsExport: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
             headerRow
             if !result.writerErrors.isEmpty {
                 writerErrorsPanel
@@ -32,12 +33,15 @@ struct PostCaptureView: View {
             previewSurface
             actionsRow
             DisclosureGroup("Recording details", isExpanded: $showsDetails) {
-                fileList.padding(.top, 8)
+                fileList.padding(.top, Theme.Spacing.sm)
             }
+            .tint(Theme.Color.accent)
             Spacer(minLength: 0)
         }
         .padding(32)
         .frame(minWidth: 720, minHeight: 540)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Theme.Color.bgBase)
         .task(id: result.bundleURL) {
             await loadIntoPlayer()
         }
@@ -59,33 +63,39 @@ struct PostCaptureView: View {
         case .failed(let message):
             previewPlaceholder("Preview unavailable: \(message)", isLoading: false)
         case .ready:
-            VStack(spacing: 8) {
+            VStack(spacing: Theme.Spacing.sm) {
                 PreviewPlayerView(player: player)
-                    .background(Color.black, in: RoundedRectangle(cornerRadius: 6))
+                    .background(Theme.Color.bgBase, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
                     .frame(minHeight: 280)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                            .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+                    )
                 playbackControls
             }
         }
     }
 
     private func previewPlaceholder(_ text: String, isLoading: Bool) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Theme.Spacing.md) {
             if isLoading {
                 ProgressView().controlSize(.small)
             } else {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.Color.warning)
             }
-            Text(text).foregroundStyle(.secondary)
+            Text(text)
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Color.textSecondary)
             Spacer()
         }
         .padding(40)
         .frame(maxWidth: .infinity, minHeight: 280, alignment: .center)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 6))
+        .background(Theme.Color.bgInsetCard, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
     }
 
     private var playbackControls: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Theme.Spacing.md) {
             Button {
                 player.togglePlayPause()
             } label: {
@@ -95,8 +105,8 @@ struct PostCaptureView: View {
             .controlSize(.large)
             .keyboardShortcut(.space, modifiers: [])
             Text(formatTime(player.currentTime.seconds))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.monoTimecode)
+                .foregroundStyle(Theme.Color.textSecondary)
                 .frame(width: 60, alignment: .trailing)
             Slider(
                 value: Binding<Double>(
@@ -108,9 +118,10 @@ struct PostCaptureView: View {
                 ),
                 in: 0...1
             )
+            .tint(Theme.Color.accent)
             Text(formatTime(player.duration.seconds))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.monoTimecode)
+                .foregroundStyle(Theme.Color.textSecondary)
                 .frame(width: 60, alignment: .leading)
         }
     }
@@ -150,41 +161,48 @@ struct PostCaptureView: View {
     private var isHealthy: Bool { !result.markerStillExists && !hasWriterErrors }
 
     private var headerRow: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Theme.Spacing.md) {
             Image(systemName: isHealthy ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(isHealthy ? .green : .orange)
+                .foregroundStyle(isHealthy ? Theme.Color.success : Theme.Color.warning)
                 .font(.system(size: 28))
             VStack(alignment: .leading, spacing: 2) {
                 Text(headlineMessage())
-                    .font(.title3.bold())
+                    .font(Theme.Font.sectionTitle)
+                    .foregroundStyle(Theme.Color.textPrimary)
                 Text("Wall-clock duration: \(formatSeconds(result.durationSeconds))")
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.body)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
             Spacer()
         }
     }
 
     private var writerErrorsPanel: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             Text("Writer errors:")
-                .font(.caption.bold())
-                .foregroundStyle(.red)
+                .font(Theme.Font.cardTitle)
+                .foregroundStyle(Theme.Color.danger)
             ForEach(Array(result.writerErrors.enumerated()), id: \.offset) { _, msg in
                 Text(msg)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.red)
+                    .font(Theme.Font.monoTimecode)
+                    .foregroundStyle(Theme.Color.danger)
                     .textSelection(.enabled)
             }
         }
-        .padding(10)
+        .padding(Theme.Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+        .background(Theme.Color.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                .strokeBorder(Theme.Color.danger.opacity(0.35), lineWidth: Theme.Stroke.hairline)
+        )
     }
 
     private var fileList: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             Text("Files")
-                .font(.headline)
+                .font(Theme.Font.cardTitle)
+                .foregroundStyle(Theme.Color.textPrimary)
             VStack(alignment: .leading, spacing: 6) {
                 fileRow(
                     label: "screen.mov",
@@ -217,9 +235,9 @@ struct PostCaptureView: View {
                     )
                 }
             }
-            .padding(12)
+            .padding(Theme.Spacing.md)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
+            .background(Theme.Color.bgInsetCard, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
         }
     }
 
@@ -261,22 +279,25 @@ struct PostCaptureView: View {
         let rows: [TrackStatRow] = tracks.map { track, prefix in
             TrackStatRow(id: "\(track)", prefix: prefix, stats: result.trackStats[track])
         }
-        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+        return HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
             Text(label)
                 .font(.system(.body, design: .monospaced))
+                .foregroundStyle(Theme.Color.textPrimary)
                 .frame(width: 100, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
                 Text(url.lastPathComponent)
+                    .font(Theme.Font.body)
+                    .foregroundStyle(Theme.Color.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(durationLabel(seconds: duration, exists: fileExistsAndNonEmpty(url)))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
                 ForEach(rows) { row in
                     if let s = row.stats {
                         Text("\(row.prefix): appended \(s.appendedCount) · failed \(s.appendFailedCount) · dropped(notReady) \(s.droppedNotReadyCount) · buffered→appended \(s.bufferedThenAppendedCount)")
-                            .font(.caption2)
-                            .foregroundStyle(s.appendFailedCount > 0 ? .red : .secondary)
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(s.appendFailedCount > 0 ? Theme.Color.danger : Theme.Color.textTertiary)
                             .monospacedDigit()
                     }
                 }

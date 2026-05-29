@@ -1,6 +1,7 @@
 #if canImport(AppKit)
 import AppKit
 import CoreGraphics
+import PixelbayDesignSystem
 import QuartzCore
 
 // Renders a WaveformPeaks via direct CGContext drawing — one vertical
@@ -20,7 +21,7 @@ public final class WaveformLayer: CALayer, @unchecked Sendable {
             }
         }
     }
-    public var fillColor: CGColor = NSColor.controlAccentColor.cgColor {
+    public var fillColor: CGColor = Theme.NSColor.waveformFill.cgColor {
         didSet {
             if fillColor != oldValue {
                 setNeedsDisplay()

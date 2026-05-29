@@ -1,5 +1,6 @@
 import AppKit
 import OSLog
+import PixelbayDesignSystem
 import PixelbayPermissions
 import SwiftUI
 import UniformTypeIdentifiers
@@ -156,29 +157,38 @@ struct ContentView: View {
     }
 
     private var recordingPlaceholder: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: Theme.Spacing.lg) {
             Image(systemName: "record.circle.fill")
                 .font(.system(size: 48))
-                .foregroundStyle(.red)
+                .foregroundStyle(Theme.Color.recordingRed)
             Text("Recording in progress")
-                .font(.title2.bold())
+                .font(Theme.Font.pageTitle)
+                .foregroundStyle(Theme.Color.textPrimary)
             Text("Use the floating HUD to stop. Pixelbay's own windows are excluded from screen.mov.")
+                .font(Theme.Font.body)
                 .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.Color.textSecondary)
                 .padding(.horizontal, 40)
         }
         .padding(40)
         .frame(minWidth: 620, minHeight: 460)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.Color.bgBase)
     }
 
     private func failureBanner(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
-            Text(message).font(.callout)
+        HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+            Image(systemName: "xmark.octagon.fill").foregroundStyle(Theme.Color.danger)
+            Text(message).font(Theme.Font.body).foregroundStyle(Theme.Color.textPrimary)
             Spacer()
             Button("Dismiss") { recording.acknowledgeResult() }
+                .buttonStyle(.pbGhost)
         }
-        .padding(12)
-        .background(.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+        .padding(Theme.Spacing.md)
+        .background(Theme.Color.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                .strokeBorder(Theme.Color.danger.opacity(0.35), lineWidth: Theme.Stroke.hairline)
+        )
     }
 }

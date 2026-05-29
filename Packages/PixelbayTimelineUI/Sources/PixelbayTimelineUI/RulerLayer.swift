@@ -1,6 +1,7 @@
 #if canImport(AppKit)
 import AppKit
 import CoreGraphics
+import PixelbayDesignSystem
 import QuartzCore
 
 // Draws the timeline's ruler strip: tick marks + time labels above the
@@ -45,7 +46,7 @@ public final class RulerLayer: CALayer, @unchecked Sendable {
     private func setUp() {
         contentsScale = NSScreen.main?.backingScaleFactor ?? 2
         needsDisplayOnBoundsChange = true
-        backgroundColor = NSColor.controlBackgroundColor.cgColor
+        backgroundColor = Theme.NSColor.timelineRuler.cgColor
     }
 
     public override func draw(in ctx: CGContext) {
@@ -53,7 +54,7 @@ public final class RulerLayer: CALayer, @unchecked Sendable {
         guard bounds.width > 0, bounds.height > 0 else { return }
 
         // Bottom hairline that visually separates the ruler from the lanes.
-        ctx.setFillColor(NSColor.separatorColor.cgColor)
+        ctx.setFillColor(Theme.NSColor.borderSubtle.cgColor)
         ctx.fill(CGRect(x: 0, y: bounds.maxY - 0.5, width: bounds.width, height: 0.5))
 
         let intervals = TimelineLayoutCalculator.niceTickInterval(forPixelsPerSecond: pixelsPerSecond)
@@ -69,7 +70,7 @@ public final class RulerLayer: CALayer, @unchecked Sendable {
 
         // Minor ticks first (so major overpaints them at exact alignments).
         if intervals.minor < intervals.major {
-            ctx.setStrokeColor(NSColor.tertiaryLabelColor.cgColor)
+            ctx.setStrokeColor(Theme.NSColor.textTertiary.cgColor)
             ctx.setLineWidth(1)
             drawTicks(
                 in: ctx,
@@ -83,7 +84,7 @@ public final class RulerLayer: CALayer, @unchecked Sendable {
         }
 
         // Major ticks + labels.
-        ctx.setStrokeColor(NSColor.secondaryLabelColor.cgColor)
+        ctx.setStrokeColor(Theme.NSColor.textSecondary.cgColor)
         ctx.setLineWidth(1)
         drawTicks(
             in: ctx,
@@ -142,7 +143,7 @@ public final class RulerLayer: CALayer, @unchecked Sendable {
         guard intervalSeconds > 0 else { return }
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
-            .foregroundColor: NSColor.secondaryLabelColor
+            .foregroundColor: Theme.NSColor.textSecondary
         ]
         let firstIndex = Int(floor(firstSecond / intervalSeconds))
         let lastIndex = Int(ceil(lastSecond / intervalSeconds))

@@ -2,6 +2,7 @@
 import AppKit
 import OSLog
 import PixelbayCore
+import PixelbayDesignSystem
 import PixelbayEditor
 import SwiftUI
 
@@ -275,7 +276,7 @@ public final class TimelineNSView: NSView {
     public init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        layer?.backgroundColor = Theme.NSColor.bgDeep.cgColor
         layer?.masksToBounds = true
     }
 
@@ -394,13 +395,13 @@ public final class TimelineNSView: NSView {
         effectsHeader.fontSize = 11
         effectsHeader.alignmentMode = .left
         effectsHeader.contentsScale = window?.backingScaleFactor ?? 2
-        effectsHeader.foregroundColor = NSColor.secondaryLabelColor.cgColor
-        effectsHeader.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        effectsHeader.foregroundColor = Theme.NSColor.textSecondary.cgColor
+        effectsHeader.backgroundColor = Theme.NSColor.bgElevated.cgColor
         layer.addSublayer(effectsHeader)
 
         let effectsLaneBg = CALayer()
         effectsLaneBg.frame = effectsLane.laneFrame
-        effectsLaneBg.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.4).cgColor
+        effectsLaneBg.backgroundColor = Theme.NSColor.bgBase.withAlphaComponent(0.4).cgColor
         layer.addSublayer(effectsLaneBg)
 
         for keyframe in effectsLane.keyframes {
@@ -410,8 +411,8 @@ public final class TimelineNSView: NSView {
             kfLayer.cornerRadius = 4
             kfLayer.borderWidth = isSelected ? 2 : 1
             kfLayer.borderColor = isSelected
-                ? NSColor.controlAccentColor.cgColor
-                : NSColor.separatorColor.cgColor
+                ? Theme.NSColor.accent.cgColor
+                : Theme.NSColor.borderSubtle.cgColor
             kfLayer.backgroundColor = colorForEffectKeyframe(keyframe, selected: isSelected).cgColor
             layer.addSublayer(kfLayer)
 
@@ -422,7 +423,7 @@ public final class TimelineNSView: NSView {
                 let glyph = CATextLayer()
                 glyph.string = "⌘"
                 glyph.fontSize = 11
-                glyph.foregroundColor = NSColor.labelColor.cgColor
+                glyph.foregroundColor = Theme.NSColor.textPrimary.cgColor
                 glyph.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
                 glyph.alignmentMode = .left
                 glyph.frame = CGRect(
@@ -475,13 +476,13 @@ public final class TimelineNSView: NSView {
         header.fontSize = 11
         header.alignmentMode = .left
         header.contentsScale = window?.backingScaleFactor ?? 2
-        header.foregroundColor = NSColor.secondaryLabelColor.cgColor
-        header.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        header.foregroundColor = Theme.NSColor.textSecondary.cgColor
+        header.backgroundColor = Theme.NSColor.bgElevated.cgColor
         layer.addSublayer(header)
 
         let lane = CALayer()
         lane.frame = track.laneFrame
-        lane.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.4).cgColor
+        lane.backgroundColor = Theme.NSColor.bgBase.withAlphaComponent(0.4).cgColor
         layer.addSublayer(lane)
 
         for clip in track.clips {
@@ -490,8 +491,8 @@ public final class TimelineNSView: NSView {
             clipLayer.cornerRadius = 4
             clipLayer.borderWidth = clip.id == selectedClipID ? 2 : 1
             clipLayer.borderColor = clip.id == selectedClipID
-                ? NSColor.controlAccentColor.cgColor
-                : NSColor.separatorColor.cgColor
+                ? Theme.NSColor.accent.cgColor
+                : Theme.NSColor.borderSubtle.cgColor
             clipLayer.backgroundColor = colorForKind(track.kind, selected: clip.id == selectedClipID).cgColor
             layer.addSublayer(clipLayer)
             if isAudioKind(track.kind) {
@@ -520,14 +521,14 @@ public final class TimelineNSView: NSView {
         header.fontSize = 11
         header.alignmentMode = .left
         header.contentsScale = window?.backingScaleFactor ?? 2
-        header.foregroundColor = NSColor.labelColor.cgColor
-        header.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        header.foregroundColor = Theme.NSColor.textPrimary.cgColor
+        header.backgroundColor = Theme.NSColor.bgElevated.cgColor
         layer.addSublayer(header)
 
         // Lane background.
         let lane = CALayer()
         lane.frame = primary.laneFrame
-        lane.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.4).cgColor
+        lane.backgroundColor = Theme.NSColor.bgBase.withAlphaComponent(0.4).cgColor
         layer.addSublayer(lane)
 
         // Primary track clips form the visible band.
@@ -537,8 +538,8 @@ public final class TimelineNSView: NSView {
             clipLayer.cornerRadius = 4
             clipLayer.borderWidth = clip.id == selectedClipID ? 2 : 1
             clipLayer.borderColor = clip.id == selectedClipID
-                ? NSColor.controlAccentColor.cgColor
-                : NSColor.separatorColor.cgColor
+                ? Theme.NSColor.accent.cgColor
+                : Theme.NSColor.borderSubtle.cgColor
             clipLayer.backgroundColor = colorForKind(primary.kind, selected: clip.id == selectedClipID).cgColor
             layer.addSublayer(clipLayer)
             if isAudioKind(primary.kind) {
@@ -583,7 +584,7 @@ public final class TimelineNSView: NSView {
         let bg = CALayer()
         bg.frame = badgeFrame
         bg.cornerRadius = badgeSize / 2
-        bg.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
+        bg.backgroundColor = Theme.NSColor.bgBase.withAlphaComponent(0.75).cgColor
         layer.addSublayer(bg)
         let symbolName = isVideo ? "videocam.fill" : "speaker.wave.2.fill"
         if let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
@@ -599,13 +600,13 @@ public final class TimelineNSView: NSView {
     private func colorForKind(_ kind: TrackKind, selected: Bool) -> NSColor {
         let base: NSColor
         switch kind {
-        case .screen:        base = .systemBlue
-        case .webcam:        base = .systemTeal
-        case .microphone:    base = .systemGreen
-        case .systemAudio:   base = .systemMint
-        case .voiceover:     base = .systemOrange
-        case .overlay:       base = .systemPurple
-        case .effects:       base = .systemPink
+        case .screen:        base = Theme.NSColor.trackVideo
+        case .webcam:        base = Theme.NSColor.trackWebcam
+        case .microphone:    base = Theme.NSColor.trackMic
+        case .systemAudio:   base = Theme.NSColor.trackSystemAudio
+        case .voiceover:     base = Theme.NSColor.trackVoiceover
+        case .overlay:       base = Theme.NSColor.trackOverlay
+        case .effects:       base = Theme.NSColor.trackEffects
         }
         return base.withAlphaComponent(selected ? 0.55 : 0.35)
     }
@@ -616,9 +617,9 @@ public final class TimelineNSView: NSView {
     ) -> NSColor {
         let base: NSColor
         switch (keyframe.kind, keyframe.origin) {
-        case (.zoom, .auto):            base = .systemYellow
-        case (.zoom, .manualHotkey):    base = .systemCyan
-        case (.talkingHeadSwap, _):     base = .systemIndigo
+        case (.zoom, .auto):            base = Theme.NSColor.effectZoomAuto
+        case (.zoom, .manualHotkey):    base = Theme.NSColor.effectZoomManual
+        case (.talkingHeadSwap, _):     base = Theme.NSColor.effectTalkingHead
         }
         return base.withAlphaComponent(selected ? 0.75 : 0.55)
     }
@@ -651,7 +652,7 @@ public final class TimelineNSView: NSView {
             width: max(0, clipFrame.width - inset * 2),
             height: max(0, clipFrame.height - inset * 2)
         )
-        waveform.fillColor = NSColor.labelColor.withAlphaComponent(0.55).cgColor
+        waveform.fillColor = Theme.NSColor.waveformFill.withAlphaComponent(0.9).cgColor
         waveform.contentsScale = window?.backingScaleFactor ?? 2
         layer?.addSublayer(waveform)
 
@@ -755,7 +756,7 @@ public final class TimelineNSView: NSView {
 
         if playheadLineLayer == nil {
             let l = CALayer()
-            l.backgroundColor = NSColor.controlAccentColor.cgColor
+            l.backgroundColor = Theme.NSColor.timelinePlayhead.cgColor
             l.zPosition = 1000  // above all clip layers
             layer.addSublayer(l)
             playheadLineLayer = l
@@ -1080,7 +1081,7 @@ public final class StickyRulerView: NSView {
     public init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        layer?.backgroundColor = Theme.NSColor.timelineRuler.cgColor
         rulerLayer.scrollSeconds = 0  // we span the document; absolute x
         rulerLayer.headerWidth = TimelineLayoutCalculator.trackHeaderWidth
         rulerLayer.pixelsPerSecond = pixelsPerSecond
@@ -1116,8 +1117,8 @@ public final class StickyRulerView: NSView {
         path.addLine(to: CGPoint(x: 0, y: topHeight))
         path.closeSubpath()
         playheadHead.path = path
-        playheadHead.fillColor = NSColor.controlAccentColor.cgColor
-        playheadHead.strokeColor = NSColor.controlAccentColor.cgColor
+        playheadHead.fillColor = Theme.NSColor.timelinePlayhead.cgColor
+        playheadHead.strokeColor = Theme.NSColor.timelinePlayhead.cgColor
         playheadHead.zPosition = 1
         playheadHead.isHidden = true
     }

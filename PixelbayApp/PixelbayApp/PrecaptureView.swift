@@ -5,6 +5,7 @@ import Foundation
 import OSLog
 import Observation
 import PixelbayCapture
+import PixelbayDesignSystem
 import ScreenCaptureKit
 import SwiftUI
 
@@ -187,24 +188,31 @@ struct PrecaptureView: View {
     var onSceneRecording: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 Text("New Recording")
-                    .font(.largeTitle.bold())
+                    .font(Theme.Font.pageTitle)
+                    .foregroundStyle(Theme.Color.textPrimary)
                 Text("Pick the display, camera, and microphone to record. Pixelbay's own windows are excluded automatically.")
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.body)
+                    .foregroundStyle(Theme.Color.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             if let loadError = model.loadError {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text(loadError).font(.callout)
+                HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.Color.warning)
+                    Text(loadError).font(Theme.Font.body).foregroundStyle(Theme.Color.textPrimary)
                     Spacer()
                     Button("Retry") { Task { await model.loadAvailableSources() } }
+                        .buttonStyle(.pbSecondary)
                 }
-                .padding(12)
-                .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                .padding(Theme.Spacing.md)
+                .background(Theme.Color.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                        .strokeBorder(Theme.Color.warning.opacity(0.35), lineWidth: Theme.Stroke.hairline)
+                )
             }
 
             sourceCard
@@ -213,6 +221,8 @@ struct PrecaptureView: View {
         }
         .padding(40)
         .frame(minWidth: 620, minHeight: 460)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Theme.Color.bgBase)
         .task { await model.loadAvailableSources() }
     }
 
@@ -247,8 +257,8 @@ struct PrecaptureView: View {
             Toggle("Capture system audio", isOn: $model.includeSystemAudio)
             clickLogToggle
         }
-        .padding(16)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
+        .tint(Theme.Color.accent)
+        .pbCard(elevated: true)
     }
 
     @ViewBuilder
@@ -257,15 +267,15 @@ struct PrecaptureView: View {
             Toggle("Log mouse clicks (for auto-zoom in Phase 3b)", isOn: $model.logClicks)
                 .disabled(!accessibilityGranted)
             if !accessibilityGranted {
-                HStack(spacing: 6) {
+                HStack(spacing: Theme.Spacing.xs) {
                     Text("Requires Accessibility permission.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.Color.textSecondary)
                     Button("Grant in Settings…") {
                         onRequestAccessibility()
                     }
                     .buttonStyle(.link)
-                    .font(.caption)
+                    .font(Theme.Font.caption)
                 }
             }
         }
@@ -281,7 +291,7 @@ struct PrecaptureView: View {
                     .padding(.horizontal, 12)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.red)
+            .tint(Theme.Color.recordingRed)
             .controlSize(.large)
             .keyboardShortcut(.defaultAction)
             .disabled(!model.canRecord)
@@ -296,9 +306,11 @@ struct PrecaptureView: View {
             .controlSize(.large)
             Spacer()
             if model.isLoading {
-                HStack(spacing: 6) {
+                HStack(spacing: Theme.Spacing.xs) {
                     ProgressView().controlSize(.small)
-                    Text("Loading sources…").foregroundStyle(.secondary)
+                    Text("Loading sources…")
+                        .font(Theme.Font.body)
+                        .foregroundStyle(Theme.Color.textSecondary)
                 }
             }
         }

@@ -1,5 +1,6 @@
 import AppKit
 import PixelbayCore
+import PixelbayDesignSystem
 import SwiftUI
 
 // Phase 3a Inspector section: cam-position grid, cam shape, background.
@@ -22,8 +23,8 @@ struct LayoutInspector: View {
     @State private var previewCursorScale: Double?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Layout").font(.headline)
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            PBSectionHeader("Layout")
 
             modeRow
             if case .pip = layout.mode {
@@ -41,7 +42,7 @@ struct LayoutInspector: View {
                 paddingRow
             }
 
-            Divider().padding(.vertical, 2)
+            PBDivider().padding(.vertical, 2)
             cursorSection
         }
     }
@@ -89,7 +90,7 @@ struct LayoutInspector: View {
 
     private var positionGrid: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Cam Position").font(.caption).foregroundStyle(.secondary)
+            Text("Cam Position").font(Theme.Font.caption).foregroundStyle(Theme.Color.textSecondary)
             VStack(spacing: 4) {
                 ForEach(positionRows, id: \.self) { row in
                     HStack(spacing: 4) {
@@ -121,8 +122,8 @@ struct LayoutInspector: View {
             next.mode = .pip(position: pos, size: size)
             onChange(next)
         } label: {
-            RoundedRectangle(cornerRadius: 3)
-                .fill(isSelected ? Color.accentColor : Color.secondary.opacity(0.18))
+            RoundedRectangle(cornerRadius: Theme.Radius.small)
+                .fill(isSelected ? Theme.Color.accent : Theme.Color.bgElevated)
                 .frame(width: 28, height: 18)
         }
         .buttonStyle(.plain)
@@ -179,8 +180,8 @@ struct LayoutInspector: View {
                 Text("Screen Share").font(.caption)
                 Spacer()
                 Text(String(format: "%.0f%%", fraction * 100))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.monoTimecode)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
             Slider(
                 value: Binding<Double>(
@@ -364,7 +365,7 @@ struct LayoutInspector: View {
     @ViewBuilder
     private var cursorSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Cursor").font(.caption.bold()).foregroundStyle(.secondary)
+            Text("Cursor").font(Theme.Font.cardTitle).foregroundStyle(Theme.Color.textSecondary)
             cursorSizeSlider
         }
     }
@@ -377,8 +378,8 @@ struct LayoutInspector: View {
                 Text("Size").font(.caption)
                 Spacer()
                 Text(String(format: "%.2f×", liveValue))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.monoTimecode)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
             Slider(
                 value: Binding<Double>(
@@ -409,8 +410,8 @@ struct LayoutInspector: View {
                 Text("Padding").font(.caption)
                 Spacer()
                 Text("\(Int(layout.padding)) px")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.monoTimecode)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
             Slider(
                 value: Binding<Double>(

@@ -1,5 +1,6 @@
 import AVFoundation
 import PixelbayCore
+import PixelbayDesignSystem
 import PixelbayEditor
 import PixelbayInputCapture
 import SwiftUI
@@ -62,16 +63,16 @@ struct EffectsInspector: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Effects").font(.headline)
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            PBSectionHeader("Effects")
             generateClicksButton
             generateGesturesButton
             addZoomButton
             statusRow
-            Divider()
+            PBDivider()
             keyframeList
             if let keyframe = selectedKeyframe {
-                Divider()
+                PBDivider()
                 keyframeEditors(keyframe)
             }
         }
@@ -90,16 +91,16 @@ struct EffectsInspector: View {
     private var statusRow: some View {
         if let lastError {
             Text(lastError)
-                .font(.caption)
-                .foregroundStyle(.red)
+                .font(Theme.Font.caption)
+                .foregroundStyle(Theme.Color.danger)
         } else if let lastSuccess {
             Text(lastSuccess)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.caption)
+                .foregroundStyle(Theme.Color.success)
         } else if let disabledReason {
             Text(disabledReason)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.caption)
+                .foregroundStyle(Theme.Color.textSecondary)
         }
     }
 
@@ -166,13 +167,13 @@ struct EffectsInspector: View {
     private var keyframeList: some View {
         if sortedKeyframes.isEmpty {
             Text("No effects yet.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Color.textSecondary)
         } else {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Keyframes")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.cardTitle)
+                    .foregroundStyle(Theme.Color.textSecondary)
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(sortedKeyframes) { keyframe in
@@ -187,16 +188,17 @@ struct EffectsInspector: View {
 
     private func keyframeRow(_ keyframe: EffectKeyframe) -> some View {
         let isSelected = keyframe.id == selectedKeyframeID
-        return HStack(spacing: 8) {
+        return HStack(spacing: Theme.Spacing.sm) {
             Image(systemName: iconName(for: keyframe.kind))
-                .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(HierarchicalShapeStyle.secondary))
+                .foregroundStyle(isSelected ? Theme.Color.accent : Theme.Color.textSecondary)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 0) {
                 Text(label(for: keyframe.kind))
-                    .font(.system(.caption, design: .default))
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textPrimary)
                 Text(formatTime(keyframe.timelineRange.start.seconds))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
             Spacer()
             Button {
@@ -206,13 +208,13 @@ struct EffectsInspector: View {
                 Image(systemName: "trash")
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Theme.Color.textTertiary)
             .help("Remove effect")
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
-        .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 4))
+        .padding(.horizontal, Theme.Spacing.sm)
+        .padding(.vertical, Theme.Spacing.xs)
+        .background(isSelected ? Theme.Color.accent.opacity(0.18) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: Theme.Radius.small))
         .contentShape(Rectangle())
         .onTapGesture {
             selectedKeyframeID = keyframe.id
@@ -221,10 +223,10 @@ struct EffectsInspector: View {
     }
 
     private func keyframeEditors(_ keyframe: EffectKeyframe) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             Text("Selected effect")
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.cardTitle)
+                .foregroundStyle(Theme.Color.textSecondary)
             startStepper(keyframe)
             durationStepper(keyframe)
             if keyframe.kind == .zoom {
@@ -239,8 +241,8 @@ struct EffectsInspector: View {
             Text("Start")
             Spacer()
             Text(String(format: "%.2fs", value))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.monoTimecode)
+                .foregroundStyle(Theme.Color.textSecondary)
             Stepper("", value: Binding<Double>(
                 get: { value },
                 set: { newValue in commitStart(keyframe: keyframe, newStart: max(0, newValue)) }
@@ -255,8 +257,8 @@ struct EffectsInspector: View {
             Text("Duration")
             Spacer()
             Text(String(format: "%.2fs", value))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.monoTimecode)
+                .foregroundStyle(Theme.Color.textSecondary)
             Stepper("", value: Binding<Double>(
                 get: { value },
                 set: { newValue in commitDuration(keyframe: keyframe, newDuration: max(0.05, newValue)) }
