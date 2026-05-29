@@ -1,5 +1,6 @@
 #if canImport(AppKit) && canImport(SwiftUI)
 import AppKit
+import ImageIO
 import OSLog
 import PixelbayCore
 import PixelbayDesignSystem
@@ -225,6 +226,7 @@ public final class TimelineNSView: NSView {
     /// calls to short-circuit no-op rebuilds. nil = first call (always rebuild).
     private var lastInputs: InputSnapshot?
     private let waveformLoader = WaveformLoader()
+    private let thumbnailLoader = ThumbnailLoader()
 
     private struct InputSnapshot: Equatable {
         let bundleURL: URL?
@@ -497,6 +499,8 @@ public final class TimelineNSView: NSView {
             layer.addSublayer(clipLayer)
             if isAudioKind(track.kind) {
                 addWaveformLayer(forClip: clip, clipFrame: clip.frame, kind: track.kind)
+            } else if isVideoKind(track.kind) {
+                addThumbnailStrip(forClip: clip, clipFrame: clip.frame, kind: track.kind)
             }
         }
     }
@@ -544,6 +548,8 @@ public final class TimelineNSView: NSView {
             layer.addSublayer(clipLayer)
             if isAudioKind(primary.kind) {
                 addWaveformLayer(forClip: clip, clipFrame: clip.frame, kind: primary.kind)
+            } else if isVideoKind(primary.kind) {
+                addThumbnailStrip(forClip: clip, clipFrame: clip.frame, kind: primary.kind)
             }
         }
     }
@@ -629,6 +635,85 @@ public final class TimelineNSView: NSView {
         case .microphone, .systemAudio, .voiceover: return true
         case .screen, .webcam, .overlay, .effects: return false
         }
+    }
+
+    /// Video kinds that get a thumbnail strip (mirrors `isAudioKind` for the
+    /// waveform path). `.effects` is a keyframe lane, not a video source.
+    private func isVideoKind(_ kind: TrackKind) -> Bool {
+        switch kind {
+        case .screen, .webcam, .overlay: return true
+        case .microphone, .systemAudio, .voiceover, .effects: return false
+        }
+    }
+
+    /// Adds a `ThumbnailLayer` over a video clip and fills it with frames
+    /// sampled across the clip's source range. Density is adaptive: one tile
+    /// per `max(80, clipHeight * 16/9)` px of clip width (recomputed on every
+    /// layout rebuild, so zoom changes re-tile). Short clips get one centred
+    /// tile. Each tile loads async via `ThumbnailLoader` and is dropped in as
+    /// it resolves; the disk + memory caches make re-tiling on zoom cheap.
+    private func addThumbnailStrip(forClip clip: ClipLayout, clipFrame: CGRect, kind: TrackKind) {
+        guard let project, let bundleURL else { return }
+        guard let modelClip = project.tracks.flatMap(\.clips).first(where: { $0.id == clip.id }) else { return }
+        guard let asset = project.assets.first(where: { $0.id == modelClip.assetID }) else { return }
+        let assetURL = bundleURL.appendingPathComponent(asset.relativePath)
+
+        let inset: CGFloat = 4
+        let stripFrame = CGRect(
+            x: clipFrame.minX + inset,
+            y: clipFrame.minY + inset,
+            width: max(0, clipFrame.width - inset * 2),
+            height: max(0, clipFrame.height - inset * 2)
+        )
+        guard stripFrame.width > 0, stripFrame.height > 0 else { return }
+
+        let strip = ThumbnailLayer()
+        strip.frame = stripFrame
+        strip.contentsScale = window?.backingScaleFactor ?? 2
+        layer?.addSublayer(strip)
+
+        // Adaptive tile width: one frame per ~16:9 slot, min 80pt.
+        let tileWidth = max(80, stripFrame.height * (16.0 / 9.0))
+        let tileCount = max(1, Int((stripFrame.width / tileWidth).rounded(.down)))
+        let actualTileWidth = stripFrame.width / CGFloat(tileCount)
+
+        let sourceStart = seconds(modelClip.sourceRange.start)
+        let sourceDuration = seconds(modelClip.sourceRange.duration)
+        let loader = thumbnailLoader
+        let targetSize = CGSize(width: actualTileWidth, height: stripFrame.height)
+
+        for i in 0..<tileCount {
+            // Sample at the centre of each tile's time span.
+            let fraction = (Double(i) + 0.5) / Double(tileCount)
+            let atSeconds = sourceStart + fraction * sourceDuration
+            // Tile frame is in the strip's own coordinate space (origin 0,0).
+            let tileFrame = CGRect(
+                x: CGFloat(i) * actualTileWidth,
+                y: 0,
+                width: actualTileWidth,
+                height: stripFrame.height
+            )
+            Task { @MainActor [weak strip] in
+                do {
+                    let data = try await loader.thumbnail(
+                        forAssetAt: assetURL,
+                        atSeconds: atSeconds,
+                        targetSize: targetSize
+                    )
+                    guard let strip, let cgImage = Self.cgImage(fromPNG: data) else { return }
+                    strip.addTile(cgImage: cgImage, frame: tileFrame)
+                } catch {
+                    // Best-effort: leave the clip's tinted body showing. Logged
+                    // once per failing asset; recording still plays back fine.
+                    log.error("thumbnail load failed url=\(assetURL.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)")
+                }
+            }
+        }
+    }
+
+    private static func cgImage(fromPNG data: Data) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
 
     /// Adds a WaveformLayer above the clip's body and kicks off an async
