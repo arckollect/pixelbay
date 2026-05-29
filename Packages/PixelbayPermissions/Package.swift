@@ -9,9 +9,14 @@ let package = Package(
     products: [
         .library(name: "PixelbayPermissions", targets: ["PixelbayPermissions"])
     ],
-    dependencies: [],
+    dependencies: [
+        .package(path: "../PixelbayDesignSystem")
+    ],
     targets: [
-        .target(name: "PixelbayPermissions"),
+        .target(
+            name: "PixelbayPermissions",
+            dependencies: ["PixelbayDesignSystem"]
+        ),
         .testTarget(
             name: "PixelbayPermissionsTests",
             dependencies: ["PixelbayPermissions"]

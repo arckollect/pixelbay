@@ -12,12 +12,13 @@ let package = Package(
     dependencies: [
         .package(path: "../PixelbayCore"),
         .package(path: "../PixelbayEditor"),
-        .package(path: "../PixelbayPlayback")
+        .package(path: "../PixelbayPlayback"),
+        .package(path: "../PixelbayDesignSystem")
     ],
     targets: [
         .target(
             name: "PixelbayTimelineUI",
-            dependencies: ["PixelbayCore", "PixelbayEditor", "PixelbayPlayback"]
+            dependencies: ["PixelbayCore", "PixelbayEditor", "PixelbayPlayback", "PixelbayDesignSystem"]
         ),
         .testTarget(
             name: "PixelbayTimelineUITests",

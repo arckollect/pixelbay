@@ -18,6 +18,7 @@
 		E4A57C002FB0000000AD0E16 /* PixelbayInputCapture in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57C022FB0000000AD0E16 /* PixelbayInputCapture */; };
 		E4A57C102FB0000000AD0E16 /* PixelbayEditor in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57C122FB0000000AD0E16 /* PixelbayEditor */; };
 		E4A57C202FB0000000AD0E16 /* PixelbayTimelineUI in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57C222FB0000000AD0E16 /* PixelbayTimelineUI */; };
+		E4A57D122FD0000000AD0E16 /* PixelbayDesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = E4A57D112FD0000000AD0E16 /* PixelbayDesignSystem */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -60,6 +61,7 @@
 				E4A57C002FB0000000AD0E16 /* PixelbayInputCapture in Frameworks */,
 				E4A57C102FB0000000AD0E16 /* PixelbayEditor in Frameworks */,
 				E4A57C202FB0000000AD0E16 /* PixelbayTimelineUI in Frameworks */,
+				E4A57D122FD0000000AD0E16 /* PixelbayDesignSystem in Frameworks */,
 				E4A57AD02FA5800100AD0E16 /* Sparkle in Frameworks */,
 				E4A57AD32FA5800200AD0E16 /* KeyboardShortcuts in Frameworks */,
 			);
@@ -114,6 +116,7 @@
 				E4A57C022FB0000000AD0E16 /* PixelbayInputCapture */,
 				E4A57C122FB0000000AD0E16 /* PixelbayEditor */,
 				E4A57C222FB0000000AD0E16 /* PixelbayTimelineUI */,
+				E4A57D112FD0000000AD0E16 /* PixelbayDesignSystem */,
 				E4A57AD22FA5800100AD0E16 /* Sparkle */,
 				E4A57AD52FA5800200AD0E16 /* KeyboardShortcuts */,
 			);
@@ -155,6 +158,7 @@
 				E4A57C012FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayInputCapture" */,
 				E4A57C112FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayEditor" */,
 				E4A57C212FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayTimelineUI" */,
+				E4A57D102FD0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayDesignSystem" */,
 				E4A57AD12FA5800100AD0E16 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				E4A57AD42FA5800200AD0E16 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */,
 			);
@@ -459,6 +463,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../Packages/PixelbayEditor;
 		};
+		E4A57D102FD0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayDesignSystem" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/PixelbayDesignSystem;
+		};
 		E4A57C212FB0000000AD0E16 /* XCLocalSwiftPackageReference "../Packages/PixelbayTimelineUI" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../Packages/PixelbayTimelineUI;
@@ -530,6 +538,10 @@
 		E4A57C222FB0000000AD0E16 /* PixelbayTimelineUI */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = PixelbayTimelineUI;
+		};
+		E4A57D112FD0000000AD0E16 /* PixelbayDesignSystem */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PixelbayDesignSystem;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -24,6 +24,15 @@ private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "AppDe
 @MainActor
 final class PixelbayAppDelegate: NSObject, NSApplicationDelegate {
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Lock the whole app to dark regardless of the system appearance.
+        // SwiftUI scenes carry `.preferredColorScheme(.dark)`, but AppKit
+        // surfaces — every NSWindow chrome, the menubar status item, NSAlert
+        // sheets, CALayer-backed timeline — honour NSApp.appearance instead.
+        // Setting it here keeps them dark even when macOS is in light mode.
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let dirty: [(NSWindow, ProjectCloseInterceptor)] = NSApp.windows.compactMap { window in
             guard let interceptor = window.delegate as? ProjectCloseInterceptor,

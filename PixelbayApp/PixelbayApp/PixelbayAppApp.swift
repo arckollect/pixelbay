@@ -55,6 +55,7 @@ struct PixelbayAppApp: App {
         // windows. `Window` (vs WindowGroup) enforces single-instance.
         Window("Pixelbay", id: WindowID.launcher) {
             ContentView()
+                .preferredColorScheme(.dark)
                 .environment(recording)
                 .environment(scenesAppendTarget)
                 .onAppear {
@@ -97,6 +98,7 @@ struct PixelbayAppApp: App {
         // restores these on relaunch via the encoded ProjectWindowID.
         WindowGroup("Project", id: WindowID.project, for: ProjectWindowID.self) { $bundleID in
             ProjectWindow(bundleID: bundleID)
+                .preferredColorScheme(.dark)
                 .environment(scenesAppendTarget)
         }
         .defaultSize(width: 1200, height: 800)
@@ -109,6 +111,7 @@ struct PixelbayAppApp: App {
         // compact frame sizes.
         Window("Scene Recording", id: WindowID.scenes) {
             ScenesWindowView()
+                .preferredColorScheme(.dark)
                 .environment(recording)
                 .environment(scenesAppendTarget)
         }
