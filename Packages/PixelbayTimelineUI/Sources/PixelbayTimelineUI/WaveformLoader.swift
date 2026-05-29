@@ -126,14 +126,28 @@ public actor WaveformLoader {
         } catch {
             throw LoadError.readerSetupFailed(error.localizedDescription)
         }
-        // Mono Float32, asset's native sample rate. We average L+R below
-        // when the source is multi-channel.
+        // Force a single interleaved Float32 channel. Letting the reader
+        // vend the source's native channel count was the silent-mic bug:
+        // some mic captures (mono CAF whose ASBD reports a layout the
+        // interleave de-mux below mis-strided) decoded to zero usable
+        // samples and produced a blank waveform with reader.status
+        // .completed — indistinguishable from "no audio". Requesting an
+        // explicit mono channel layout makes AVAssetReader downmix to one
+        // channel up front, so the parse is always a flat Float32 run
+        // regardless of the source's channel geometry. System-audio
+        // (stereo) happens to have survived the old path; mic (mono,
+        // device-dependent layout) did not.
+        var monoLayout = AudioChannelLayout()
+        monoLayout.mChannelLayoutTag = kAudioChannelLayoutTag_Mono
+        let layoutData = Data(bytes: &monoLayout, count: MemoryLayout<AudioChannelLayout>.size)
         let outputSettings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatLinearPCM),
             AVLinearPCMIsBigEndianKey: false,
             AVLinearPCMIsFloatKey: true,
             AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsNonInterleaved: false
+            AVLinearPCMIsNonInterleaved: false,
+            AVNumberOfChannelsKey: 1,
+            AVChannelLayoutKey: layoutData
         ]
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: outputSettings)
         output.alwaysCopiesSampleData = false
@@ -198,6 +212,13 @@ public actor WaveformLoader {
         }
         if reader.status == .failed {
             throw LoadError.readingFailed(reader.error?.localizedDescription ?? "unknown")
+        }
+        // Diagnostic: a completed read that yielded zero samples is the
+        // silent-mic signature. With the forced-mono output settings above
+        // this should no longer happen, but log it loudly if it ever does
+        // so a future content-specific regression isn't invisible again.
+        if samples.isEmpty {
+            log.error("waveform read produced 0 samples (status=\(reader.status.rawValue)) for \(asset.url.lastPathComponent, privacy: .public) — track waveform will be blank")
         }
         return samples
     }
