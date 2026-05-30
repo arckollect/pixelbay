@@ -226,8 +226,11 @@ struct PrecaptureView: View {
         .overlay(
             barShape.strokeBorder(Color.white.opacity(0.12), lineWidth: Theme.Stroke.regular)
         )
-        .shadow(color: .black.opacity(0.45), radius: 22, y: 10)
-        .padding(Theme.Spacing.xl)          // transparent margin for the shadow
+        // No drop shadow: any shadow renders as a faded grey backdrop box
+        // around the bar on light desktops, which reads as unwanted chrome.
+        // The white hairline stroke above provides the edge separation the
+        // bar needs — we want only the toolbar visible.
+        .padding(Theme.Spacing.xl)          // transparent margin keeps layout stable
         .fixedSize()                         // window sizes to the bar (contentSize)
         .tint(.white)                        // white menu labels — no orange accent
         .background(WindowAccessor { hostWindow = $0 })   // shared helper (ProjectWindow.swift)

@@ -108,8 +108,11 @@ private struct RecordingHUDView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .glassBar(barShape)
         .overlay(barShape.strokeBorder(Color.white.opacity(0.12), lineWidth: Theme.Stroke.regular))
-        .shadow(color: .black.opacity(0.45), radius: 16, y: 8)
-        .padding(Theme.Spacing.sm)   // transparent margin inside the panel so the shadow isn't clipped
+        // No drop shadow: any shadow renders as a faded grey backdrop box
+        // around the bar on light desktops, which reads as unwanted chrome.
+        // The white hairline stroke above provides all the edge separation
+        // the bar needs — we want only the toolbar visible.
+        .padding(Theme.Spacing.sm)   // transparent margin inside the panel
     }
 
     private func liveBody(startedAt: Date) -> some View {
