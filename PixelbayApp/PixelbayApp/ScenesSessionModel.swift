@@ -5,6 +5,7 @@ import Observation
 import OSLog
 import PixelbayCore
 import PixelbayEditor
+import PixelbayPlayback
 import SwiftUI
 
 private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "ScenesSessionModel")
@@ -361,15 +362,25 @@ final class ScenesSessionModel {
         session.scenes[sceneIndex].takes.append(take)
         session.scenes[sceneIndex].activeTakeIndex = session.scenes[sceneIndex].takes.count - 1
 
-        // Extract first-frame thumbnail off the main actor so the UI hop
-        // back from compact HUD isn't blocked on AVAssetImageGenerator's
-        // synchronous decode. Stamp the resulting relative path back into
-        // the Take and persist.
-        if let relativePath = await extractThumbnail(
-            for: result.screenURL,
+        // Extract the take thumbnail off the main actor so the UI hop back
+        // from compact HUD isn't blocked on AVAssetImageGenerator's decode.
+        // Prefer the *composited* still (screen + webcam PiP, same path as
+        // the preview / merge) so the grid tile matches what the take
+        // actually looks like; fall back to the bare screen frame if the
+        // composite build fails. Stamp the relative path onto the Take.
+        var relativePath = await extractCompositeThumbnail(
+            forSceneAt: sceneIndex,
             sessionID: result.sessionID,
             in: bundle
-        ) {
+        )
+        if relativePath == nil {
+            relativePath = await extractThumbnail(
+                for: result.screenURL,
+                sessionID: result.sessionID,
+                in: bundle
+            )
+        }
+        if let relativePath {
             let lastIdx = session.scenes[sceneIndex].takes.count - 1
             if session.scenes[sceneIndex].takes.indices.contains(lastIdx) {
                 session.scenes[sceneIndex].takes[lastIdx].thumbnailRelativePath = relativePath
@@ -441,6 +452,61 @@ final class ScenesSessionModel {
             log.error("thumbnail extract failed sessionID=\(sessionID, privacy: .public) error=\(String(describing: error), privacy: .public)")
             return nil
         }
+    }
+
+    /// Writes a *composited* thumbnail (screen + webcam PiP) for the scene's
+    /// active take, rendered from the same `PreviewComposition` the preview
+    /// and merge use — so the still matches the take instead of showing the
+    /// bare screen. Returns the relative path, or nil to let the caller fall
+    /// back to `extractThumbnail` (e.g. screen-only takes, or a composite
+    /// build failure).
+    private func extractCompositeThumbnail(
+        forSceneAt index: Int,
+        sessionID: String,
+        in bundle: ProjectBundle
+    ) async -> String? {
+        guard let preview = await takePreviewComposition(forSceneAt: index) else { return nil }
+        let relativePath = "media/thumb-\(sessionID).png"
+        let outputURL = bundle.url.appendingPathComponent(relativePath)
+        do {
+            try await Self.writeCompositeThumbnail(preview: preview, outputURL: outputURL)
+            return relativePath
+        } catch {
+            log.error("composite thumbnail extract failed sessionID=\(sessionID, privacy: .public) error=\(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
+    private static func writeCompositeThumbnail(
+        preview: PreviewComposition,
+        outputURL: URL
+    ) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            let generator = AVAssetImageGenerator(asset: preview.composition)
+            // The video composition carries the webcam-overlay compositor and
+            // the render size (already orientation-correct), so we don't set
+            // appliesPreferredTrackTransform here.
+            generator.videoComposition = preview.videoComposition
+            generator.maximumSize = CGSize(width: 480, height: 270)
+            // Grab a frame a beat into the take rather than at t=0: the
+            // camera's first frame is often a black sensor warm-up frame, and
+            // a custom video compositor's very first request can land before
+            // the webcam track is primed — both leave the PiP missing. ~0.3s
+            // in, both layers have settled. Clamp to the take's own length so
+            // a very short take still resolves a frame.
+            let half = CMTimeMultiplyByRatio(preview.duration, multiplier: 1, divisor: 2)
+            let target = CMTimeMinimum(CMTime(seconds: 0.3, preferredTimescale: 600), half)
+            generator.requestedTimeToleranceBefore = CMTime(seconds: 0.3, preferredTimescale: 600)
+            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.3, preferredTimescale: 600)
+            let (cgImage, _) = try await generator.image(at: target)
+            let bitmap = NSBitmapImageRep(cgImage: cgImage)
+            guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
+                throw NSError(domain: "Pixelbay.Scenes", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "NSBitmapImageRep refused PNG encoding"
+                ])
+            }
+            try pngData.write(to: outputURL, options: .atomic)
+        }.value
     }
 
     private static func writeFirstFrameThumbnail(
@@ -839,6 +905,82 @@ final class ScenesSessionModel {
             } catch {
                 log.error("debounced persist failed: \(String(describing: error), privacy: .public)")
             }
+        }
+    }
+
+    // MARK: - Take preview
+
+    /// Builds a composited preview for a scene's active take: the screen with
+    /// the webcam as a PiP overlay (plus the take's audio), mirroring the
+    /// editor preview and the eventual merge. Returns `nil` when the scene has
+    /// no active take or the on-disk project/assets can't be resolved — the
+    /// caller falls back to the bare screen recording.
+    ///
+    /// We synthesise a single-take `Project` (all assets retained so clip
+    /// lookups resolve; only this take's clips placed at t=0) and hand it to
+    /// `PreviewCompositionBuilder`, so the webcam overlay, output sizing and
+    /// tail-alignment all match `ScenesMerger` instead of drifting in a
+    /// preview-only code path.
+    func takePreviewComposition(forSceneAt index: Int) async -> PreviewComposition? {
+        guard session.scenes.indices.contains(index),
+              let take = session.scenes[index].activeTake,
+              !take.assetIDs.isEmpty
+        else { return nil }
+
+        do {
+            var project = try store.loadProject(from: bundle)
+            let assetByID = Dictionary(
+                uniqueKeysWithValues: project.assets.map { ($0.id, $0) }
+            )
+            let takeAssets = take.assetIDs.compactMap { assetByID[$0] }
+            guard !takeAssets.isEmpty else { return nil }
+
+            // Tail-align cam / mic against the screen's wall-clock length,
+            // exactly as ScenesMerger does, so the warm-up frames the AV
+            // pipeline lands at the head are skipped over.
+            let screenAsset = takeAssets.first { ScenesMerger.trackKind(for: $0.kind) == .screen }
+            let sceneDurationSeconds = screenAsset?.nativeDuration.seconds
+                ?? takeAssets.map { $0.nativeDuration.seconds }.max()
+                ?? 0
+
+            // Rebuild tracks for this one take, every clip anchored at t=0.
+            // Keep `project.assets` intact so the builder can resolve them.
+            project.scenesSession = nil
+            project.tracks = []
+            var trackIndexByKind: [TrackKind: Int] = [:]
+            for asset in takeAssets {
+                guard let kind = ScenesMerger.trackKind(for: asset.kind) else { continue }
+                let trackIdx: Int
+                if let existing = trackIndexByKind[kind] {
+                    trackIdx = existing
+                } else {
+                    project.tracks.append(
+                        Track(kind: kind, name: ScenesMerger.defaultTrackName(for: kind))
+                    )
+                    trackIdx = project.tracks.count - 1
+                    trackIndexByKind[kind] = trackIdx
+                }
+                let assetSeconds = asset.nativeDuration.seconds
+                let clampedSeconds = min(assetSeconds, sceneDurationSeconds)
+                let sourceStartSeconds = max(0, assetSeconds - clampedSeconds)
+                let clip = Clip(
+                    assetID: asset.id,
+                    sourceRange: TimeRange(
+                        start: .seconds(sourceStartSeconds),
+                        duration: .seconds(clampedSeconds)
+                    ),
+                    timelineRange: TimeRange(
+                        start: .seconds(0),
+                        duration: .seconds(clampedSeconds)
+                    )
+                )
+                project.tracks[trackIdx].insertClipMaintainingOrder(clip)
+            }
+
+            return try await PreviewCompositionBuilder.build(project: project, bundleURL: bundle.url)
+        } catch {
+            log.error("take preview composition build failed: \(String(describing: error), privacy: .public)")
+            return nil
         }
     }
 

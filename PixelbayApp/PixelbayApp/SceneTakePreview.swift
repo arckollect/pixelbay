@@ -1,5 +1,6 @@
 import AVFoundation
 import PixelbayDesignSystem
+import PixelbayPlayback
 import SwiftUI
 
 // Lightweight take-preview surface for the Scene Recording grid. Plays a
@@ -54,36 +55,58 @@ struct ScenePreviewPlayerView: NSViewRepresentable {
 /// Modal preview of a single recorded take. Auto-plays on open; tap the video
 /// (or the transport button) to toggle play/pause; loops back to the start when
 /// it reaches the end.
+///
+/// Plays the *composited* take — screen with the webcam PiP overlaid — by
+/// asking the model to build a single-take `PreviewComposition` (same path as
+/// the editor preview / merge). If that build fails it falls back to the bare
+/// screen recording so the preview still shows something. The composition
+/// build is async, so the player shows a brief spinner until the item is ready.
 struct TakePreviewSheet: View {
-    let url: URL
+    let model: ScenesSessionModel
+    let sceneIndex: Int
     let title: String
     let takeLabel: String
+    /// Bare `screen-{sessionID}.mov` used when the composited build returns
+    /// nil. `nil` when even the screen recording is missing from the bundle.
+    let fallbackScreenURL: URL?
+
+    private enum LoadState: Equatable { case loading, ready, unavailable }
 
     @Environment(\.dismiss) private var dismiss
     @State private var player = AVPlayer()
     @State private var isPlaying = true
+    @State private var loadState: LoadState = .loading
 
     private var endPublisher: NotificationCenter.Publisher {
         NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            ScenePreviewPlayerView(player: player)
-                .frame(width: 760, height: 428)
-                .background(Color.black)
-                .contentShape(Rectangle())
-                .onTapGesture { togglePlay() }
-            transport
+        Group {
+            if loadState == .unavailable {
+                missingPreview
+            } else {
+                VStack(spacing: 0) {
+                    header
+                    ScenePreviewPlayerView(player: player)
+                        .frame(width: 760, height: 428)
+                        .background(Color.black)
+                        .overlay {
+                            if loadState == .loading {
+                                ProgressView()
+                                    .controlSize(.large)
+                                    .tint(Theme.Color.textSecondary)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture { togglePlay() }
+                    transport
+                }
+                .frame(width: 760)
+            }
         }
-        .frame(width: 760)
         .background(Theme.Color.bgDeep)
-        .onAppear {
-            player.replaceCurrentItem(with: AVPlayerItem(url: url))
-            player.play()
-            isPlaying = true
-        }
+        .task { await loadTake() }
         .onDisappear {
             player.pause()
             player.replaceCurrentItem(with: nil)
@@ -95,6 +118,53 @@ struct TakePreviewSheet: View {
             player.play()
             isPlaying = true
         }
+    }
+
+    /// Builds the composited item (screen + webcam PiP) and starts playback.
+    /// Falls back to the bare screen recording, then to an "unavailable" state.
+    private func loadTake() async {
+        guard loadState == .loading else { return }
+
+        let item: AVPlayerItem
+        if let preview = await model.takePreviewComposition(forSceneAt: sceneIndex) {
+            let composited = AVPlayerItem(asset: preview.composition)
+            if let videoComposition = preview.videoComposition {
+                composited.videoComposition = videoComposition
+            }
+            if let audioMix = preview.audioMix {
+                composited.audioMix = audioMix
+            }
+            item = composited
+        } else if let fallbackScreenURL {
+            item = AVPlayerItem(url: fallbackScreenURL)
+        } else {
+            loadState = .unavailable
+            return
+        }
+
+        player.replaceCurrentItem(with: item)
+        player.play()
+        isPlaying = true
+        loadState = .ready
+    }
+
+    private var missingPreview: some View {
+        VStack(spacing: Theme.Spacing.md) {
+            Image(systemName: "film.stack")
+                .font(.system(size: 28))
+                .foregroundStyle(Theme.Color.textTertiary)
+            Text("Preview unavailable")
+                .font(Theme.Font.sectionTitle)
+                .foregroundStyle(Theme.Color.textPrimary)
+            Text("This take's screen recording couldn't be found in the bundle.")
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Color.textSecondary)
+                .multilineTextAlignment(.center)
+            Button("Done") { dismiss() }
+                .buttonStyle(.pbSecondary)
+        }
+        .padding(Theme.Spacing.xl)
+        .frame(width: 360)
     }
 
     private var header: some View {

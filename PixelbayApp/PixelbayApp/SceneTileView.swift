@@ -4,7 +4,7 @@ import PixelbayCore
 import PixelbayDesignSystem
 import SwiftUI
 
-// One scene as a 3:2 gallery tile in the Scene Recording grid (replaces the
+// One scene as a 16:9 gallery tile in the Scene Recording grid (replaces the
 // old wide SceneRowView). Thumbnail-forward: the tile *is* the thumbnail once a
 // take exists. Meta and actions stay out of the way until hover, matching the
 // Figma skeleton's clean grid.
@@ -38,58 +38,73 @@ struct SceneTileView: View {
     private var hasTake: Bool { scene.activeTake != nil }
 
     var body: some View {
-        ZStack {
-            base
-            if hasTake {
-                thumbnailLayer
-                bottomScrim
-            } else {
-                emptyContent
+        // A `Color.clear` spacer owns the 16:9 footprint; the real content
+        // rides in an `.overlay` so it never feeds back into sizing. Without
+        // this, the recorded-state `thumbnailLayer` (a `scaledToFill` image)
+        // overflows the aspect-ratio box and inflates the tile's height —
+        // LazyVGrid then stretches that whole row, leaving empty neighbours
+        // floating in an oversized cell (the uneven grid gaps).
+        //
+        // 16:9 matches what the screen capture records (1920×1080), so a
+        // recorded take fills the tile edge-to-edge instead of being cropped
+        // top/bottom inside a taller 3:2 box.
+        Color.clear
+            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .overlay {
+                ZStack {
+                    base
+                    if hasTake {
+                        thumbnailLayer
+                        bottomScrim
+                    } else {
+                        emptyContent
+                    }
+                    overlayChrome
+                }
             }
-            overlayChrome
-        }
-        .aspectRatio(3.0 / 2.0, contentMode: .fit)
-        .frame(maxWidth: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
-                .stroke(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
-        .onTapGesture {
-            // Empty tile: tap anywhere to start the first take. Recorded tiles
-            // are re-recorded from the hover button to avoid accidental retakes.
-            if !hasTake, !isRecording { Task { await model.recordScene(at: sceneIndex) } }
-        }
-        .onHover { isHovering = $0 }
-        .animation(.easeInOut(duration: 0.12), value: isHovering)
-        .onAppear { draftDescription = scene.description }
-        .onChange(of: scene.description) { _, newValue in
-            if newValue != draftDescription { draftDescription = newValue }
-        }
-        .alert("Delete this scene?", isPresented: $confirmDeletePresented) {
-            Button("Delete", role: .destructive) { model.deleteScene(at: sceneIndex) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            if scene.takes.isEmpty {
-                Text("This scene has no recordings yet.")
-            } else {
-                Text("\(scene.takes.count) take\(scene.takes.count == 1 ? "" : "s") will be removed from the session. Underlying media files remain in the bundle until you run Clean up unused takes.")
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
+                    .stroke(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
+            .onTapGesture {
+                // Empty tile: tap anywhere to start the first take. Recorded tiles
+                // are re-recorded from the hover button to avoid accidental retakes.
+                if !hasTake, !isRecording { Task { await model.recordScene(at: sceneIndex) } }
             }
-        }
-        .alert("Reshoot Scene \(sceneIndex + 1)?", isPresented: $confirmReshootPresented) {
-            Button("Reshoot") { Task { await model.recordScene(at: sceneIndex) } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This starts a new recording and adds another take. Your current take stays available in the take picker.")
-        }
-        .sheet(isPresented: $previewPresented) {
-            if let url = activeTakeScreenURL {
-                TakePreviewSheet(url: url, title: "Scene \(sceneIndex + 1)", takeLabel: takeLabel)
-            } else {
-                missingPreview
+            .onHover { isHovering = $0 }
+            .animation(.easeInOut(duration: 0.12), value: isHovering)
+            .onAppear { draftDescription = scene.description }
+            .onChange(of: scene.description) { _, newValue in
+                if newValue != draftDescription { draftDescription = newValue }
             }
-        }
+            .alert("Delete this scene?", isPresented: $confirmDeletePresented) {
+                Button("Delete", role: .destructive) { model.deleteScene(at: sceneIndex) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                if scene.takes.isEmpty {
+                    Text("This scene has no recordings yet.")
+                } else {
+                    Text("\(scene.takes.count) take\(scene.takes.count == 1 ? "" : "s") will be removed from the session. Underlying media files remain in the bundle until you run Clean up unused takes.")
+                }
+            }
+            .alert("Reshoot Scene \(sceneIndex + 1)?", isPresented: $confirmReshootPresented) {
+                Button("Reshoot") { Task { await model.recordScene(at: sceneIndex) } }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This starts a new recording and adds another take. Your current take stays available in the take picker.")
+            }
+            .sheet(isPresented: $previewPresented) {
+                TakePreviewSheet(
+                    model: model,
+                    sceneIndex: sceneIndex,
+                    title: "Scene \(sceneIndex + 1)",
+                    takeLabel: takeLabel,
+                    fallbackScreenURL: activeTakeScreenURL
+                )
+            }
     }
 
     /// `media/screen-{sessionID}.mov` for the active take, when the file is on
@@ -104,26 +119,6 @@ struct SceneTileView: View {
     private var takeLabel: String {
         let index = (scene.activeTakeIndex ?? 0) + 1
         return "Take \(index) of \(scene.takes.count)"
-    }
-
-    private var missingPreview: some View {
-        VStack(spacing: Theme.Spacing.md) {
-            Image(systemName: "film.stack")
-                .font(.system(size: 28))
-                .foregroundStyle(Theme.Color.textTertiary)
-            Text("Preview unavailable")
-                .font(Theme.Font.sectionTitle)
-                .foregroundStyle(Theme.Color.textPrimary)
-            Text("This take's screen recording couldn't be found in the bundle.")
-                .font(Theme.Font.body)
-                .foregroundStyle(Theme.Color.textSecondary)
-                .multilineTextAlignment(.center)
-            Button("Done") { previewPresented = false }
-                .buttonStyle(.pbSecondary)
-        }
-        .padding(Theme.Spacing.xl)
-        .frame(width: 360)
-        .background(Theme.Color.bgDeep)
     }
 
     // MARK: - Base / inset look
@@ -400,7 +395,7 @@ struct SceneTileView: View {
 // MARK: - Ghost "add scene" tile
 
 /// Trailing grid cell: a dashed-outline placeholder that adds another scene.
-/// Shares the 3:2 footprint of a real tile so the grid stays even.
+/// Shares the 16:9 footprint of a real tile so the grid stays even.
 struct AddSceneTile: View {
     let action: () -> Void
     @State private var hovering = false
@@ -423,7 +418,7 @@ struct AddSceneTile: View {
                 }
                 .foregroundStyle(hovering ? Theme.Color.textSecondary : Theme.Color.textTertiary)
             }
-            .aspectRatio(3.0 / 2.0, contentMode: .fit)
+            .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .frame(maxWidth: .infinity)
             .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
         }

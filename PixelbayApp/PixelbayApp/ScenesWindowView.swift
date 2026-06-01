@@ -240,7 +240,7 @@ struct ScenesWindowView: View {
                                 // Lightweight drag preview.
                                 RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
                                     .fill(Theme.Color.bgElevated)
-                                    .frame(width: 160, height: 107)
+                                    .frame(width: 160, height: 90)
                             }
                             .dropDestination(for: String.self) { items, _ in
                                 guard let first = items.first, let from = Int(first), from != idx
@@ -253,8 +253,11 @@ struct ScenesWindowView: View {
                     // adding another scene.
                     AddSceneTile { model.addScene() }
                 }
+                // Even inset all round — 16:9 tiles are shorter than the old
+                // 3:2 ones, so match the vertical padding to the horizontal
+                // (was lg) to keep balanced gutters around the grid.
                 .padding(.horizontal, Theme.Spacing.xl)
-                .padding(.vertical, Theme.Spacing.lg)
+                .padding(.vertical, Theme.Spacing.xl)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
