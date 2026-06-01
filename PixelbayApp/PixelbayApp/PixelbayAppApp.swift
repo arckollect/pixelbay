@@ -121,7 +121,7 @@ struct PixelbayAppApp: App {
                 .environment(recording)
                 .environment(scenesAppendTarget)
         }
-        .defaultSize(width: 760, height: 720)
+        .defaultSize(width: 1200, height: 800)
         .windowResizability(.contentSize)
     }
 

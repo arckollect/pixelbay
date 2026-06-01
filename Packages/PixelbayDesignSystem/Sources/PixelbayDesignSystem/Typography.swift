@@ -9,6 +9,8 @@ extension Theme {
     public enum Font {
         /// 34pt bold — onboarding/welcome hero.
         public static let displayTitle = SwiftUI.Font.system(size: 34, weight: .bold, design: .default)
+        /// 34pt heavy — hero titles that need extra presence (Scene Recording header).
+        public static let displayTitleHeavy = SwiftUI.Font.system(size: 34, weight: .heavy, design: .default)
         /// 24pt bold — page/window titles (Scenes header, New Recording).
         public static let pageTitle = SwiftUI.Font.system(size: 24, weight: .bold, design: .default)
         /// 17pt semibold — section titles inside panes.

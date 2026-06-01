@@ -28,6 +28,7 @@ struct ScenesWindowView: View {
     @State private var catalog = ScenesSourceCatalog()
     @State private var mergeConfirmationPresented: Bool = false
     @State private var mergeSkippedSceneCount: Int = 0
+    @State private var showSourcesPopover: Bool = false
     @State private var permissions = PermissionViewModel(
         coordinator: PermissionCoordinator(probe: .live)
     )
@@ -43,10 +44,10 @@ struct ScenesWindowView: View {
             switch modelState {
             case .loading:
                 loadingView
-                    .frame(minWidth: 760, minHeight: 720)
+                    .frame(minWidth: 760, minHeight: 640)
             case .failed(let message):
                 failureView(message)
-                    .frame(minWidth: 760, minHeight: 720)
+                    .frame(minWidth: 760, minHeight: 640)
             case .ready(let model):
                 readyView(model: model)
             }
@@ -54,6 +55,43 @@ struct ScenesWindowView: View {
         .task {
             await loadModel()
             await catalog.reload()
+            // Seed the global default sources up-front. Previously this lived
+            // in DefaultsBlock.onAppear, but that block now only renders inside
+            // the Sources popover — so without seeding here a fresh window has
+            // no default display and the first Record silently fails with
+            // "No display selected."
+            seedDefaultsIfMissing()
+        }
+    }
+
+    /// Picks sensible default sources (primary display, etc.) from the freshly
+    /// reloaded catalog when the session has none yet. Mirrors DefaultsBlock's
+    /// own seeding so the global popover and the window agree.
+    private func seedDefaultsIfMissing() {
+        guard case .ready(let model) = modelState else { return }
+        let seeded = catalog.seedingDefaultsIfMissing(
+            from: (
+                displayID: model.session.defaults.displayID,
+                cameraUniqueID: model.session.defaults.cameraUniqueID,
+                micUniqueID: model.session.defaults.micUniqueID
+            )
+        )
+        var defaults = model.session.defaults
+        var changed = false
+        if defaults.displayID != seeded.displayID {
+            defaults.displayID = seeded.displayID
+            changed = true
+        }
+        if defaults.cameraUniqueID != seeded.cameraUniqueID {
+            defaults.cameraUniqueID = seeded.cameraUniqueID
+            changed = true
+        }
+        if defaults.micUniqueID != seeded.micUniqueID {
+            defaults.micUniqueID = seeded.micUniqueID
+            changed = true
+        }
+        if changed {
+            model.updateDefaults(defaults)
         }
     }
 
@@ -72,14 +110,11 @@ struct ScenesWindowView: View {
     private func fullBody(model: ScenesSessionModel) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            defaultsCard(model: model)
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
             historySection(model: model)
-            sceneList(model: model)
+            sceneGrid(model: model)
             bottomBar(model: model)
         }
-        .frame(minWidth: 760, minHeight: 720)
+        .frame(minWidth: 760, minHeight: 640)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.Color.bgBase)
         .alert(
@@ -108,7 +143,7 @@ struct ScenesWindowView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             if model.appendTarget != nil {
-                Text("Empty scenes will be skipped. The new scenes will append to the existing project timeline; this scenes session resets to three fresh rows.")
+                Text("Empty scenes will be skipped. The new scenes will append to the existing project timeline; this scenes session resets to five fresh rows.")
             } else {
                 Text("Empty scenes will be skipped. The merged project will open in a new editor window; this scenes session will be archived for the next one you start.")
             }
@@ -156,47 +191,81 @@ struct ScenesWindowView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            Text("Scene Recording")
-                .font(Theme.Font.pageTitle)
-                .foregroundStyle(Theme.Color.textPrimary)
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack(spacing: Theme.Spacing.md) {
+                appMark
+                Text("Scene Recording")
+                    .font(Theme.Font.displayTitleHeavy)
+                    .foregroundStyle(Theme.Color.textPrimary)
+            }
             Text("Record one scene at a time. Re-record to add another take. Merge stitches the active takes into a normal Pixelbay project.")
-                .font(Theme.Font.body)
+                .font(.system(size: 14))
                 .foregroundStyle(Theme.Color.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 20)
-        .padding(.top, 24)
+        .padding(.horizontal, Theme.Spacing.xl)
+        .padding(.top, Theme.Spacing.xl)
         .padding(.bottom, Theme.Spacing.md)
         .background(Theme.Color.bgDeep)
     }
 
-    @ViewBuilder
-    private func defaultsCard(model: ScenesSessionModel) -> some View {
-        DefaultsBlock(model: model, catalog: catalog, permissions: permissions)
-            .tint(Theme.Color.accent)
-            .pbCard(elevated: true)
+    // The app icon doubles as the brand mark in the header (no dedicated logo
+    // imageset ships today). Rounded + hairline border to match the Figma chip.
+    private var appMark: some View {
+        Image(nsImage: NSApp.applicationIconImage)
+            .resizable()
+            .frame(width: 40, height: 40)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                    .stroke(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+            )
     }
 
-    private func sceneList(model: ScenesSessionModel) -> some View {
-        // `List` + `.onMove` for drag-reorder. We strip the default chrome
-        // (background, separators) so each row reads as a card rather than
-        // a system list row.
-        List {
-            ForEach(model.session.scenes.indices, id: \.self) { idx in
-                SceneRowView(model: model, sceneIndex: idx, catalog: catalog)
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
-            }
-            .onMove { indices, destination in
-                guard let source = indices.first else { return }
-                model.moveScene(from: source, to: destination)
+    private func sceneGrid(model: ScenesSessionModel) -> some View {
+        // 3-up gallery that reflows to 2 / 1 columns as the window narrows.
+        // Drag a tile onto another to reorder (replaces the old List.onMove).
+        GeometryReader { geo in
+            let columns = columnCount(for: geo.size.width)
+            let layout = Array(
+                repeating: GridItem(.flexible(), spacing: Theme.Spacing.xl),
+                count: columns
+            )
+            ScrollView {
+                LazyVGrid(columns: layout, spacing: Theme.Spacing.xl) {
+                    ForEach(model.session.scenes.indices, id: \.self) { idx in
+                        SceneTileView(model: model, sceneIndex: idx, catalog: catalog)
+                            .draggable(String(idx)) {
+                                // Lightweight drag preview.
+                                RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
+                                    .fill(Theme.Color.bgElevated)
+                                    .frame(width: 160, height: 107)
+                            }
+                            .dropDestination(for: String.self) { items, _ in
+                                guard let first = items.first, let from = Int(first), from != idx
+                                else { return false }
+                                model.moveScene(from: from, to: from < idx ? idx + 1 : idx)
+                                return true
+                            }
+                    }
+                    // Trailing "ghost" tile — always the last cell, invites
+                    // adding another scene.
+                    AddSceneTile { model.addScene() }
+                }
+                .padding(.horizontal, Theme.Spacing.xl)
+                .padding(.vertical, Theme.Spacing.lg)
             }
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.Color.bgBase)
+    }
+
+    /// Column count chosen by available width: 3-up wide, 2-up medium, 1-up narrow.
+    private func columnCount(for width: CGFloat) -> Int {
+        if width >= 1100 { return 3 }
+        if width >= 740 { return 2 }
+        return 1
     }
 
     private func bottomBar(model: ScenesSessionModel) -> some View {
@@ -207,6 +276,19 @@ struct ScenesWindowView: View {
                 Label("Add Scene", systemImage: "plus")
             }
             .buttonStyle(.pbSecondary)
+
+            Button {
+                showSourcesPopover = true
+            } label: {
+                Label("Sources", systemImage: "slider.horizontal.3")
+            }
+            .buttonStyle(.pbSecondary)
+            .popover(isPresented: $showSourcesPopover, arrowEdge: .bottom) {
+                DefaultsBlock(model: model, catalog: catalog, permissions: permissions)
+                    .tint(Theme.Color.accent)
+                    .padding(Theme.Spacing.lg)
+                    .frame(width: 320)
+            }
 
             Menu {
                 Button("Clean Up Unused Takes") {

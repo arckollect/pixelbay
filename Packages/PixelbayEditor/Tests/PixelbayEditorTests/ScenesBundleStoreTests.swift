@@ -33,7 +33,7 @@ final class ScenesBundleStoreTests: XCTestCase {
         )
 
         XCTAssertFalse(result.didArchivePreviousBundle)
-        XCTAssertEqual(result.session.scenes.count, 3)
+        XCTAssertEqual(result.session.scenes.count, 5)
         for scene in result.session.scenes {
             XCTAssertTrue(scene.takes.isEmpty)
             XCTAssertNil(scene.activeTakeIndex)
@@ -66,7 +66,7 @@ final class ScenesBundleStoreTests: XCTestCase {
             now: now.addingTimeInterval(60)
         )
         XCTAssertFalse(reopened.didArchivePreviousBundle)
-        XCTAssertEqual(reopened.session.scenes.count, 4)
+        XCTAssertEqual(reopened.session.scenes.count, 6)
         XCTAssertEqual(reopened.session.scenes.last?.description, "Outro")
     }
 
@@ -89,7 +89,7 @@ final class ScenesBundleStoreTests: XCTestCase {
             now: archiveStamp
         )
         XCTAssertTrue(result.didArchivePreviousBundle)
-        XCTAssertEqual(result.session.scenes.count, 3)
+        XCTAssertEqual(result.session.scenes.count, 5)
 
         // Archive dir contains exactly one archived bundle with the
         // expected filename.
@@ -117,7 +117,7 @@ final class ScenesBundleStoreTests: XCTestCase {
             now: now
         )
         XCTAssertTrue(result.didArchivePreviousBundle)
-        XCTAssertEqual(result.session.scenes.count, 3)
+        XCTAssertEqual(result.session.scenes.count, 5)
         // Archive received the corrupt bundle.
         let archived = try FileManager.default.contentsOfDirectory(at: archiveDir, includingPropertiesForKeys: nil)
         XCTAssertEqual(archived.count, 1)
@@ -448,8 +448,8 @@ final class ScenesBundleStoreTests: XCTestCase {
         )
         XCTAssertFalse(reopened.didArchivePreviousBundle,
                        "next scenes open must be cold-start, not archive-on-merge")
-        XCTAssertEqual(reopened.session.scenes.count, 3,
-                       "cold-start yields three fresh empty scenes")
+        XCTAssertEqual(reopened.session.scenes.count, 5,
+                       "cold-start yields five fresh empty scenes")
     }
 
     // Builds a minimal valid `.pixelbay` directory at `url` with a marker

@@ -544,7 +544,7 @@ final class ScenesSessionModel {
     /// through the editor's command pipeline so the operation is undoable
     /// + the editor's preview rebuilds. After a successful append, the
     /// scenes-session bundle's `project.scenesSession` is reset to a
-    /// `.freshDefault()` so the next "Scenes" click sees three empty rows.
+    /// `.freshDefault()` so the next "Scenes" click sees five empty rows.
     ///
     /// Returns the number of scenes appended (matches `merge(opening:)`).
     /// Phase transitions mirror `merge` — `idle → finalizing → merged` on
@@ -619,7 +619,7 @@ final class ScenesSessionModel {
             )
 
             // Step 4: rotate the scenes-session bundle's session to fresh
-            // (next "Scenes" click sees three empty rows). Persist + reload.
+            // (next "Scenes" click sees five empty rows). Persist + reload.
             session = .freshDefault()
             scenesProject.scenesSession = session
             try store.writeProject(scenesProject, to: bundle)

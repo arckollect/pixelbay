@@ -75,9 +75,9 @@ final class ScenesSessionTests: XCTestCase {
         XCTAssertTrue(SceneSourceOverride(includeSystemAudio: false).hasAnyOverride)
     }
 
-    func test_scenesSession_freshDefault_emitsThreeEmptyScenes() {
+    func test_scenesSession_freshDefault_emitsFiveEmptyScenes() {
         let session = ScenesSession.freshDefault()
-        XCTAssertEqual(session.scenes.count, 3)
+        XCTAssertEqual(session.scenes.count, 5)
         for scene in session.scenes {
             XCTAssertTrue(scene.takes.isEmpty)
             XCTAssertNil(scene.activeTakeIndex)
@@ -111,7 +111,7 @@ final class ScenesSessionTests: XCTestCase {
 
         XCTAssertEqual(decoded.schemaVersion, currentSchemaVersion)
         XCTAssertNotNil(decoded.scenesSession)
-        XCTAssertEqual(decoded.scenesSession?.scenes.count, 3)
+        XCTAssertEqual(decoded.scenesSession?.scenes.count, 5)
     }
 
     // MARK: - Migrator v4 → v5

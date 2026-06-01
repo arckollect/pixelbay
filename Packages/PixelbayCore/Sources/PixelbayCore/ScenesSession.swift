@@ -231,7 +231,10 @@ public struct ScenesSession: Codable, Sendable {
     public static func freshDefault(now: Date = Date()) -> ScenesSession {
         ScenesSession(
             defaults: ScenesGlobalDefaults(),
-            scenes: [Scene(), Scene(), Scene()],
+            // Five empty scenes seed the grid; the window renders a sixth
+            // "ghost" add-tile so the user can always grow the session.
+            // `.map` (not `Array(repeating:)`) so each Scene gets its own id.
+            scenes: (0..<5).map { _ in Scene() },
             createdAt: now,
             modifiedAt: now
         )
