@@ -49,6 +49,16 @@
 	-->
 	<key>NSCameraUsageDescription</key>
 	<string>Pixelbay uses the camera to record your webcam alongside the screen during recordings.</string>
+
+	<!--
+	Disable Continuity Camera "Reactions" (the gesture-triggered hearts /
+	confetti / fireworks / balloons / lasers overlays) by default for our
+	camera use. Without this, a hand gesture mid-recording bakes a reaction
+	effect into the webcam track — unwanted for a screen recorder. Users can
+	still re-enable reactions from Control Center if they really want them.
+	-->
+	<key>NSCameraReactionEffectGesturesEnabledDefault</key>
+	<false/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Pixelbay uses the microphone to record your voice alongside the screen during recordings and voiceovers.</string>
 	<key>NSScreenCaptureUsageDescription</key>
