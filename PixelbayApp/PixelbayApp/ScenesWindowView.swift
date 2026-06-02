@@ -401,7 +401,6 @@ struct ScenesWindowView: View {
 
     @MainActor
     private func loadModel() async {
-        modelState = .loading
         // Slice A.2 — snapshot the singleton's URL up-front so the rest of
         // this load runs against a frozen value. Clear the singleton
         // immediately AFTER the snapshot so a future window-open (e.g. the
@@ -411,8 +410,18 @@ struct ScenesWindowView: View {
         // user who closed their editor without saving would see their next
         // launcher-initiated scenes session silently append-merge into the
         // discarded project instead of producing a fresh one.
+        //
+        // Reading bundleURL is side-effect-free, but `loadModel()` runs from
+        // `.task`, whose synchronous prefix executes inside the view-update
+        // pass. Mutating shared state there — `scenesAppendTarget.set(nil)`
+        // (an @Observable other windows read) and `modelState` — trips
+        // "Modifying state during view update". A single yield reschedules
+        // the mutations after the current update completes; the clear still
+        // lands long before any future window-open could re-read the target.
         let targetURL = scenesAppendTarget.bundleURL
+        await Task.yield()
         scenesAppendTarget.set(nil)
+        modelState = .loading
         do {
             let model: ScenesSessionModel
             if let targetURL {

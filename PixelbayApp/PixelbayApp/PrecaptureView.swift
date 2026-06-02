@@ -233,7 +233,14 @@ struct PrecaptureView: View {
         .padding(Theme.Spacing.xl)          // transparent margin keeps layout stable
         .fixedSize()                         // window sizes to the bar (contentSize)
         .tint(.white)                        // white menu labels — no orange accent
-        .background(WindowAccessor { hostWindow = $0 })   // shared helper (ProjectWindow.swift)
+        // WindowAccessor (shared helper, ProjectWindow.swift) invokes this
+        // inside SwiftUI's view-update pass, so assigning the @State window
+        // synchronously trips "Modifying state during view update". Skip
+        // no-op deliveries and defer the real assignment past the current pass.
+        .background(WindowAccessor { window in
+            guard hostWindow !== window else { return }
+            DispatchQueue.main.async { hostWindow = window }
+        })
         .gesture(windowDrag)
         .task { await model.loadAvailableSources() }
     }
