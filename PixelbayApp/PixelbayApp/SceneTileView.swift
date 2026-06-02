@@ -38,6 +38,13 @@ struct SceneTileView: View {
     private var hasTake: Bool { scene.activeTake != nil }
 
     var body: some View {
+        VStack(spacing: Theme.Spacing.sm) {
+            tile
+            tileActionBar
+        }
+    }
+
+    private var tile: some View {
         // A `Color.clear` spacer owns the 16:9 footprint; the real content
         // rides in an `.overlay` so it never feeds back into sizing. Without
         // this, the recorded-state `thumbnailLayer` (a `scaledToFill` image)
@@ -208,12 +215,6 @@ struct SceneTileView: View {
 
     // MARK: - Chrome: badge, hover actions, hover meta
 
-    // Keep the chrome (and the Sources-popover anchor) mounted while the
-    // popover is open: moving the mouse off the tile toward the popover flips
-    // `isHovering` false, and unmounting the anchoring button would dismiss the
-    // popover before the user reaches it.
-    private var chromeVisible: Bool { isHovering || showSourcesPopover }
-
     private var overlayChrome: some View {
         VStack(spacing: 0) {
             HStack(alignment: .top) {
@@ -222,8 +223,8 @@ struct SceneTileView: View {
                 }
                 Spacer()
                 actionCluster
-                    .opacity(chromeVisible ? 1 : 0)
-                    .allowsHitTesting(chromeVisible)
+                    .opacity(isHovering ? 1 : 0)
+                    .allowsHitTesting(isHovering)
             }
             Spacer()
             // Description + take picker only matter once a take exists; hiding
@@ -270,17 +271,32 @@ struct SceneTileView: View {
                 }
             }
             .disabled(isRecording)
+        }
+    }
 
-            circleButton(systemName: "slider.horizontal.3", tint: Theme.Color.textPrimary, help: "Sources") {
+    /// Persistent bar beneath the tile: per-scene Sources editor and delete.
+    /// These used to live in the hover-only `actionCluster`; surfacing them
+    /// as always-visible buttons makes the per-tile controls discoverable.
+    private var tileActionBar: some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            Button {
                 showSourcesPopover = true
+            } label: {
+                Label("Sources", systemImage: "slider.horizontal.3")
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.pbSecondary)
             .popover(isPresented: $showSourcesPopover, arrowEdge: .bottom) {
                 sourcesPopover
             }
 
-            circleButton(systemName: "trash", tint: Theme.Color.danger, help: "Delete this scene") {
+            Button {
                 confirmDeletePresented = true
+            } label: {
+                Image(systemName: "trash")
             }
+            .buttonStyle(.pbSecondary)
+            .help("Delete this scene")
         }
     }
 

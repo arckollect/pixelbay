@@ -257,7 +257,10 @@ struct ScenesWindowView: View {
         GeometryReader { geo in
             let columns = columnCount(for: geo.size.width)
             let layout = Array(
-                repeating: GridItem(.flexible(), spacing: Theme.Spacing.xl),
+                // Top-align cells: real tiles now carry an action bar beneath
+                // them, so they're taller than the AddSceneTile — aligning to
+                // top keeps every tile's top edge on the same line.
+                repeating: GridItem(.flexible(), spacing: Theme.Spacing.xl, alignment: .top),
                 count: columns
             )
             ScrollView {
