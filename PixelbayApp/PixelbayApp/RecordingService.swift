@@ -111,6 +111,15 @@ final class RecordingService {
     /// Non-nil while recording a scene ("Scene N"); drives the HUD to show the
     /// label and hide Discard/Restart. nil for normal single recordings.
     private(set) var sceneLabel: String?
+    /// True when the current session was started from the Scenes window.
+    /// Unlike `sceneLabel`, this is NOT cleared by `tearDown()` — it survives
+    /// through `.stopped(result)` until `acknowledgeResult()`, so window
+    /// reconciliation can tell a scenes take's post-capture (reshow the Scenes
+    /// window) from a toolbar/launcher recording's (surface the launcher's
+    /// post-capture, leave the Scenes window alone). `sceneLabel` can't serve
+    /// this because `stop()` calls `tearDown()` (which nils it) before the
+    /// `.stopped` phase change is observed.
+    private(set) var sessionStartedFromScenes = false
 
     var isRecording: Bool {
         if case .recording = phase { return true }
@@ -160,6 +169,7 @@ final class RecordingService {
         // the HUD reads to show "Scene N" and drop Discard/Restart.
         self.ownsBundle = (existingBundle == nil)
         self.sceneLabel = sceneLabel
+        self.sessionStartedFromScenes = (sceneLabel != nil)
         do {
             let bundle = try existingBundle ?? prepareBundle()
             let audio: AudioSource = request.micID.map { .external(deviceUniqueID: $0) } ?? .none
@@ -302,6 +312,31 @@ final class RecordingService {
 
     func acknowledgeResult() {
         guard canStartRecording else { return }
+        // The result has been consumed (post-capture dismissed, or the scenes
+        // model appended the take) — clear the scenes-origin flag so the next
+        // reconcile treats the app as idle, not mid-scenes-aftermath.
+        sessionStartedFromScenes = false
+        phase = .idle
+    }
+
+    /// The user dismissed the post-capture review without keeping the
+    /// recording (closed the launcher window). Delete the just-recorded
+    /// bundle from disk and return to `.idle` so the launcher lands back on
+    /// the picker. No-op unless we're in `.stopped`. A scenes take lives in a
+    /// SHARED bundle managed by the scenes model, so we never delete that here
+    /// — we just clear the result (defence-in-depth; the launcher review isn't
+    /// shown for scenes takes in the first place).
+    func discardStoppedResult() {
+        guard case .stopped(let result) = phase else { return }
+        if !sessionStartedFromScenes {
+            do {
+                try FileManager.default.removeItem(at: result.bundleURL)
+                log.info("discarded post-capture recording bundle url=\(result.bundleURL.path, privacy: .public)")
+            } catch {
+                log.error("discard post-capture recording failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+        sessionStartedFromScenes = false
         phase = .idle
     }
 

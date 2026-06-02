@@ -583,8 +583,16 @@ public final class AssetWriterPipeline: CaptureSink, @unchecked Sendable {
             //      {8000,11025,12000,16000,22050,24000,32000,44100,48000}.
             //      96kHz pro-audio mics + some screen-capture sysaudio
             //      paths land here.
-            //   3. Bitrate too high for the rate/channels combo (128k mono
-            //      at 8kHz is rejected by the encoder).
+            //   3. Bitrate too high for the rate/channels combo. AAC-LC's
+            //      valid bitrate ceiling scales with the sample rate, so a
+            //      fixed 64k/128k that's fine at 44.1/48kHz is REJECTED at the
+            //      low rates a Bluetooth HFP mic delivers (AirPods / headsets
+            //      hand us 8 or 16 kHz mono). That rejection is the -11861
+            //      "encoding parameters are not supported" the whole mic track
+            //      died on. Fix: only pin an explicit bitrate at normal rates
+            //      (≥32 kHz, where 64/128k is always valid); below that, omit
+            //      the key and let the encoder choose a rate-appropriate
+            //      default — never unrealizable.
             // The encoder will resample/downmix internally — we just need
             // to ask for a valid output config. Source quality is bounded
             // by the input buffers regardless.
@@ -594,9 +602,11 @@ public final class AssetWriterPipeline: CaptureSink, @unchecked Sendable {
             var settings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVNumberOfChannelsKey: outChannels,
-                AVSampleRateKey: outRate,
-                AVEncoderBitRateKey: outChannels == 1 ? 64_000 : 128_000
+                AVSampleRateKey: outRate
             ]
+            if outRate >= 32_000 {
+                settings[AVEncoderBitRateKey] = outChannels == 1 ? 64_000 : 128_000
+            }
             if outChannels == 2 {
                 var layout = AudioChannelLayout()
                 layout.mChannelLayoutTag = kAudioChannelLayoutTag_Stereo

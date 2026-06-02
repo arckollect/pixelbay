@@ -261,6 +261,14 @@ final class AppState {
     // closing the window.
     private func reconcileScenesWindow() {
         guard let scenes = scenesWindow() else { return }
+        // Only a recording that ORIGINATED from the Scenes window drives its
+        // hide-during / show-after lifecycle. A toolbar/launcher recording
+        // must not pop the (open-but-backgrounded) Scenes window forward when
+        // it stops — that hijacked the launcher's post-capture, which only
+        // appeared once the user closed the Scenes window. `sceneLabel` can't
+        // gate this: `tearDown()` nils it before `.stopped` is observed, so we
+        // use `sessionStartedFromScenes`, which survives until acknowledge.
+        guard recording?.sessionStartedFromScenes == true else { return }
         switch recording?.phase {
         case .recording?, .stopping?, .preparing?:
             scenes.orderOut(nil)
@@ -290,6 +298,16 @@ final class AppState {
         switch recording?.phase {
         case .recording?, .stopping?, .preparing?:
             hideLauncher()
+        case .stopped? where recording?.sessionStartedFromScenes == false:
+            // A toolbar/launcher recording just finished: its post-capture
+            // lives in the launcher window, which must surface even when a
+            // Scenes window is open. Without this, `hasOpenEditorWindow()`
+            // counts the open Scenes window and keeps the launcher hidden, so
+            // the post-capture stays stuck behind it until the user closes it.
+            // (Scenes takes — `sessionStartedFromScenes == true` — fall through
+            // to the default, where the reshown Scenes window keeps the
+            // launcher hidden and shows the take itself.)
+            showLauncher()
         default:
             hasOpenEditorWindow() ? hideLauncher() : showLauncher()
         }

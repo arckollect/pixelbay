@@ -46,6 +46,13 @@ struct ContentView: View {
             }
         }
         .background(LauncherWindowChrome(isBar: isPickerRoute, isOnboarding: isOnboardingRoute))
+        // Intercept the launcher window's ✕ during post-capture so closing the
+        // review discards the take and returns to the picker (see
+        // LauncherCloseInterceptor), rather than silently closing the window
+        // and stranding the user with no record bar.
+        .background(WindowAccessor { window in
+            installLauncherCloseInterceptor(on: window)
+        })
         .task {
             // Teach orphan recovery which bundle is live so it never flags or
             // discards the active recording (its in-progress marker otherwise
@@ -184,6 +191,22 @@ struct ContentView: View {
         }
     }
 
+    /// Installs (idempotently) the close-interceptor delegate on the launcher
+    /// window so the post-capture ✕ routes through a discard confirm. Guards on
+    /// the window identity — project/scenes windows own their own delegates.
+    private func installLauncherCloseInterceptor(on window: NSWindow) {
+        guard window.identifier?.rawValue.contains(WindowID.launcher) == true else { return }
+        if window.delegate is LauncherCloseInterceptor { return }
+        let interceptor = LauncherCloseInterceptor(recording: recording)
+        window.delegate = interceptor
+        objc_setAssociatedObject(
+            window,
+            &LauncherCloseInterceptor.associationKey,
+            interceptor,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+    }
+
     private func failureBanner(_ message: String) -> some View {
         HStack(alignment: .top, spacing: Theme.Spacing.sm) {
             Image(systemName: "xmark.octagon.fill").foregroundStyle(Theme.Color.danger)
@@ -198,5 +221,49 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: Theme.Radius.medium)
                 .strokeBorder(Theme.Color.danger.opacity(0.35), lineWidth: Theme.Stroke.hairline)
         )
+    }
+}
+
+// NSWindowDelegate for the launcher window. During the post-capture review
+// (phase == .stopped) the red ✕ would otherwise just close the window — the
+// take stays on disk and the user is left with no record bar. Instead we
+// intercept it: confirm, then discard the recording and drop back to the
+// picker (window stays open so the floating record bar reappears). Every other
+// route (onboarding, picker bar, failure banner) closes normally.
+//
+// Mirrors ProjectCloseInterceptor's pattern: a strong ref is stashed on the
+// window via an associated object because NSWindow.delegate is weak.
+@MainActor
+final class LauncherCloseInterceptor: NSObject, NSWindowDelegate {
+    nonisolated(unsafe) static var associationKey: UInt8 = 0
+
+    let recording: RecordingService
+    private var promptInFlight = false
+
+    init(recording: RecordingService) {
+        self.recording = recording
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !promptInFlight else { return false }
+        // Only the post-capture review is intercepted.
+        guard case .stopped = recording.phase else { return true }
+
+        promptInFlight = true
+        let alert = NSAlert()
+        alert.messageText = "Discard this recording?"
+        alert.informativeText = "Closing the review without editing or exporting permanently erases the recording."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Discard")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: sender) { [weak self] response in
+            guard let self else { return }
+            self.promptInFlight = false
+            guard response == .alertFirstButtonReturn else { return }   // Cancel: stay in the review
+            // Throw the take away and return to the picker; keep the window
+            // open so the floating record bar reappears immediately.
+            self.recording.discardStoppedResult()
+        }
+        return false   // never close via ✕ — we route to the picker instead
     }
 }

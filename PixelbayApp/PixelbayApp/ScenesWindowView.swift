@@ -105,6 +105,30 @@ struct ScenesWindowView: View {
         // capture UI, matching the single-recording flow. The window always
         // renders its full body; it reappears (here) once the take finishes.
         fullBody(model: model)
+            // Intercept the window ✕ so closing with un-merged takes prompts to
+            // discard them (see ScenesCloseInterceptor), then closing reshows
+            // the launcher picker via the existing willClose → reconcileLauncher.
+            .background(WindowAccessor { window in
+                installScenesCloseInterceptor(on: window, model: model)
+            })
+    }
+
+    /// Installs (idempotently) the close-interceptor delegate on the Scenes
+    /// window, bound to the loaded model. Guards on window identity so it never
+    /// touches the launcher / project windows.
+    private func installScenesCloseInterceptor(on window: NSWindow, model: ScenesSessionModel) {
+        guard window.identifier?.rawValue.contains(WindowID.scenes) == true else { return }
+        if let existing = window.delegate as? ScenesCloseInterceptor, existing.model === model {
+            return
+        }
+        let interceptor = ScenesCloseInterceptor(model: model)
+        window.delegate = interceptor
+        objc_setAssociatedObject(
+            window,
+            &ScenesCloseInterceptor.associationKey,
+            interceptor,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
     }
 
     private func fullBody(model: ScenesSessionModel) -> some View {
@@ -287,10 +311,15 @@ struct ScenesWindowView: View {
             }
             .buttonStyle(.pbSecondary)
             .popover(isPresented: $showSourcesPopover, arrowEdge: .bottom) {
-                DefaultsBlock(model: model, catalog: catalog, permissions: permissions)
-                    .tint(Theme.Color.accent)
-                    .padding(Theme.Spacing.lg)
-                    .frame(width: 320)
+                DefaultsBlock(
+                    model: model,
+                    catalog: catalog,
+                    permissions: permissions,
+                    onApplied: { showSourcesPopover = false }
+                )
+                .tint(Theme.Color.accent)
+                .padding(Theme.Spacing.lg)
+                .frame(width: 320)
             }
 
             Menu {
@@ -407,26 +436,88 @@ struct ScenesWindowView: View {
 // MARK: - Defaults block
 
 private struct DefaultsBlock: View {
-    @Bindable var model: ScenesSessionModel
+    let model: ScenesSessionModel
     let catalog: ScenesSourceCatalog
     let permissions: PermissionViewModel
+    /// Called after a save button commits the draft — the parent closes the
+    /// popover in response.
+    let onApplied: () -> Void
+
+    /// Staged source config. Editing the pickers only mutates this draft —
+    /// nothing reaches the scene tiles (or the session defaults) until the
+    /// user presses one of the apply buttons. Snapshotted from the live
+    /// defaults on each presentation (popover content is rebuilt per open).
+    @State private var draft: ScenesGlobalDefaults
+
+    init(
+        model: ScenesSessionModel,
+        catalog: ScenesSourceCatalog,
+        permissions: PermissionViewModel,
+        onApplied: @escaping () -> Void
+    ) {
+        self.model = model
+        self.catalog = catalog
+        self.permissions = permissions
+        self.onApplied = onApplied
+        _draft = State(initialValue: model.session.defaults)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            Text("Default sources for new scenes")
+            Text("Scene sources")
                 .font(Theme.Font.cardTitle)
                 .foregroundStyle(Theme.Color.textSecondary)
             displayPicker
             cameraPicker
             microphonePicker
-            Toggle("Capture system audio", isOn: includeSystemAudioBinding)
+            Toggle("Capture system audio", isOn: $draft.includeSystemAudio)
             clickLogToggle
+            PBDivider()
+            applyButtons
         }
-        .onAppear { seedDefaultsIfMissing() }
+        .onAppear { seedDraftIfMissing() }
+    }
+
+    private var applyButtons: some View {
+        // Scenes whose sources have been individually customised. The
+        // "except custom" button only appears when there's something to skip.
+        let customCount = model.session.scenes.filter { $0.sourceOverride.hasAnyOverride }.count
+        return VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            VStack(alignment: .leading, spacing: 4) {
+                Button {
+                    model.applyDefaults(draft, includingCustom: true)
+                    onApplied()
+                } label: {
+                    Label("Apply to All Scenes", systemImage: "square.on.square")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.pbPrimary)
+                Text(customCount == 0
+                     ? "Saves these sources to every scene."
+                     : "Saves to every scene, replacing \(customCount) custom one\(customCount == 1 ? "" : "s").")
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+            if customCount > 0 {
+                VStack(alignment: .leading, spacing: 4) {
+                    Button {
+                        model.applyDefaults(draft, includingCustom: false)
+                        onApplied()
+                    } label: {
+                        Label("Apply Except Custom", systemImage: "square.on.square.dashed")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.pbSecondary)
+                    Text("Leaves \(customCount) custom scene\(customCount == 1 ? "" : "s") unchanged.")
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.Color.textSecondary)
+                }
+            }
+        }
     }
 
     private var displayPicker: some View {
-        Picker("Display", selection: displayBinding) {
+        Picker("Display", selection: $draft.displayID) {
             if catalog.displays.isEmpty {
                 Text("No displays available").tag(UInt32?.none)
             }
@@ -438,7 +529,7 @@ private struct DefaultsBlock: View {
     }
 
     private var cameraPicker: some View {
-        Picker("Camera", selection: cameraBinding) {
+        Picker("Camera", selection: $draft.cameraUniqueID) {
             Text("None").tag(String?.none)
             ForEach(catalog.cameras) { cam in
                 Text(cam.localizedName).tag(String?.some(cam.id))
@@ -448,7 +539,7 @@ private struct DefaultsBlock: View {
     }
 
     private var microphonePicker: some View {
-        Picker("Microphone", selection: micBinding) {
+        Picker("Microphone", selection: $draft.micUniqueID) {
             Text("None").tag(String?.none)
             ForEach(catalog.microphones) { mic in
                 Text(mic.localizedName).tag(String?.some(mic.id))
@@ -460,7 +551,7 @@ private struct DefaultsBlock: View {
     private var clickLogToggle: some View {
         let accessibilityGranted = permissions.statuses[.accessibility] == .granted
         return VStack(alignment: .leading, spacing: 4) {
-            Toggle("Log mouse clicks for auto-zoom", isOn: logClicksBinding)
+            Toggle("Log mouse clicks for auto-zoom", isOn: $draft.logClicks)
                 .disabled(!accessibilityGranted)
             if !accessibilityGranted {
                 Text("Requires Accessibility permission.")
@@ -470,90 +561,76 @@ private struct DefaultsBlock: View {
         }
     }
 
-    // Bindings — write back through the model's update API so the debounce
-    // fires on every change (rather than mutating the @Observable field
-    // in-place and skipping persistence).
-
-    private var displayBinding: Binding<UInt32?> {
-        Binding(
-            get: { model.session.defaults.displayID },
-            set: { newValue in
-                var d = model.session.defaults
-                d.displayID = newValue
-                model.updateDefaults(d)
-            }
-        )
-    }
-
-    private var cameraBinding: Binding<String?> {
-        Binding(
-            get: { model.session.defaults.cameraUniqueID },
-            set: { newValue in
-                var d = model.session.defaults
-                d.cameraUniqueID = newValue
-                model.updateDefaults(d)
-            }
-        )
-    }
-
-    private var micBinding: Binding<String?> {
-        Binding(
-            get: { model.session.defaults.micUniqueID },
-            set: { newValue in
-                var d = model.session.defaults
-                d.micUniqueID = newValue
-                model.updateDefaults(d)
-            }
-        )
-    }
-
-    private var includeSystemAudioBinding: Binding<Bool> {
-        Binding(
-            get: { model.session.defaults.includeSystemAudio },
-            set: { newValue in
-                var d = model.session.defaults
-                d.includeSystemAudio = newValue
-                model.updateDefaults(d)
-            }
-        )
-    }
-
-    private var logClicksBinding: Binding<Bool> {
-        Binding(
-            get: { model.session.defaults.logClicks },
-            set: { newValue in
-                var d = model.session.defaults
-                d.logClicks = newValue
-                model.updateDefaults(d)
-            }
-        )
-    }
-
-    private func seedDefaultsIfMissing() {
+    /// Fills nil source fields on the draft with sensible catalog picks so the
+    /// pickers open on a real selection. Draft-only — the session defaults
+    /// aren't touched until the user presses an apply button. (The session's
+    /// own defaults are independently seeded at window load by
+    /// `ScenesWindowView.seedDefaultsIfMissing`, so recording works even if
+    /// this popover is never opened.)
+    private func seedDraftIfMissing() {
         let seeded = catalog.seedingDefaultsIfMissing(
             from: (
-                displayID: model.session.defaults.displayID,
-                cameraUniqueID: model.session.defaults.cameraUniqueID,
-                micUniqueID: model.session.defaults.micUniqueID
+                displayID: draft.displayID,
+                cameraUniqueID: draft.cameraUniqueID,
+                micUniqueID: draft.micUniqueID
             )
         )
-        var defaults = model.session.defaults
-        var changed = false
-        if defaults.displayID != seeded.displayID {
-            defaults.displayID = seeded.displayID
-            changed = true
+        draft.displayID = seeded.displayID
+        draft.cameraUniqueID = seeded.cameraUniqueID
+        draft.micUniqueID = seeded.micUniqueID
+    }
+}
+
+// NSWindowDelegate for the Scene Recording window. Closing the window with
+// un-merged takes would silently abandon (but keep on disk) the recorded
+// media; instead we intercept the ✕: confirm, then discard the whole scenes
+// session (delete its bundle) and let the close proceed — the existing
+// willClose → AppState.reconcileLauncher brings the launcher picker back.
+//
+// Only prompts in `.idle` with recorded takes: a merge sets `.merged` before
+// dismissing the window (so the merge's own dismiss never trips the prompt),
+// and an empty session closes silently. Mirrors LauncherCloseInterceptor /
+// ProjectCloseInterceptor (strong ref stashed via associated object because
+// NSWindow.delegate is weak).
+@MainActor
+final class ScenesCloseInterceptor: NSObject, NSWindowDelegate {
+    nonisolated(unsafe) static var associationKey: UInt8 = 0
+
+    let model: ScenesSessionModel
+    private var promptInFlight = false
+    private var confirmedClose = false
+
+    init(model: ScenesSessionModel) {
+        self.model = model
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if confirmedClose { return true }
+        guard !promptInFlight else { return false }
+        // Only the interactive idle state with captured media needs a prompt.
+        // A merge (phase `.merged`/`.finalizing`) or an empty session closes
+        // straight through.
+        guard case .idle = model.phase, model.hasRecordedTakes else { return true }
+
+        promptInFlight = true
+        let alert = NSAlert()
+        alert.messageText = "Discard scene recordings?"
+        alert.informativeText = "Closing Scene Recording permanently erases the takes you've recorded. Merge them into a project first if you want to keep them."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Discard")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: sender) { [weak self, weak sender] response in
+            guard let self else { return }
+            self.promptInFlight = false
+            guard response == .alertFirstButtonReturn else { return }   // Cancel: stay open
+            // Throw the takes away (and reset the session to fresh tiles so a
+            // reopen isn't stale), then actually close — willClose →
+            // reconcileLauncher reshows the picker for a new recording.
+            self.model.discardSessionAndReset()
+            self.confirmedClose = true
+            sender?.close()
         }
-        if defaults.cameraUniqueID != seeded.cameraUniqueID {
-            defaults.cameraUniqueID = seeded.cameraUniqueID
-            changed = true
-        }
-        if defaults.micUniqueID != seeded.micUniqueID {
-            defaults.micUniqueID = seeded.micUniqueID
-            changed = true
-        }
-        if changed {
-            model.updateDefaults(defaults)
-        }
+        return false
     }
 }
 

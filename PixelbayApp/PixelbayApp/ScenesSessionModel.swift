@@ -247,6 +247,23 @@ final class ScenesSessionModel {
         persistDebounced()
     }
 
+    /// Commits `defaults` as the session defaults and pushes them onto the
+    /// scene tiles — backs the Sources popover's save buttons. Non-custom
+    /// scenes inherit `session.defaults`, so setting it updates them for free.
+    /// When `includingCustom` is true, every per-scene `sourceOverride` is also
+    /// cleared so customised tiles adopt the new sources too; when false, those
+    /// tiles keep their custom sources. Recordings/takes are untouched (this
+    /// only affects future records).
+    func applyDefaults(_ defaults: ScenesGlobalDefaults, includingCustom: Bool) {
+        session.defaults = defaults
+        if includingCustom {
+            for idx in session.scenes.indices where session.scenes[idx].sourceOverride.hasAnyOverride {
+                session.scenes[idx].sourceOverride = SceneSourceOverride()
+            }
+        }
+        persistDebounced()
+    }
+
     // MARK: - Take-level mutations
 
     func setActiveTake(sceneID: SceneID, takeIndex: Int) {
@@ -982,6 +999,52 @@ final class ScenesSessionModel {
             log.error("take preview composition build failed: \(String(describing: error), privacy: .public)")
             return nil
         }
+    }
+
+    /// True once any scene holds at least one recorded take — i.e. there's
+    /// captured media that closing the window would throw away. Drives the
+    /// discard-on-close confirm (an empty session closes silently).
+    var hasRecordedTakes: Bool {
+        session.scenes.contains { !$0.takes.isEmpty }
+    }
+
+    /// Discard the whole scenes session and reset to a fresh one: cancel any
+    /// pending write, delete the persistent scenes-session bundle (every
+    /// recorded take's media included), then recreate an empty bundle at the
+    /// same path and rebind `bundle` + `session` to it.
+    ///
+    /// Resetting IN PLACE matters: the Scenes window is a singleton `Window`
+    /// whose SwiftUI state (this model) survives a close/reopen, so wiping the
+    /// bundle on disk alone left the stale in-memory session on screen — a
+    /// "phantom" take with no media (deleted thumbnail → placeholder icon) and
+    /// the wrong scene count. Rebuilding the model's own state guarantees the
+    /// reopened window shows the default empty tiles. Used when the user
+    /// closes the window without merging.
+    func discardSessionAndReset() {
+        persistTask?.cancel()
+        persistTask = nil
+        let url = bundle.url
+        do {
+            try? FileManager.default.removeItem(at: url)
+            // Cold-start a fresh bundle at the same path (the delete above
+            // makes openOrCreatePersistent take its create-fresh branch).
+            let archiveDir = try ScenesBundleStore.defaultArchiveDirectory()
+            let result = try ScenesBundleStore.openOrCreatePersistent(
+                at: url,
+                archiveDirectory: archiveDir,
+                store: store
+            )
+            bundle = result.bundle
+            session = result.session
+            log.info("discarded + reset scenes session bundle url=\(url.path, privacy: .public)")
+        } catch {
+            log.error("discard scenes session failed: \(String(describing: error), privacy: .public)")
+            // Last resort: at least clear the in-memory session so the UI
+            // doesn't keep showing phantom takes (recording would need the
+            // window reopened to rebuild a bundle).
+            session = .freshDefault()
+        }
+        phase = .idle
     }
 
     /// Flush any pending write immediately. Call before merge / cleanup /
