@@ -123,6 +123,10 @@ struct ScenesWindowView: View {
         }
         let interceptor = ScenesCloseInterceptor(model: model)
         window.delegate = interceptor
+        // The Scenes window always opens at its default size — we never want a
+        // prior resize (this launch or a previous one) to stick. A new
+        // interceptor means a fresh window/session, so snap it to default here.
+        ScenesCloseInterceptor.applyDefaultSize(to: window)
         objc_setAssociatedObject(
             window,
             &ScenesCloseInterceptor.associationKey,
@@ -600,8 +604,26 @@ final class ScenesCloseInterceptor: NSObject, NSWindowDelegate {
     private var promptInFlight = false
     private var confirmedClose = false
 
+    /// The Scenes window always opens at this content size. We deliberately do
+    /// not persist its frame — see `applyDefaultSize`.
+    static let defaultContentSize = NSSize(width: 1200, height: 800)
+
     init(model: ScenesSessionModel) {
         self.model = model
+    }
+
+    /// Force `window` back to the default content size, centred. Called when a
+    /// fresh interceptor is installed and again in `windowWillClose` (while the
+    /// window is hidden), so the next open is always the default size even if
+    /// the user resized the last session.
+    static func applyDefaultSize(to window: NSWindow) {
+        window.setContentSize(defaultContentSize)
+        window.center()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        Self.applyDefaultSize(to: window)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
