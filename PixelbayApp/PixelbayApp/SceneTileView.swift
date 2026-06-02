@@ -72,8 +72,14 @@ struct SceneTileView: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
             .overlay(
+                // A tile with custom source overrides gets an accent (blue)
+                // stroke so it reads as customised at a glance — paired with
+                // the "Custom" badge in the chrome.
                 RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
-                    .stroke(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+                    .stroke(
+                        scene.sourceOverride.hasAnyOverride ? Theme.Color.accent : Theme.Color.borderSubtle,
+                        lineWidth: scene.sourceOverride.hasAnyOverride ? Theme.Stroke.regular : Theme.Stroke.hairline
+                    )
             )
             .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
             .onTapGesture {
