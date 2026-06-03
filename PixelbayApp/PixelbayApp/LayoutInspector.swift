@@ -12,15 +12,7 @@ import SwiftUI
 
 struct LayoutInspector: View {
     let layout: LayoutPreset
-    let cursorSettings: CursorSettings
     let onChange: (LayoutPreset) -> Void
-    let onCursorChange: (CursorSettings) -> Void
-
-    // Live drag value for the cursor-size slider — mirrors the
-    // EffectsInspector.zoomFactorSlider pattern. The model is only
-    // mutated on `onEditingChanged: false`, so the undo stack records one
-    // SetCursorSettingsCommand per gesture instead of one per slider tick.
-    @State private var previewCursorScale: Double?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
@@ -41,9 +33,6 @@ struct LayoutInspector: View {
             if layout.padding > 0 || hasBackground {
                 paddingRow
             }
-
-            PBDivider().padding(.vertical, 2)
-            cursorSection
         }
     }
 
@@ -358,48 +347,6 @@ struct LayoutInspector: View {
                 onChange(next)
             }
         )
-    }
-
-    // MARK: - Cursor (Phase 3c)
-
-    @ViewBuilder
-    private var cursorSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Cursor").font(Theme.Font.cardTitle).foregroundStyle(Theme.Color.textSecondary)
-            cursorSizeSlider
-        }
-    }
-
-    private var cursorSizeSlider: some View {
-        let liveValue = previewCursorScale ?? cursorSettings.scale
-        let committedValue = cursorSettings.scale
-        return VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("Size").font(.caption)
-                Spacer()
-                Text(String(format: "%.2f×", liveValue))
-                    .font(Theme.Font.monoTimecode)
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-            Slider(
-                value: Binding<Double>(
-                    get: { liveValue },
-                    set: { newValue in previewCursorScale = newValue }
-                ),
-                in: 0.5...4.0,
-                onEditingChanged: { isEditing in
-                    guard !isEditing, let final = previewCursorScale else { return }
-                    previewCursorScale = nil
-                    // Epsilon guard — sub-millimetre slider noise on
-                    // release shouldn't write a no-op command to the
-                    // undo stack.
-                    if abs(final - committedValue) < 0.005 { return }
-                    var next = cursorSettings
-                    next.scale = final
-                    onCursorChange(next)
-                }
-            )
-        }
     }
 
     // MARK: - Padding

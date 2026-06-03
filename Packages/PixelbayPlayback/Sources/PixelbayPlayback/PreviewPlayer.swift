@@ -165,6 +165,32 @@ public final class PreviewPlayer {
         seek(to: CMTime(seconds: secs, preferredTimescale: 600))
     }
 
+    /// Jumps the playhead to the very start of the timeline.
+    public func seekToStart() {
+        seek(to: .zero)
+    }
+
+    /// Jumps the playhead to the end of the timeline.
+    public func seekToEnd() {
+        seek(to: duration)
+    }
+
+    /// Steps the playhead by `count` display frames (negative steps back).
+    /// Pauses first — stepping while playing fights the play rate. Uses
+    /// `AVPlayerItem.step(byCount:)` which moves by exact frame boundaries;
+    /// falls back to a no-op when the item can't step in that direction
+    /// (e.g. already at the head/tail). `currentTime` is re-read after so
+    /// the UI updates immediately even while paused (the periodic observer
+    /// won't tick on its own at rate 0).
+    public func stepFrame(by count: Int) {
+        guard status == .ready, count != 0, let item = player.currentItem else { return }
+        if isPlaying { pause() }
+        if count > 0, !item.canStepForward { return }
+        if count < 0, !item.canStepBackward { return }
+        item.step(byCount: count)
+        currentTime = player.currentTime()
+    }
+
     private func install(preview: PreviewComposition) {
         // Tear down any prior observation.
         if let timeObserver {
@@ -233,19 +259,26 @@ public final class PreviewPlayer {
 // (or even the whole player) is safe.
 public struct PreviewPlayerView: NSViewRepresentable {
     let player: PreviewPlayer
+    let videoGravity: AVLayerVideoGravity
 
-    public init(player: PreviewPlayer) {
+    /// `fill: false` (default) letterboxes the video to fit (`.resizeAspect`);
+    /// `fill: true` crops it to fill the frame (`.resizeAspectFill`). Driven
+    /// by the preview transport's fit/fill toggle.
+    public init(player: PreviewPlayer, fill: Bool = false) {
         self.player = player
+        self.videoGravity = fill ? .resizeAspectFill : .resizeAspect
     }
 
     public func makeNSView(context: Context) -> PlayerLayerHostingView {
         let view = PlayerLayerHostingView()
         view.attach(player: player.underlyingPlayer)
+        view.setVideoGravity(videoGravity)
         return view
     }
 
     public func updateNSView(_ nsView: PlayerLayerHostingView, context: Context) {
         nsView.attach(player: player.underlyingPlayer)
+        nsView.setVideoGravity(videoGravity)
     }
 }
 
@@ -276,6 +309,11 @@ public final class PlayerLayerHostingView: NSView {
         if playerLayer.player !== player {
             playerLayer.player = player
         }
+    }
+
+    func setVideoGravity(_ gravity: AVLayerVideoGravity) {
+        guard let playerLayer, playerLayer.videoGravity != gravity else { return }
+        playerLayer.videoGravity = gravity
     }
 }
 #endif

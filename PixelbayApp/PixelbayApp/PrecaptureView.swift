@@ -222,7 +222,7 @@ struct PrecaptureView: View {
         // bar window is borderless + clear (LauncherWindowChrome), so the
         // material has real backdrop to refract. Falls back to a frosted
         // material on pre-26 systems (deployment target is 14.6).
-        .glassBar(barShape)
+        .pbGlassBar(barShape)
         .overlay(
             barShape.strokeBorder(Color.white.opacity(0.12), lineWidth: Theme.Stroke.regular)
         )
@@ -491,31 +491,7 @@ struct PrecaptureView: View {
 
 // Frosted dark-glass bar background, clipped to the bar shape.
 //
-// We deliberately do NOT use macOS 26's `.glassEffect` here. That effect
-// re-samples the desktop backdrop every frame and renders broken — a flat,
-// opaque, full-bounds rectangle that loses the tint and rounded shape —
-// whenever sampling stalls: while the window is dragged, and when the launcher
-// window is reconfigured on the way back from a recording. An
-// `NSVisualEffectView`-backed material (`.ultraThinMaterial`) is rock-solid
-// across drags, occlusion, and window-style changes, and with the dark wash +
-// faint top sheen reads as the same premium dark glass.
-private extension View {
-    func glassBar(_ shape: RoundedRectangle) -> some View {
-        self.background {
-            ZStack {
-                shape.fill(.ultraThinMaterial)
-                shape.fill(Color.black.opacity(0.28))
-                shape.fill(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.10), .clear],
-                        startPoint: .top,
-                        endPoint: .center
-                    )
-                )
-            }
-        }
-    }
-}
+// Glass recipe promoted to `View.pbGlassBar(_:)` in PixelbayDesignSystem.
 
 #Preview {
     PrecaptureView(

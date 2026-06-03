@@ -354,6 +354,14 @@ public enum PreviewCompositionBuilder {
             )
             let timelineStart = cmTime(clip.timelineRange.start)
             try mutableTrack.insertTimeRange(sourceRange, of: sourceTrack, at: timelineStart)
+            inserted = true
+            // A muted track plays silent regardless of per-clip volume — a
+            // single flat 0 volume is applied below (after the loop), so we
+            // skip per-clip ramps entirely here. This also avoids the
+            // overlap-skip leak: a ramp that's skipped for overlap would
+            // otherwise mix at the default 1.0 volume, so muted clips in an
+            // overlap region could still bleed audio.
+            if track.muted { continue }
             // Per-clip volume → ramp segment over the clip's timeline
             // range. setVolumeRamp with start == end gives a flat-volume
             // segment. Multiple non-overlapping segments compose into the
@@ -372,7 +380,6 @@ public enum PreviewCompositionBuilder {
                     // so playback isn't silent — we just lose the
                     // per-clip volume control for the overlap region.
                     log.notice("populateAudioTrack: clip ramp [\(rampRange.start.seconds), \(originalEnd.seconds)] fully overlaps previous ramp ending at \(prevEnd.seconds); skipping ramp")
-                    inserted = true
                     continue
                 }
                 rampRange = CMTimeRange(
@@ -386,9 +393,13 @@ public enum PreviewCompositionBuilder {
                 timeRange: rampRange
             )
             previousRampEnd = CMTimeRangeGetEnd(rampRange)
-            inserted = true
         }
         guard inserted else { return nil }
+        // Muted track → one flat 0 volume across the whole track. Done once
+        // here (not per-clip) so it never overlaps a ramp's time range.
+        if track.muted {
+            inputParams.setVolume(0, at: .zero)
+        }
         return inputParams
     }
 

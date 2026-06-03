@@ -39,6 +39,13 @@ public extension Project {
         guard let (t, c) = locateClip(id) else { throw EditError.clipNotFound(id) }
         try body(&tracks[t].clips[c])
     }
+
+    /// In-place mutation of the track with the given ID. Throws
+    /// `.trackNotFound` if absent. Mirrors `mutateClip`.
+    mutating func mutateTrack(_ id: TrackID, _ body: (inout Track) throws -> Void) throws {
+        guard let t = locateTrack(id) else { throw EditError.trackNotFound(id) }
+        try body(&tracks[t])
+    }
 }
 
 public extension Track {

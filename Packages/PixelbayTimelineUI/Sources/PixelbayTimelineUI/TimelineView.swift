@@ -472,15 +472,15 @@ public final class TimelineNSView: NSView {
     /// optional waveform overlay. Used for `singleTrack` display rows
     /// (expanded grouped child OR a track outside any group).
     private func drawSingleTrackRow(_ track: TrackLayout, in layer: CALayer) {
-        let header = CATextLayer()
-        header.frame = track.headerFrame
-        header.string = "\(track.name) (\(track.kind.rawValue))"
-        header.fontSize = 11
-        header.alignmentMode = .left
-        header.contentsScale = window?.backingScaleFactor ?? 2
-        header.foregroundColor = Theme.NSColor.textSecondary.cgColor
-        header.backgroundColor = Theme.NSColor.bgElevated.cgColor
-        layer.addSublayer(header)
+        let muted = project?.tracks.first(where: { $0.id == track.id })?.muted ?? false
+        drawLaneHeader(
+            frame: track.headerFrame,
+            title: track.name,
+            symbolName: laneSymbol(for: track.kind),
+            emphasized: false,
+            muted: muted,
+            in: layer
+        )
 
         let lane = CALayer()
         lane.frame = track.laneFrame
@@ -518,16 +518,17 @@ public final class TimelineNSView: NSView {
     ) {
         guard let primary = tracksByID[primaryTrackID] else { return }
 
-        // Header label uses the group's friendly name.
-        let header = CATextLayer()
-        header.frame = primary.headerFrame
-        header.string = isVideoGroup ? "Video" : "Audio"
-        header.fontSize = 11
-        header.alignmentMode = .left
-        header.contentsScale = window?.backingScaleFactor ?? 2
-        header.foregroundColor = Theme.NSColor.textPrimary.cgColor
-        header.backgroundColor = Theme.NSColor.bgElevated.cgColor
-        layer.addSublayer(header)
+        // Header label uses the group's friendly name. No mute indicator on
+        // grouped rows — the band aggregates multiple physical tracks whose
+        // mute states can differ; mute lives on the expanded child rows.
+        drawLaneHeader(
+            frame: primary.headerFrame,
+            title: isVideoGroup ? "Video" : "Audio",
+            symbolName: isVideoGroup ? "video.fill" : "speaker.wave.2.fill",
+            emphasized: true,
+            muted: false,
+            in: layer
+        )
 
         // Lane background.
         let lane = CALayer()
@@ -601,6 +602,110 @@ public final class TimelineNSView: NSView {
             glyph.contentsScale = window?.backingScaleFactor ?? 2
             layer.addSublayer(glyph)
         }
+    }
+
+    /// Draws a lane header cell: full-width background, a per-kind glyph at
+    /// the left, the (vertically centred, truncating) track name, and — when
+    /// `muted` — a danger-tinted speaker.slash on the right. The mute glyph
+    /// is a status indicator only; toggling mute lives in the Audio
+    /// inspector tab (no CALayer hit-testing here).
+    private func drawLaneHeader(
+        frame: CGRect,
+        title: String,
+        symbolName: String,
+        emphasized: Bool,
+        muted: Bool,
+        in layer: CALayer
+    ) {
+        let scale = window?.backingScaleFactor ?? 2
+        let bg = CALayer()
+        bg.frame = frame
+        bg.backgroundColor = Theme.NSColor.bgElevated.cgColor
+        layer.addSublayer(bg)
+
+        let textColor: NSColor = muted
+            ? Theme.NSColor.textTertiary
+            : (emphasized ? Theme.NSColor.textPrimary : Theme.NSColor.textSecondary)
+
+        let leftPad: CGFloat = 8
+        let gap: CGFloat = 6
+        let iconSize: CGFloat = 13
+        var textMinX = frame.minX + leftPad
+        var textMaxX = frame.maxX - leftPad
+
+        if let icon = tintedSymbol(symbolName, color: textColor) {
+            let iconLayer = CALayer()
+            iconLayer.frame = CGRect(
+                x: frame.minX + leftPad,
+                y: frame.midY - iconSize / 2,
+                width: iconSize,
+                height: iconSize
+            )
+            iconLayer.contents = icon
+            iconLayer.contentsGravity = .resizeAspect
+            iconLayer.contentsScale = scale
+            layer.addSublayer(iconLayer)
+            textMinX += iconSize + gap
+        }
+
+        if muted, let mutedIcon = tintedSymbol("speaker.slash.fill", color: Theme.NSColor.danger) {
+            let mutedSize: CGFloat = 12
+            let mutedLayer = CALayer()
+            mutedLayer.frame = CGRect(
+                x: frame.maxX - leftPad - mutedSize,
+                y: frame.midY - mutedSize / 2,
+                width: mutedSize,
+                height: mutedSize
+            )
+            mutedLayer.contents = mutedIcon
+            mutedLayer.contentsGravity = .resizeAspect
+            mutedLayer.contentsScale = scale
+            layer.addSublayer(mutedLayer)
+            textMaxX -= mutedSize + gap
+        }
+
+        let text = CATextLayer()
+        let textHeight: CGFloat = 14
+        text.frame = CGRect(
+            x: textMinX,
+            y: frame.midY - textHeight / 2,
+            width: max(0, textMaxX - textMinX),
+            height: textHeight
+        )
+        text.string = title
+        text.fontSize = 11
+        text.alignmentMode = .left
+        text.truncationMode = .end
+        text.isWrapped = false
+        text.contentsScale = scale
+        text.foregroundColor = textColor.cgColor
+        text.backgroundColor = NSColor.clear.cgColor
+        layer.addSublayer(text)
+    }
+
+    /// SF Symbol per track kind for the lane headers. Mirrors the app's
+    /// `TrackKind.inspectorSymbol` (the TimelineUI package can't see app
+    /// code) so iconography stays consistent across the editor.
+    private func laneSymbol(for kind: TrackKind) -> String {
+        switch kind {
+        case .screen:        return "display"
+        case .webcam:        return "video.fill"
+        case .microphone:    return "mic.fill"
+        case .systemAudio:   return "speaker.wave.2.fill"
+        case .voiceover:     return "waveform"
+        case .overlay:       return "rectangle.on.rectangle"
+        case .effects:       return "plus.magnifyingglass"
+        }
+    }
+
+    /// Renders an SF Symbol tinted to `color` as an NSImage suitable for a
+    /// CALayer's `contents`. Template symbols set directly as layer contents
+    /// render in their intrinsic (black) colour, which disappears on the
+    /// dark header — the palette configuration bakes the tint in.
+    private func tintedSymbol(_ name: String, color: NSColor) -> NSImage? {
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
+        let config = NSImage.SymbolConfiguration(paletteColors: [color])
+        return base.withSymbolConfiguration(config)
     }
 
     private func colorForKind(_ kind: TrackKind, selected: Bool) -> NSColor {

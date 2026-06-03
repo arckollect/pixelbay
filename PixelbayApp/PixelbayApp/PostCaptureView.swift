@@ -103,7 +103,7 @@ struct PostCaptureView: View {
             }
             .controlSize(.large)
             .keyboardShortcut(.space, modifiers: [])
-            Text(formatTime(player.currentTime.seconds))
+            Text(Timecode.clock(player.currentTime.seconds))
                 .font(Theme.Font.monoTimecode)
                 .foregroundStyle(Theme.Color.textSecondary)
                 .frame(width: 60, alignment: .trailing)
@@ -118,17 +118,11 @@ struct PostCaptureView: View {
                 in: 0...1
             )
             .tint(Theme.Color.accent)
-            Text(formatTime(player.duration.seconds))
+            Text(Timecode.clock(player.duration.seconds))
                 .font(Theme.Font.monoTimecode)
                 .foregroundStyle(Theme.Color.textSecondary)
                 .frame(width: 60, alignment: .leading)
         }
-    }
-
-    private func formatTime(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
-        let total = Int(seconds.rounded())
-        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     private func loadIntoPlayer() async {

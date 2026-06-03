@@ -196,7 +196,7 @@ struct EffectsInspector: View {
                 Text(label(for: keyframe.kind))
                     .font(Theme.Font.caption)
                     .foregroundStyle(Theme.Color.textPrimary)
-                Text(formatTime(keyframe.timelineRange.start.seconds))
+                Text(Timecode.precise(keyframe.timelineRange.start.seconds))
                     .font(Theme.Font.caption)
                     .foregroundStyle(Theme.Color.textSecondary)
             }
@@ -669,10 +669,4 @@ struct EffectsInspector: View {
         }
     }
 
-    private func formatTime(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "0:00.00" }
-        let minutes = Int(seconds) / 60
-        let secs = seconds.truncatingRemainder(dividingBy: 60)
-        return String(format: "%d:%05.2f", minutes, secs)
-    }
 }

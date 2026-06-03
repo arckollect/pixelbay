@@ -32,15 +32,15 @@ struct ProjectView: View {
     @FocusState private var isEditingName: Bool
     @State private var pixelsPerSecond: CGFloat = TimelineLayoutCalculator.defaultPixelsPerSecond
     @State private var trackHeight: CGFloat = TimelineLayoutCalculator.defaultTrackHeight
-    /// Per-clip in-progress slider values. Non-nil while the user is
-    /// dragging; consulted by the Inspector sliders so they show the
-    /// live drag value instead of the (still-stale-until-drag-end)
-    /// clip.volume / clip.speed. On drag end we submit ONE EditCommand
-    /// with the final value and clear the preview. Without this, the
-    /// undo stack would fill with hundreds of micro-edits per slider
-    /// drag.
-    @State private var previewVolumes: [ClipID: Double] = [:]
-    @State private var previewSpeeds: [ClipID: Double] = [:]
+    /// Which inspector tab the right-rail is showing. Independent of clip /
+    /// keyframe selection, except that selecting an effect keyframe in the
+    /// timeline auto-switches here to `.zoom` (the only surface that edits
+    /// it). The per-clip volume/speed drag-preview state now lives inside
+    /// `AudioInspector`.
+    @State private var selectedTab: InspectorTab = .layout
+    /// Preview fit (letterbox) vs fill (crop). Toggled from the transport's
+    /// aspect button; defaults to fit so nothing is cropped on open.
+    @State private var previewFill: Bool = false
     /// Slice A.3 — controls the timeline-end "+" popover. Hosting the
     /// popover state here (rather than inside TimelineView) keeps the
     /// invasive change off `TimelineView.swift` so the parallel Branch B
@@ -62,7 +62,7 @@ struct ProjectView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 PBDivider(.vertical)
                 inspectorPane
-                    .frame(width: 320)
+                    .frame(width: 360)
             }
         }
         .frame(minWidth: 1000, minHeight: 700)
@@ -163,6 +163,7 @@ struct ProjectView: View {
                 Label("Reveal", systemImage: "folder")
             }
             .buttonStyle(.pbCompact)
+            PBDivider(.vertical).frame(height: 20)
             // Branch B (Slice B.4) — bulk toggle of every grouped lane.
             // Reads the smart-default seed to decide which direction the
             // button toggles to. INSERTION ORDER: this is the LAST item
@@ -225,34 +226,67 @@ struct ProjectView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Theme.Color.bgBase)
         case .ready:
-            VStack(spacing: Theme.Spacing.md) {
-                PreviewPlayerView(player: player)
-                    .background(Theme.Color.bgBase, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Theme.Radius.medium)
-                            .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
-                    )
-                playbackControls
-            }
-            .padding(Theme.Spacing.lg)
+            PreviewPlayerView(player: player, fill: previewFill)
+                .background(Theme.Color.bgBase, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                        .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+                )
+                .overlay(alignment: .top) { aspectControl }
+                .overlay(alignment: .bottom) { transportBar }
+                .padding(Theme.Spacing.lg)
         }
     }
 
-    private var playbackControls: some View {
-        HStack(spacing: Theme.Spacing.md) {
+    // Top-trailing fit/fill toggle, floating over the video.
+    private var aspectControl: some View {
+        Button {
+            previewFill.toggle()
+        } label: {
+            Image(systemName: previewFill
+                  ? "rectangle.arrowtriangle.2.inward"
+                  : "rectangle.arrowtriangle.2.outward")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.Color.textPrimary)
+                .frame(width: 30, height: 24)
+                .pbGlassBar(RoundedRectangle(cornerRadius: Theme.Radius.medium))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                        .strokeBorder(Color.white.opacity(0.12), lineWidth: Theme.Stroke.regular)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
+        }
+        .buttonStyle(.plain)
+        .help(previewFill ? "Fit (letterbox)" : "Fill (crop)")
+        .padding(Theme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    // Floating glass transport bar pinned to the bottom of the preview.
+    private var transportBar: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.Radius.large)
+        return HStack(spacing: Theme.Spacing.sm) {
+            transportButton("backward.end.fill", help: "Jump to start") { player.seekToStart() }
+            transportButton("backward.frame.fill", help: "Step back one frame") { player.stepFrame(by: -1) }
             Button {
                 player.togglePlayPause()
             } label: {
                 Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                    .frame(width: 22, height: 18)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textPrimary)
+                    .frame(width: 30, height: 26)
             }
-            .controlSize(.large)
+            .buttonStyle(.plain)
             .keyboardShortcut(.space, modifiers: [])
-            Text(formatTime(player.currentTime.seconds))
+            .help(player.isPlaying ? "Pause" : "Play")
+            transportButton("forward.frame.fill", help: "Step forward one frame") { player.stepFrame(by: 1) }
+            transportButton("forward.end.fill", help: "Jump to end") { player.seekToEnd() }
+
+            Text(Timecode.clock(player.currentTime.seconds))
                 .font(Theme.Font.monoTimecode)
-                .foregroundStyle(Theme.Color.textSecondary)
-                .frame(width: 60, alignment: .trailing)
+                .foregroundStyle(Theme.Color.textPrimary)
+                .frame(width: 44, alignment: .trailing)
             Slider(
                 value: Binding<Double>(
                     get: {
@@ -263,14 +297,41 @@ struct ProjectView: View {
                 ),
                 in: 0...1
             )
-            Text(formatTime(player.duration.seconds))
+            .controlSize(.small)
+            .tint(Theme.Color.accent)
+            Text(Timecode.clock(player.duration.seconds))
                 .font(Theme.Font.monoTimecode)
                 .foregroundStyle(Theme.Color.textSecondary)
-                .frame(width: 60, alignment: .leading)
+                .frame(width: 44, alignment: .leading)
         }
+        .padding(.horizontal, Theme.Spacing.lg)
+        .padding(.vertical, Theme.Spacing.sm)
+        .pbGlassBar(shape)
+        .overlay(shape.strokeBorder(Color.white.opacity(0.12), lineWidth: Theme.Stroke.regular))
+        .clipShape(shape)
+        .padding(Theme.Spacing.md)
+    }
+
+    private func transportButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     // MARK: - Timeline pane
+
+    private func timelineGlyph(_ symbol: String, help: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Theme.Color.textSecondary)
+            .help(help)
+    }
 
     private var timelinePane: some View {
         VStack(spacing: 0) {
@@ -283,29 +344,27 @@ struct ProjectView: View {
                 // tracks when the project has many of them (so they all
                 // fit in the visible pane without vertical scrolling) or
                 // expand to give waveforms more room.
-                Image(systemName: "rectangle.compress.vertical")
-                    .foregroundStyle(Theme.Color.textSecondary)
-                    .help("Condense tracks")
+                timelineGlyph("rectangle.compress.vertical", help: "Condense tracks")
                 Slider(
                     value: $trackHeight,
                     in: TimelineLayoutCalculator.minTrackHeight...TimelineLayoutCalculator.maxTrackHeight
                 )
-                .frame(width: 110)
+                .controlSize(.mini)
+                .frame(width: 96)
+                .tint(Theme.Color.accent)
                 .help("Adjust track row height")
-                Image(systemName: "rectangle.expand.vertical")
-                    .foregroundStyle(Theme.Color.textSecondary)
-                    .help("Expand tracks")
+                timelineGlyph("rectangle.expand.vertical", help: "Expand tracks")
                 PBDivider(.vertical).frame(height: 16)
-                Image(systemName: "minus.magnifyingglass")
-                    .foregroundStyle(Theme.Color.textSecondary)
+                timelineGlyph("minus.magnifyingglass", help: "Zoom out")
                 Slider(
                     value: $pixelsPerSecond,
                     in: TimelineLayoutCalculator.minPixelsPerSecond...TimelineLayoutCalculator.maxPixelsPerSecond
                 )
-                .frame(width: 140)
+                .controlSize(.mini)
+                .frame(width: 120)
+                .tint(Theme.Color.accent)
                 .help("Zoom timeline")
-                Image(systemName: "plus.magnifyingglass")
-                    .foregroundStyle(Theme.Color.textSecondary)
+                timelineGlyph("plus.magnifyingglass", help: "Zoom in")
                 PBDivider(.vertical).frame(height: 16)
                 // Slice A.3 — "+" entry point for a single-shot append
                 // recording. Anchored at the right edge of the timeline
@@ -316,11 +375,9 @@ struct ProjectView: View {
                 Button {
                     appendPopoverPresented = true
                 } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .imageScale(.large)
-                        .foregroundStyle(Theme.Color.accent)
+                    Label("Add", systemImage: "plus.circle.fill")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pbCompact)
                 .help("Record more — appends to the timeline tail")
                 .popover(isPresented: $appendPopoverPresented, arrowEdge: .top) {
                     AppendRecordingPopover(
@@ -352,7 +409,12 @@ struct ProjectView: View {
                 playheadTime: rationalTime(player.currentTime),
                 revision: document.revision,
                 onSelect: { selectedClipID = $0 },
-                onSelectEffectKeyframe: { selectedEffectKeyframeID = $0 },
+                onSelectEffectKeyframe: { keyframeID in
+                    selectedEffectKeyframeID = keyframeID
+                    // Selecting a keyframe in the timeline reveals the only
+                    // surface that edits it.
+                    if keyframeID != nil { selectedTab = .zoom }
+                },
                 onApplyCommand: { command in
                     Task { await document.apply(command) }
                 },
@@ -369,57 +431,73 @@ struct ProjectView: View {
     // MARK: - Inspector pane
 
     private var inspectorPane: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-                projectInspector
-                PBDivider()
-                layoutInspector
-                PBDivider()
-                effectsInspector
-                PBDivider()
-                tracksAndClipsList
-                PBDivider()
-                clipInspector
-                Spacer(minLength: 0)
-                if case .failed(let message) = document.status {
-                    HStack(alignment: .top, spacing: Theme.Spacing.sm) {
-                        Image(systemName: "xmark.octagon.fill").foregroundStyle(Theme.Color.danger)
-                        Text(message).font(Theme.Font.body).foregroundStyle(Theme.Color.textPrimary)
-                        Spacer()
-                        Button("Dismiss") { document.acknowledgeError() }
-                            .buttonStyle(.pbGhost)
+        VStack(spacing: 0) {
+            projectHeader
+            PBDivider()
+            PBVerticalTabRail(tabs: Self.inspectorTabs, selection: $selectedTab) { tab in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                        tabContent(tab)
                     }
-                    .padding(Theme.Spacing.sm)
-                    .background(Theme.Color.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Theme.Radius.medium)
-                            .strokeBorder(Theme.Color.danger.opacity(0.35), lineWidth: Theme.Stroke.hairline)
-                    )
+                    .padding(Theme.Spacing.lg)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .padding(Theme.Spacing.lg)
+            if case .failed(let message) = document.status {
+                PBDivider()
+                errorBanner(message)
+            }
         }
         .frame(maxHeight: .infinity)
         .background(Theme.Color.bgDeep)
     }
 
-    private var projectInspector: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            PBSectionHeader("Project")
-            HStack {
-                TextField("Name", text: $editingName)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($isEditingName)
-                    .onSubmit { commitNameIfChanged() }
-                    .onChange(of: isEditingName) { _, focused in
-                        // Commit on focus-loss (clicking elsewhere, ⌘S,
-                        // closing the project) — not just Enter. Fixes
-                        // the "typed but didn't press Enter then clicked
-                        // Save, lost the change" wart.
-                        if !focused { commitNameIfChanged() }
-                    }
-            }
+    private static let inspectorTabs: [PBTabItem<InspectorTab>] = [
+        PBTabItem(tag: .layout, systemImage: "rectangle.on.rectangle", help: "Layout"),
+        PBTabItem(tag: .cursor, systemImage: "cursorarrow.rays", help: "Cursor"),
+        PBTabItem(tag: .zoom, systemImage: "plus.magnifyingglass", help: "Zoom & Effects"),
+        PBTabItem(tag: .audio, systemImage: "speaker.wave.2", help: "Audio")
+    ]
+
+    @ViewBuilder
+    private func tabContent(_ tab: InspectorTab) -> some View {
+        switch tab {
+        case .layout: layoutInspector
+        case .cursor: cursorInspector
+        case .zoom: effectsInspector
+        case .audio: audioInspector
         }
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+            Image(systemName: "xmark.octagon.fill").foregroundStyle(Theme.Color.danger)
+            Text(message).font(Theme.Font.body).foregroundStyle(Theme.Color.textPrimary)
+            Spacer()
+            Button("Dismiss") { document.acknowledgeError() }
+                .buttonStyle(.pbGhost)
+        }
+        .padding(Theme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.Color.danger.opacity(0.12))
+    }
+
+    private var projectHeader: some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            TextField("Project Name", text: $editingName)
+                .textFieldStyle(.roundedBorder)
+                .focused($isEditingName)
+                .onSubmit { commitNameIfChanged() }
+                .onChange(of: isEditingName) { _, focused in
+                    // Commit on focus-loss (clicking elsewhere, ⌘S,
+                    // closing the project) — not just Enter. Fixes
+                    // the "typed but didn't press Enter then clicked
+                    // Save, lost the change" wart.
+                    if !focused { commitNameIfChanged() }
+                }
+        }
+        .padding(.horizontal, Theme.Spacing.lg)
+        .padding(.vertical, Theme.Spacing.md)
     }
 
     private func commitNameIfChanged() {
@@ -432,12 +510,31 @@ struct ProjectView: View {
     private var layoutInspector: some View {
         LayoutInspector(
             layout: document.project.layout,
-            cursorSettings: document.project.cursorSettings,
             onChange: { newLayout in
                 Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
-            },
+            }
+        )
+    }
+
+    // MARK: - Cursor inspector (Phase 3c)
+
+    private var cursorInspector: some View {
+        CursorInspector(
+            cursorSettings: document.project.cursorSettings,
             onCursorChange: { newCursor in
                 Task { await document.apply(SetCursorSettingsCommand(newSettings: newCursor)) }
+            }
+        )
+    }
+
+    // MARK: - Audio inspector
+
+    private var audioInspector: some View {
+        AudioInspector(
+            clip: selectedClipID.flatMap { document.project.clip($0) },
+            audioTracks: document.project.tracks.filter { $0.kind.isAudioBearing },
+            onApply: { command in
+                Task { await document.apply(command) }
             }
         )
     }
@@ -460,161 +557,7 @@ struct ProjectView: View {
         )
     }
 
-    private var tracksAndClipsList: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            PBSectionHeader("Clips")
-            if document.project.tracks.flatMap(\.clips).isEmpty {
-                Text("This project has no clips.")
-                    .foregroundStyle(Theme.Color.textSecondary)
-                    .font(Theme.Font.body)
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                        ForEach(document.project.tracks) { track in
-                            Section {
-                                ForEach(track.clips) { clip in
-                                    clipRow(track: track, clip: clip)
-                                }
-                            } header: {
-                                Text("\(track.name) (\(track.kind.rawValue))")
-                                    .font(Theme.Font.caption)
-                                    .foregroundStyle(Theme.Color.textTertiary)
-                                    .padding(.top, Theme.Spacing.xs)
-                            }
-                        }
-                    }
-                }
-                .frame(maxHeight: 220)
-            }
-        }
-    }
-
-    private func clipRow(track: Track, clip: Clip) -> some View {
-        let isSelected = clip.id == selectedClipID
-        return HStack(spacing: Theme.Spacing.sm) {
-            Image(systemName: clip.id == selectedClipID ? "play.circle.fill" : "play.circle")
-                .foregroundStyle(isSelected ? Theme.Color.accent : Theme.Color.textSecondary)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(clip.id.rawValue.prefix(8) + "…")
-                    .font(Theme.Font.monoTimecode)
-                    .foregroundStyle(Theme.Color.textPrimary)
-                Text(formatRange(clip.timelineRange))
-                    .font(Theme.Font.caption)
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-            Spacer()
-            Button {
-                Task { await document.apply(RemoveClipCommand(clipID: clip.id)) }
-                if clip.id == selectedClipID { selectedClipID = nil }
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(Theme.Color.textTertiary)
-            .help("Remove clip")
-        }
-        .padding(.horizontal, Theme.Spacing.sm)
-        .padding(.vertical, Theme.Spacing.xs)
-        .background(isSelected ? Theme.Color.accent.opacity(0.18) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: Theme.Radius.small))
-        .contentShape(Rectangle())
-        .onTapGesture { selectedClipID = clip.id }
-    }
-
-    @ViewBuilder
-    private var clipInspector: some View {
-        if let clipID = selectedClipID, let clip = document.project.clip(clipID) {
-            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                PBSectionHeader("Clip")
-                volumeSlider(for: clip)
-                speedSlider(for: clip)
-            }
-        } else {
-            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                PBSectionHeader("Clip")
-                Text("Select a clip from the list to edit.")
-                    .font(Theme.Font.body)
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-        }
-    }
-
-    private func volumeSlider(for clip: Clip) -> some View {
-        // Live value: the in-progress drag preview if non-nil, else the
-        // committed clip.volume. The displayed % readout follows the
-        // preview too so the user sees what they're about to commit.
-        let liveValue = previewVolumes[clip.id] ?? min(clip.volume, 2.0)
-        let clipID = clip.id
-        let committedValue = clip.volume
-        return VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            HStack {
-                Text("Volume")
-                    .font(Theme.Font.body)
-                    .foregroundStyle(Theme.Color.textPrimary)
-                Spacer()
-                Text(String(format: "%.0f%%", liveValue * 100))
-                    .font(Theme.Font.monoTimecode)
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-            Slider(
-                value: Binding<Double>(
-                    get: { liveValue },
-                    set: { newValue in previewVolumes[clipID] = newValue }
-                ),
-                in: 0...2,
-                onEditingChanged: { isEditing in
-                    guard !isEditing, let final = previewVolumes[clipID] else { return }
-                    previewVolumes[clipID] = nil
-                    if abs(final - committedValue) < 0.0001 { return }
-                    Task { await document.apply(SetClipVolumeCommand(clipID: clipID, newVolume: final)) }
-                }
-            )
-        }
-    }
-
-    private func speedSlider(for clip: Clip) -> some View {
-        let liveValue = previewSpeeds[clip.id] ?? min(max(clip.speed, 0.25), 4.0)
-        let clipID = clip.id
-        let committedValue = clip.speed
-        return VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            HStack {
-                Text("Speed")
-                    .font(Theme.Font.body)
-                    .foregroundStyle(Theme.Color.textPrimary)
-                Spacer()
-                Text(String(format: "%.2f×", liveValue))
-                    .font(Theme.Font.monoTimecode)
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-            Slider(
-                value: Binding<Double>(
-                    get: { liveValue },
-                    set: { newValue in previewSpeeds[clipID] = newValue }
-                ),
-                in: 0.25...4.0,
-                onEditingChanged: { isEditing in
-                    guard !isEditing, let final = previewSpeeds[clipID] else { return }
-                    previewSpeeds[clipID] = nil
-                    if abs(final - committedValue) < 0.0001 { return }
-                    Task { await document.apply(SetClipSpeedCommand(clipID: clipID, newSpeed: final)) }
-                }
-            )
-        }
-    }
-
     // MARK: - Helpers
-
-    private func formatTime(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
-        let total = Int(seconds.rounded())
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
-
-    private func formatRange(_ range: TimeRange) -> String {
-        let start = Double(range.start.value) / Double(range.start.timescale)
-        let dur = Double(range.duration.value) / Double(range.duration.timescale)
-        return String(format: "%.2fs · %.2fs", start, dur)
-    }
 
     private func rationalTime(_ cmTime: CMTime) -> RationalTime? {
         guard cmTime.isValid, !cmTime.isIndefinite else { return nil }
@@ -629,4 +572,12 @@ struct ProjectView: View {
 private struct ProjectViewKey: Hashable {
     let bundleURL: URL
     let revision: Int
+}
+
+/// The right-rail inspector categories, surfaced as a vertical icon-tab rail.
+enum InspectorTab: Hashable {
+    case layout
+    case cursor
+    case zoom
+    case audio
 }

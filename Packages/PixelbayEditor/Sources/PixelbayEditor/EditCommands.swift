@@ -35,6 +35,33 @@ public struct SetClipVolumeCommand: EditCommand {
     }
 }
 
+// MARK: - SetTrackMuted
+
+/// Toggles a track's `muted` flag. Surfaced as per-track mute buttons in the
+/// Audio inspector tab and the timeline lane headers. Muting forces the
+/// track silent in both preview and export (the audio mix applies a flat 0
+/// volume — see `PreviewCompositionBuilder.populateAudioTrack`).
+public struct SetTrackMutedCommand: EditCommand {
+    public let displayName = "Mute Track"
+    public let trackID: TrackID
+    public let muted: Bool
+
+    public init(trackID: TrackID, muted: Bool) {
+        self.trackID = trackID
+        self.muted = muted
+    }
+
+    @discardableResult
+    public func apply(to project: inout Project) throws -> any EditCommand {
+        var previousMuted = false
+        try project.mutateTrack(trackID) { track in
+            previousMuted = track.muted
+            track.muted = muted
+        }
+        return SetTrackMutedCommand(trackID: trackID, muted: previousMuted)
+    }
+}
+
 // MARK: - TrimClipIn
 
 /// Drags the IN-point of a clip — moves both `sourceRange.start` and

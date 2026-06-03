@@ -106,7 +106,7 @@ private struct RecordingHUDView: View {
         .padding(.horizontal, Theme.Spacing.md)
         .padding(.vertical, Theme.Spacing.sm)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .glassBar(barShape)
+        .pbGlassBar(barShape)
         .overlay(barShape.strokeBorder(Color.white.opacity(0.12), lineWidth: Theme.Stroke.regular))
         // No drop shadow: any shadow renders as a faded grey backdrop box
         // around the bar on light desktops, which reads as unwanted chrome.
@@ -194,27 +194,4 @@ private struct RecordingHUDView: View {
     }
 }
 
-// Frosted dark-glass background, clipped to the bar shape — same recipe as the
-// launcher picker bar (PrecaptureView.glassBar). Deliberately NOT macOS 26's
-// `.glassEffect`: that re-samples the desktop every frame and renders broken
-// (flat opaque rectangle) while the window is dragged or reconfigured. An
-// `NSVisualEffectView`-backed material is rock-solid across drags and window
-// changes, and with the dark wash + faint top sheen reads as the same premium
-// dark glass.
-private extension View {
-    func glassBar(_ shape: RoundedRectangle) -> some View {
-        self.background {
-            ZStack {
-                shape.fill(.ultraThinMaterial)
-                shape.fill(Color.black.opacity(0.28))
-                shape.fill(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.10), .clear],
-                        startPoint: .top,
-                        endPoint: .center
-                    )
-                )
-            }
-        }
-    }
-}
+// Glass recipe promoted to `View.pbGlassBar(_:)` in PixelbayDesignSystem.
