@@ -58,7 +58,7 @@ struct CursorInspector: View {
                     .font(Theme.Font.monoTimecode)
                     .foregroundStyle(Theme.Color.textSecondary)
             }
-            Slider(
+            PBSlider(
                 value: Binding<Double>(
                     get: { liveValue },
                     set: { newValue in previewCursorScale = newValue }
@@ -77,5 +77,6 @@ struct CursorInspector: View {
                 }
             )
         }
+        .pbInsetRow()
     }
 }

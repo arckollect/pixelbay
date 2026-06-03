@@ -42,12 +42,10 @@ struct LayoutInspector: View {
         HStack {
             Text("Mode")
             Spacer()
-            Picker("", selection: modeBinding) {
-                Text("Picture-in-Picture").tag(LayoutModeTag.pip)
-                Text("Side-by-Side").tag(LayoutModeTag.split)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            PBSegmentedControl(selection: modeBinding, [
+                (LayoutModeTag.pip, "Picture-in-Picture"),
+                (LayoutModeTag.split, "Side-by-Side"),
+            ])
             .frame(maxWidth: 200)
         }
     }
@@ -123,13 +121,11 @@ struct LayoutInspector: View {
         HStack {
             Text("Cam Size").font(.caption)
             Spacer()
-            Picker("", selection: sizeBinding) {
-                Text("S").tag(CamSizePreset.small)
-                Text("M").tag(CamSizePreset.medium)
-                Text("L").tag(CamSizePreset.large)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            PBSegmentedControl(selection: sizeBinding, [
+                (CamSizePreset.small, "S"),
+                (CamSizePreset.medium, "M"),
+                (CamSizePreset.large, "L"),
+            ])
             .frame(maxWidth: 110)
         }
     }
@@ -156,12 +152,10 @@ struct LayoutInspector: View {
         HStack {
             Text("Screen Side").font(.caption)
             Spacer()
-            Picker("", selection: splitSideBinding) {
-                Text("Left").tag(HorizontalSide.left)
-                Text("Right").tag(HorizontalSide.right)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            PBSegmentedControl(selection: splitSideBinding, [
+                (HorizontalSide.left, "Left"),
+                (HorizontalSide.right, "Right"),
+            ])
             .frame(maxWidth: 130)
         }
         VStack(alignment: .leading, spacing: 2) {
@@ -172,7 +166,7 @@ struct LayoutInspector: View {
                     .font(Theme.Font.monoTimecode)
                     .foregroundStyle(Theme.Color.textSecondary)
             }
-            Slider(
+            PBSlider(
                 value: Binding<Double>(
                     get: { fraction },
                     set: { newValue in
@@ -208,12 +202,10 @@ struct LayoutInspector: View {
         HStack {
             Text("Cam Shape").font(.caption)
             Spacer()
-            Picker("", selection: camShapeBinding) {
-                Text("Rectangle").tag(CamShape.rectangle)
-                Text("Circle").tag(CamShape.circle)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            PBSegmentedControl(selection: camShapeBinding, [
+                (CamShape.rectangle, "Rectangle"),
+                (CamShape.circle, "Circle"),
+            ])
             .frame(maxWidth: 180)
         }
     }
@@ -240,13 +232,11 @@ struct LayoutInspector: View {
         HStack {
             Text("Background").font(.caption)
             Spacer()
-            Picker("", selection: backgroundKindBinding) {
-                Text("None").tag(BackgroundKind.none)
-                Text("Solid").tag(BackgroundKind.solid)
-                Text("Gradient").tag(BackgroundKind.gradient)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            PBSegmentedControl(selection: backgroundKindBinding, [
+                (BackgroundKind.none, "None"),
+                (BackgroundKind.solid, "Solid"),
+                (BackgroundKind.gradient, "Gradient"),
+            ])
             .frame(maxWidth: 200)
         }
     }
@@ -360,7 +350,7 @@ struct LayoutInspector: View {
                     .font(Theme.Font.monoTimecode)
                     .foregroundStyle(Theme.Color.textSecondary)
             }
-            Slider(
+            PBSlider(
                 value: Binding<Double>(
                     get: { layout.padding },
                     set: { newValue in

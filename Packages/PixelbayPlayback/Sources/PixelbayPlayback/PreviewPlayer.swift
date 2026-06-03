@@ -299,6 +299,17 @@ public final class PlayerLayerHostingView: NSView {
     public override func makeBackingLayer() -> CALayer {
         let layer = AVPlayerLayer()
         layer.videoGravity = .resizeAspect
+        // Disable implicit animations so the video re-fits INSTANTLY on every
+        // resize. Without this, AVPlayerLayer animates the gravity re-fit over
+        // ~0.25s, and during a live pane-divider drag each tick starts a fresh
+        // animation — the video lags and "twitches before it settles". NSNull
+        // actions make bounds/position changes snap.
+        layer.actions = [
+            "bounds": NSNull(),
+            "position": NSNull(),
+            "sublayers": NSNull(),
+            "contents": NSNull()
+        ]
         return layer
     }
 

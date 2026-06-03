@@ -100,10 +100,14 @@ public struct TimelineView: NSViewRepresentable {
     //      horizontal scroll (so tick / clip alignment holds at every
     //      scroll position).
     public func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
+        let scroll = TimelineScrollView()
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
+        // Overlay scrollers float over content instead of taking layout width,
+        // so they can't appear/disappear and reflow the lanes mid-resize
+        // (another potential source of resize twitch).
+        scroll.scrollerStyle = .overlay
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
         // Match the flipped documentView so AppKit places (0,0) at top.
@@ -177,6 +181,12 @@ public struct TimelineView: NSViewRepresentable {
             width: max(natural.width, viewport.width),
             height: max(natural.height, viewport.height)
         )
+        // No-animation transaction: when the pane divider is dragged, the
+        // viewport (and so this target) changes every tick. Without disabling
+        // actions the document/ruler frame changes animate over ~0.25s and the
+        // timeline visibly twitches/settles behind the drag.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         if timeline.frame.size != target {
             timeline.setFrameSize(target)
         }
@@ -190,6 +200,50 @@ public struct TimelineView: NSViewRepresentable {
                 rulerHost.frame = rulerFrame
             }
         }
+        CATransaction.commit()
+    }
+}
+
+/// NSScrollView subclass that swallows the automatic scroller *flash*
+/// while its own frame is actively changing — i.e. while the user drags
+/// the preview/timeline divider.
+///
+/// AppKit auto-calls `flashScrollers()` whenever the content size changes
+/// relative to the viewport, to hint scrollability. During a continuous
+/// divider drag the viewport changes every tick, so the overlay scrollers
+/// flash in and out repeatedly — the "scroll handles appear then
+/// disappear" twitch. The scrollers are `.overlay` style (they float and
+/// never reflow the lanes), so suppressing the flash during resize is
+/// purely cosmetic: the timeline stays calm while dragging, and a real
+/// scroll gesture still reveals the scroller normally (that path doesn't
+/// go through `flashScrollers()`).
+///
+/// The suppression is scoped to resize only: `setFrameSize` raises the
+/// flag synchronously (so the flash AppKit triggers inside the same tile
+/// pass is swallowed) and clears it one runloop hop later, so flashes from
+/// genuine content changes (zoom, adding tracks) while the pane is idle
+/// still play.
+private final class TimelineScrollView: NSScrollView {
+    private var suppressScrollerFlash = false
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = newSize != frame.size
+        if changed { suppressScrollerFlash = true }
+        super.setFrameSize(newSize)
+        if changed {
+            // Clear after the current tile/layout pass settles. Coalesces
+            // naturally across a drag: each tick re-raises the flag before
+            // its own flash, and the final tick's reset lands after the
+            // drag ends.
+            DispatchQueue.main.async { [weak self] in
+                self?.suppressScrollerFlash = false
+            }
+        }
+    }
+
+    override func flashScrollers() {
+        guard !suppressScrollerFlash else { return }
+        super.flashScrollers()
     }
 }
 
@@ -280,6 +334,10 @@ public final class TimelineNSView: NSView {
         wantsLayer = true
         layer?.backgroundColor = Theme.NSColor.bgDeep.cgColor
         layer?.masksToBounds = true
+        // Snap, never animate, on bounds/position changes — so resizing the
+        // pane divider doesn't let the backing layer ease into its new size
+        // (a source of the resize twitch).
+        layer?.actions = ["bounds": NSNull(), "position": NSNull()]
     }
 
     @available(*, unavailable)
@@ -391,26 +449,60 @@ public final class TimelineNSView: NSView {
         }
 
         let effectsLane = layout.effectsLane
-        let effectsHeader = CATextLayer()
-        effectsHeader.frame = effectsLane.headerFrame
-        effectsHeader.string = "Effects"
-        effectsHeader.fontSize = 11
-        effectsHeader.alignmentMode = .left
-        effectsHeader.contentsScale = window?.backingScaleFactor ?? 2
-        effectsHeader.foregroundColor = Theme.NSColor.textSecondary.cgColor
-        effectsHeader.backgroundColor = Theme.NSColor.bgElevated.cgColor
-        layer.addSublayer(effectsHeader)
+        // Effects header through the shared lane-header path so it matches the
+        // icon+name treatment of the track lanes above it.
+        drawLaneHeader(
+            frame: effectsLane.headerFrame,
+            title: "Effects",
+            symbolName: "plus.magnifyingglass",
+            emphasized: false,
+            muted: false,
+            in: layer
+        )
 
         let effectsLaneBg = CALayer()
         effectsLaneBg.frame = effectsLane.laneFrame
         effectsLaneBg.backgroundColor = Theme.NSColor.bgBase.withAlphaComponent(0.4).cgColor
         layer.addSublayer(effectsLaneBg)
 
+        // Empty state reads as intentional, not broken: a quiet centred hint
+        // instead of a blank lane. Drawn inside rebuildLayers so the
+        // revision-gate still suppresses per-frame rebuilds.
+        if effectsLane.keyframes.isEmpty {
+            let hint = CATextLayer()
+            hint.string = "No effects yet"
+            hint.fontSize = 11
+            hint.alignmentMode = .center
+            hint.contentsScale = window?.backingScaleFactor ?? 2
+            hint.foregroundColor = Theme.NSColor.textTertiary.cgColor
+            hint.backgroundColor = NSColor.clear.cgColor
+            let hintHeight: CGFloat = 14
+            hint.frame = CGRect(
+                x: effectsLane.laneFrame.minX,
+                y: effectsLane.laneFrame.midY - hintHeight / 2,
+                width: effectsLane.laneFrame.width,
+                height: hintHeight
+            )
+            layer.addSublayer(hint)
+        }
+
+        // Bottom hairline under the last (effects) lane so the timeline reads
+        // as deliberately ending here rather than falling into dead space.
+        let bottomRule = CALayer()
+        bottomRule.frame = CGRect(
+            x: 0,
+            y: effectsLane.laneFrame.maxY,
+            width: max(effectsLane.headerFrame.width + effectsLane.laneFrame.width, bounds.width),
+            height: Theme.Stroke.hairline
+        )
+        bottomRule.backgroundColor = Theme.NSColor.borderSubtle.cgColor
+        layer.addSublayer(bottomRule)
+
         for keyframe in effectsLane.keyframes {
             let isSelected = keyframe.id == selectedEffectKeyframeID
             let kfLayer = CALayer()
             kfLayer.frame = keyframe.frame
-            kfLayer.cornerRadius = 4
+            kfLayer.cornerRadius = 5
             kfLayer.borderWidth = isSelected ? 2 : 1
             kfLayer.borderColor = isSelected
                 ? Theme.NSColor.accent.cgColor
@@ -490,11 +582,13 @@ public final class TimelineNSView: NSView {
         for clip in track.clips {
             let clipLayer = CALayer()
             clipLayer.frame = clip.frame
-            clipLayer.cornerRadius = 4
-            clipLayer.borderWidth = clip.id == selectedClipID ? 2 : 1
+            clipLayer.cornerRadius = 5
+            clipLayer.borderWidth = clip.id == selectedClipID ? 1.5 : 1
+            // Unselected clips get a bright same-hue rim so they read as
+            // defined, finished pills; selected gets the accent.
             clipLayer.borderColor = clip.id == selectedClipID
                 ? Theme.NSColor.accent.cgColor
-                : Theme.NSColor.borderSubtle.cgColor
+                : colorForKind(track.kind, selected: true).cgColor
             clipLayer.backgroundColor = colorForKind(track.kind, selected: clip.id == selectedClipID).cgColor
             layer.addSublayer(clipLayer)
             if isAudioKind(track.kind) {
@@ -540,11 +634,11 @@ public final class TimelineNSView: NSView {
         for clip in primary.clips {
             let clipLayer = CALayer()
             clipLayer.frame = clip.frame
-            clipLayer.cornerRadius = 4
-            clipLayer.borderWidth = clip.id == selectedClipID ? 2 : 1
+            clipLayer.cornerRadius = 5
+            clipLayer.borderWidth = clip.id == selectedClipID ? 1.5 : 1
             clipLayer.borderColor = clip.id == selectedClipID
                 ? Theme.NSColor.accent.cgColor
-                : Theme.NSColor.borderSubtle.cgColor
+                : colorForKind(primary.kind, selected: true).cgColor
             clipLayer.backgroundColor = colorForKind(primary.kind, selected: clip.id == selectedClipID).cgColor
             layer.addSublayer(clipLayer)
             if isAudioKind(primary.kind) {
@@ -719,7 +813,19 @@ public final class TimelineNSView: NSView {
         case .overlay:       base = Theme.NSColor.trackOverlay
         case .effects:       base = Theme.NSColor.trackEffects
         }
-        return base.withAlphaComponent(selected ? 0.55 : 0.35)
+        // Audio clips keep a SUBTLE tinted body so the bright waveform reads as
+        // the hero instead of sitting on a solid block; video clips (whose
+        // thumbnail strip covers most of the body) carry more colour presence.
+        // Audio clips: a clear coloured body (like pro editors) now that the
+        // bright white waveform sits on top — the earlier washed-out tint read
+        // as a flat block because the waveform was invisible.
+        let alpha: CGFloat
+        if isAudioKind(kind) {
+            alpha = selected ? 0.62 : 0.45
+        } else {
+            alpha = selected ? 0.80 : 0.55
+        }
+        return base.withAlphaComponent(alpha)
     }
 
     private func colorForEffectKeyframe(
@@ -842,7 +948,7 @@ public final class TimelineNSView: NSView {
             width: max(0, clipFrame.width - inset * 2),
             height: max(0, clipFrame.height - inset * 2)
         )
-        waveform.fillColor = Theme.NSColor.waveformFill.withAlphaComponent(0.9).cgColor
+        waveform.fillColor = Theme.NSColor.waveformFill.withAlphaComponent(0.95).cgColor
         waveform.contentsScale = window?.backingScaleFactor ?? 2
         layer?.addSublayer(waveform)
 
@@ -948,6 +1054,13 @@ public final class TimelineNSView: NSView {
             let l = CALayer()
             l.backgroundColor = Theme.NSColor.timelinePlayhead.cgColor
             l.zPosition = 1000  // above all clip layers
+            // Dark halo so the white line reads crisply over BOTH light clip
+            // thumbnails and dark lanes — without it a thin line vanishes
+            // into busy content (the "choppy / blends in" problem).
+            l.shadowColor = NSColor.black.cgColor
+            l.shadowOpacity = 0.5
+            l.shadowRadius = 1.5
+            l.shadowOffset = .zero
             layer.addSublayer(l)
             playheadLineLayer = l
         }
@@ -958,9 +1071,9 @@ public final class TimelineNSView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         playheadLineLayer?.frame = CGRect(
-            x: x,
+            x: x - 1,   // centre the 2pt line on the exact time position
             y: 0,
-            width: 1,
+            width: 2,
             height: lastLayout.totalContentHeight
         )
         CATransaction.commit()
@@ -1297,19 +1410,27 @@ public final class StickyRulerView: NSView {
     private func configurePlayheadHead() {
         let w: CGFloat = 12
         let h = TimelineLayoutCalculator.rulerHeight
-        let pointHeight: CGFloat = 4
+        let pointHeight: CGFloat = 5
+        let topInset: CGFloat = 2
         let topHeight = h - pointHeight
+        // A clean downward pennant marking the exact playhead x. Small top
+        // inset so it doesn't run edge-to-edge; a dark shadow lifts the white
+        // marker off the ruler so it reads as a deliberate handle.
         let path = CGMutablePath()
-        path.move(to: CGPoint(x: 0, y: 0))
-        path.addLine(to: CGPoint(x: w, y: 0))
+        path.move(to: CGPoint(x: 0, y: topInset))
+        path.addLine(to: CGPoint(x: w, y: topInset))
         path.addLine(to: CGPoint(x: w, y: topHeight))
         path.addLine(to: CGPoint(x: w / 2, y: h))
         path.addLine(to: CGPoint(x: 0, y: topHeight))
         path.closeSubpath()
         playheadHead.path = path
         playheadHead.fillColor = Theme.NSColor.timelinePlayhead.cgColor
-        playheadHead.strokeColor = Theme.NSColor.timelinePlayhead.cgColor
+        playheadHead.strokeColor = NSColor.clear.cgColor
         playheadHead.zPosition = 1
+        playheadHead.shadowColor = NSColor.black.cgColor
+        playheadHead.shadowOpacity = 0.45
+        playheadHead.shadowRadius = 1.5
+        playheadHead.shadowOffset = .zero
         playheadHead.isHidden = true
     }
 

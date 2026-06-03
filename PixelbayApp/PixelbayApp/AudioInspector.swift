@@ -66,7 +66,7 @@ struct AudioInspector: View {
                     .font(Theme.Font.monoTimecode)
                     .foregroundStyle(Theme.Color.textSecondary)
             }
-            Slider(
+            PBSlider(
                 value: Binding<Double>(
                     get: { liveValue },
                     set: { newValue in previewVolumes[clipID] = newValue }
@@ -80,6 +80,7 @@ struct AudioInspector: View {
                 }
             )
         }
+        .pbInsetRow()
     }
 
     private func speedSlider(for clip: Clip) -> some View {
@@ -96,7 +97,7 @@ struct AudioInspector: View {
                     .font(Theme.Font.monoTimecode)
                     .foregroundStyle(Theme.Color.textSecondary)
             }
-            Slider(
+            PBSlider(
                 value: Binding<Double>(
                     get: { liveValue },
                     set: { newValue in previewSpeeds[clipID] = newValue }
@@ -110,6 +111,7 @@ struct AudioInspector: View {
                 }
             )
         }
+        .pbInsetRow()
     }
 
     // MARK: - Track mute list

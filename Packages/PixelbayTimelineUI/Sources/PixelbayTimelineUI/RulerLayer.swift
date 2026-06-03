@@ -54,7 +54,8 @@ public final class RulerLayer: CALayer, @unchecked Sendable {
         guard bounds.width > 0, bounds.height > 0 else { return }
 
         // Bottom hairline that visually separates the ruler from the lanes.
-        ctx.setFillColor(Theme.NSColor.borderSubtle.cgColor)
+        // borderStrong (not subtle) gives a crisper, finished ruler/lane edge.
+        ctx.setFillColor(Theme.NSColor.borderStrong.cgColor)
         ctx.fill(CGRect(x: 0, y: bounds.maxY - 0.5, width: bounds.width, height: 0.5))
 
         let intervals = TimelineLayoutCalculator.niceTickInterval(forPixelsPerSecond: pixelsPerSecond)
@@ -69,8 +70,9 @@ public final class RulerLayer: CALayer, @unchecked Sendable {
         let lastSecond = Double(scrollSeconds) + Double(laneWidth / pps)
 
         // Minor ticks first (so major overpaints them at exact alignments).
+        // Dimmed so the major/minor rhythm reads clearly (minor recede).
         if intervals.minor < intervals.major {
-            ctx.setStrokeColor(Theme.NSColor.textTertiary.cgColor)
+            ctx.setStrokeColor(Theme.NSColor.textTertiary.withAlphaComponent(0.6).cgColor)
             ctx.setLineWidth(1)
             drawTicks(
                 in: ctx,

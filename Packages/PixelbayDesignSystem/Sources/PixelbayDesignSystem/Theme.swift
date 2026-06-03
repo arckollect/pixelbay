@@ -55,25 +55,26 @@ extension Theme {
         static let danger       = "#FF453A"   // macOS system red
         static let recordingRed = "#FF453A"
 
-        // Track roles (timeline lanes) — blue-family monochrome ramp. Distinct
-        // shades keep lanes tellable apart while staying within the accent family.
-        static let trackVideo       = "#0A84FF"
-        static let trackWebcam      = "#5AB0FF"
-        static let trackMic         = "#2E6FE0"
-        static let trackSystemAudio = "#7FC0FF"
-        static let trackVoiceover   = "#1B5FC0"
-        static let trackOverlay     = "#9FCBFF"
-        static let trackEffects     = "#4D8FE8"
+        // Track roles (timeline lanes) — tonal-cohesive COOL sweep (blue →
+        // indigo → violet). Distinct per kind so lanes are tellable apart,
+        // but harmonized for a calm minimal-premium read. No green/orange.
+        static let trackVideo       = "#3B82F6"   // blue (screen)
+        static let trackWebcam      = "#5B8DEF"   // periwinkle
+        static let trackMic         = "#6366F1"   // indigo
+        static let trackSystemAudio = "#4F76E8"   // blue-indigo
+        static let trackVoiceover   = "#8B5CF6"   // violet
+        static let trackOverlay     = "#60A5FA"   // light blue
+        static let trackEffects     = "#A78BFA"   // light violet
 
-        // Effect-keyframe roles — blue-family
-        static let effectZoomAuto   = "#5AB0FF"
-        static let effectZoomManual = "#7FC0FF"
-        static let effectTalkingHead = "#2E6FE0"
+        // Effect-keyframe roles — indigo/violet family (distinct from clip lanes)
+        static let effectZoomAuto   = "#818CF8"
+        static let effectZoomManual = "#A78BFA"
+        static let effectTalkingHead = "#6366F1"
 
         // Timeline chrome
-        static let timelineRuler    = "#141414"   // neutral (was warm)
-        static let timelinePlayhead = "#0A84FF"   // accent blue (was orange)
-        static let waveformFill     = "#6E6E6E"   // neutral gray (was warm gray)
+        static let timelineRuler    = "#141414"   // neutral
+        static let timelinePlayhead = "#FFFFFF"   // white + dark halo → pops over ANY clip content (light thumbnails or dark lanes); blue blended into the cool clips
+        static let waveformFill     = "#FFFFFF"   // bright white waveform (pops on the colored audio clip, like pro editors)
     }
 }
 

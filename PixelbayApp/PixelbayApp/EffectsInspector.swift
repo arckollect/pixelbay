@@ -279,7 +279,7 @@ struct EffectsInspector: View {
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(Theme.Color.textSecondary)
             }
-            Slider(
+            PBSlider(
                 value: Binding<Double>(
                     get: { liveValue },
                     set: { newValue in previewZoomFactor = newValue }

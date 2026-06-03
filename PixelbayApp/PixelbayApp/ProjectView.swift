@@ -52,12 +52,18 @@ struct ProjectView: View {
             toolbar
             PBDivider()
             HStack(spacing: 0) {
-                VStack(spacing: 0) {
+                // The resizable preview/timeline split owns its own drag
+                // state (inside ResizableVSplit) — deliberately NOT hoisted
+                // to ProjectView. If `timelineHeight` lived here, every
+                // drag tick (~120/s) would invalidate this whole body
+                // (toolbar + both inspectors + transport), dropping frames
+                // and making BOTH panes stutter. Isolated, the drag only
+                // re-evaluates the split subtree.
+                ResizableVSplit {
                     previewPane
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    PBDivider()
+                } bottom: {
                     timelinePane
-                        .frame(minHeight: 280, maxHeight: 420)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 PBDivider(.vertical)
@@ -226,68 +232,52 @@ struct ProjectView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Theme.Color.bgBase)
         case .ready:
-            PreviewPlayerView(player: player, fill: previewFill)
-                .background(Theme.Color.bgBase, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.medium)
-                        .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
-                )
-                .overlay(alignment: .top) { aspectControl }
-                .overlay(alignment: .bottom) { transportBar }
-                .padding(Theme.Spacing.lg)
-        }
-    }
-
-    // Top-trailing fit/fill toggle, floating over the video.
-    private var aspectControl: some View {
-        Button {
-            previewFill.toggle()
-        } label: {
-            Image(systemName: previewFill
-                  ? "rectangle.arrowtriangle.2.inward"
-                  : "rectangle.arrowtriangle.2.outward")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.Color.textPrimary)
-                .frame(width: 30, height: 24)
-                .pbGlassBar(RoundedRectangle(cornerRadius: Theme.Radius.medium))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.medium)
-                        .strokeBorder(Color.white.opacity(0.12), lineWidth: Theme.Stroke.regular)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
-        }
-        .buttonStyle(.plain)
-        .help(previewFill ? "Fit (letterbox)" : "Fill (crop)")
-        .padding(Theme.Spacing.md)
-        .frame(maxWidth: .infinity, alignment: .trailing)
-    }
-
-    // Floating glass transport bar pinned to the bottom of the preview.
-    private var transportBar: some View {
-        let shape = RoundedRectangle(cornerRadius: Theme.Radius.large)
-        return HStack(spacing: Theme.Spacing.sm) {
-            transportButton("backward.end.fill", help: "Jump to start") { player.seekToStart() }
-            transportButton("backward.frame.fill", help: "Step back one frame") { player.stepFrame(by: -1) }
-            Button {
-                player.togglePlayPause()
-            } label: {
-                Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Theme.Color.textPrimary)
-                    .frame(width: 30, height: 26)
+            VStack(spacing: Theme.Spacing.sm) {
+                PreviewPlayerView(player: player, fill: previewFill)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Theme.Color.bgBase, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                            .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+                    )
+                transportBar
             }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.space, modifiers: [])
-            .help(player.isPlaying ? "Pause" : "Play")
-            transportButton("forward.frame.fill", help: "Step forward one frame") { player.stepFrame(by: 1) }
-            transportButton("forward.end.fill", help: "Jump to end") { player.seekToEnd() }
+            .padding(Theme.Spacing.lg)
+        }
+    }
+
+    // Industry-standard transport: a clean control strip BELOW the viewer
+    // (not glass floating over the footage — that read as choppy and blended
+    // into the video). Transport cluster · current/total timecode · scrubber
+    // · fit-fill toggle.
+    private var transportBar: some View {
+        HStack(spacing: Theme.Spacing.md) {
+            HStack(spacing: Theme.Spacing.xs) {
+                transportButton("backward.end.fill", help: "Jump to start") { player.seekToStart() }
+                transportButton("backward.frame.fill", help: "Step back one frame") { player.stepFrame(by: -1) }
+                Button {
+                    player.togglePlayPause()
+                } label: {
+                    Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.Color.textPrimary)
+                        .frame(width: 32, height: 32)
+                        .background(Theme.Color.bgElevated, in: Circle())
+                        .overlay(Circle().strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.space, modifiers: [])
+                .help(player.isPlaying ? "Pause" : "Play")
+                transportButton("forward.frame.fill", help: "Step forward one frame") { player.stepFrame(by: 1) }
+                transportButton("forward.end.fill", help: "Jump to end") { player.seekToEnd() }
+            }
 
             Text(Timecode.clock(player.currentTime.seconds))
                 .font(Theme.Font.monoTimecode)
                 .foregroundStyle(Theme.Color.textPrimary)
                 .frame(width: 44, alignment: .trailing)
-            Slider(
+            PBSlider(
                 value: Binding<Double>(
                     get: {
                         guard player.duration.seconds > 0 else { return 0 }
@@ -295,21 +285,29 @@ struct ProjectView: View {
                     },
                     set: { player.seekFraction($0) }
                 ),
-                in: 0...1
+                in: 0...1,
+                size: .mini
             )
-            .controlSize(.small)
-            .tint(Theme.Color.accent)
             Text(Timecode.clock(player.duration.seconds))
                 .font(Theme.Font.monoTimecode)
                 .foregroundStyle(Theme.Color.textSecondary)
                 .frame(width: 44, alignment: .leading)
+
+            Button {
+                previewFill.toggle()
+            } label: {
+                Image(systemName: previewFill
+                      ? "rectangle.arrowtriangle.2.inward"
+                      : "rectangle.arrowtriangle.2.outward")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(previewFill ? "Fit (letterbox)" : "Fill (crop)")
         }
-        .padding(.horizontal, Theme.Spacing.lg)
-        .padding(.vertical, Theme.Spacing.sm)
-        .pbGlassBar(shape)
-        .overlay(shape.strokeBorder(Color.white.opacity(0.12), lineWidth: Theme.Stroke.regular))
-        .clipShape(shape)
-        .padding(Theme.Spacing.md)
+        .frame(height: 40)
     }
 
     private func transportButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
@@ -345,24 +343,22 @@ struct ProjectView: View {
                 // fit in the visible pane without vertical scrolling) or
                 // expand to give waveforms more room.
                 timelineGlyph("rectangle.compress.vertical", help: "Condense tracks")
-                Slider(
-                    value: $trackHeight,
-                    in: TimelineLayoutCalculator.minTrackHeight...TimelineLayoutCalculator.maxTrackHeight
+                PBSlider(
+                    value: Binding(get: { Double(trackHeight) }, set: { trackHeight = CGFloat($0) }),
+                    in: Double(TimelineLayoutCalculator.minTrackHeight)...Double(TimelineLayoutCalculator.maxTrackHeight),
+                    size: .mini
                 )
-                .controlSize(.mini)
                 .frame(width: 96)
-                .tint(Theme.Color.accent)
                 .help("Adjust track row height")
                 timelineGlyph("rectangle.expand.vertical", help: "Expand tracks")
                 PBDivider(.vertical).frame(height: 16)
                 timelineGlyph("minus.magnifyingglass", help: "Zoom out")
-                Slider(
-                    value: $pixelsPerSecond,
-                    in: TimelineLayoutCalculator.minPixelsPerSecond...TimelineLayoutCalculator.maxPixelsPerSecond
+                PBSlider(
+                    value: Binding(get: { Double(pixelsPerSecond) }, set: { pixelsPerSecond = CGFloat($0) }),
+                    in: Double(TimelineLayoutCalculator.minPixelsPerSecond)...Double(TimelineLayoutCalculator.maxPixelsPerSecond),
+                    size: .mini
                 )
-                .controlSize(.mini)
                 .frame(width: 120)
-                .tint(Theme.Color.accent)
                 .help("Zoom timeline")
                 timelineGlyph("plus.magnifyingglass", help: "Zoom in")
                 PBDivider(.vertical).frame(height: 16)
@@ -485,7 +481,6 @@ struct ProjectView: View {
     private var projectHeader: some View {
         HStack(spacing: Theme.Spacing.sm) {
             TextField("Project Name", text: $editingName)
-                .textFieldStyle(.roundedBorder)
                 .focused($isEditingName)
                 .onSubmit { commitNameIfChanged() }
                 .onChange(of: isEditingName) { _, focused in
@@ -495,6 +490,7 @@ struct ProjectView: View {
                     // Save, lost the change" wart.
                     if !focused { commitNameIfChanged() }
                 }
+                .pbField(focused: isEditingName)
         }
         .padding(.horizontal, Theme.Spacing.lg)
         .padding(.vertical, Theme.Spacing.md)
@@ -580,4 +576,95 @@ enum InspectorTab: Hashable {
     case cursor
     case zoom
     case audio
+}
+
+/// A vertically-resizable two-pane split: `top` fills the remaining space,
+/// `bottom` is the user-sized pane, with a draggable grabber between them.
+///
+/// **Why this is its own view (load-bearing for smoothness):** the drag
+/// state (`bottomHeight` etc.) lives HERE, not on the parent editor. A
+/// divider drag fires ~120 state updates/second; if that state sat on
+/// `ProjectView`, each tick would invalidate the entire editor body
+/// (toolbar, both inspector tabs, transport) and drop frames — the
+/// "both panes look choppy" symptom. Scoped to this subtree, a drag only
+/// re-evaluates the two panes that actually resize. The `top`/`bottom`
+/// view-builders are captured from the parent's last body pass and simply
+/// re-invoked here; rebuilding their (cheap) SwiftUI view values per tick
+/// is fine — the embedded AppKit views guard their own `updateNSView`.
+struct ResizableVSplit<Top: View, Bottom: View>: View {
+    /// Minimum height reserved for the `top` pane (the preview never
+    /// shrinks below this, even when the window is short).
+    var minTopHeight: CGFloat = 240
+    /// Minimum height for the `bottom` pane (the timeline floor).
+    var minBottomHeight: CGFloat = 160
+    @ViewBuilder var top: () -> Top
+    @ViewBuilder var bottom: () -> Bottom
+
+    @State private var bottomHeight: CGFloat = 320
+    /// Bottom height captured at the start of a resize drag; nil when idle.
+    @State private var dragStartHeight: CGFloat?
+    /// Hover state for the grabber (drives the cursor + accent).
+    @State private var handleHovered = false
+
+    var body: some View {
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                top()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                handle(containerHeight: geo.size.height)
+                bottom()
+                    .frame(height: clamped(geo.size.height))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Clamps the stored bottom height to the space available so a window
+    /// resize never lets the bottom pane crowd out the top one.
+    private func clamped(_ containerHeight: CGFloat) -> CGFloat {
+        let maxH = max(minBottomHeight, containerHeight - minTopHeight)
+        return min(maxH, max(minBottomHeight, bottomHeight))
+    }
+
+    /// Draggable divider. Drag DOWN to shrink the bottom pane (the top
+    /// grows to fill); drag UP to grow it.
+    private func handle(containerHeight: CGFloat) -> some View {
+        ZStack {
+            PBDivider()
+            RoundedRectangle(cornerRadius: 2)
+                .fill(handleHovered ? Theme.Color.textTertiary : Theme.Color.borderStrong)
+                .frame(width: 40, height: 4)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 11)
+        .background(Theme.Color.bgDeep)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            handleHovered = hovering
+            if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+        }
+        .gesture(
+            // CRITICAL: `.global` coordinate space, not the default `.local`.
+            // The handle moves as a *result* of its own drag (growing the
+            // bottom pane pushes the handle up). In `.local` space that
+            // self-movement feeds straight back into `translation.height`,
+            // so the layout oscillates between two states — the preview and
+            // timeline visibly snap small↔big and scrollers flash in/out.
+            // `.global` measures the drag against the window, which is
+            // stable regardless of how the handle is repositioned, so the
+            // resize tracks the cursor 1:1 and stays smooth.
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { value in
+                    // Capture the on-screen (clamped) height at drag start so
+                    // the first tick can't jump if the stored value was out of
+                    // range for the current window size.
+                    let start = dragStartHeight ?? clamped(containerHeight)
+                    if dragStartHeight == nil { dragStartHeight = start }
+                    let maxH = max(minBottomHeight, containerHeight - minTopHeight)
+                    // Positive translation.height = dragging down → smaller bottom.
+                    bottomHeight = min(maxH, max(minBottomHeight, start - value.translation.height))
+                }
+                .onEnded { _ in dragStartHeight = nil }
+        )
+    }
 }
