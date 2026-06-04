@@ -11,6 +11,12 @@ import SwiftUI
 
 private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "Precapture")
 
+/// UserDefaults key backing `PrecaptureModel.logClicks` so the choice
+/// survives across recordings and app launches (the picker model is a fresh
+/// instance each session otherwise, which used to reset the toggle to OFF
+/// every time).
+private let logClicksDefaultsKey = "precapture.logClicks"
+
 // §4.10's pre-capture picker. Replaces SmokeRecorderView's recording surface
 // with a real source / camera / mic picker before the user clicks Record.
 //
@@ -47,11 +53,18 @@ final class PrecaptureModel {
     var selectedCameraID: String?     // nil = "None"
     var selectedMicrophoneID: String? // nil = "None"
     var includeSystemAudio: Bool = true
-    // Per-recording opt-in for the click logger (HANDOFF §6.7 + §4.7).
-    // Default OFF — privacy-conscious, and Accessibility permission must
-    // be granted for the underlying CGEventTap to fire. The toggle is
-    // disabled in the picker UI when Accessibility isn't trusted.
-    var logClicks: Bool = false
+    // Cursor logging (HANDOFF §6.7 + §4.7). The CGEventTap behind this
+    // captures BOTH the continuous mouse trajectory — which powers zoom
+    // cursor-follow — AND discrete clicks/gestures, which power auto-zoom.
+    // Default ON and persisted (see `logClicksDefaultsKey`) so cursor-follow
+    // "just works" out of the box, matching the Scenes recording path
+    // (`ScenesSession.logClicks` already defaults true). Still gated by
+    // Accessibility: the picker disables the toggle when the permission isn't
+    // trusted, and RecordingService skips the sidecar gracefully if the tap
+    // can't arm — so a true value here is harmless without permission.
+    var logClicks: Bool = UserDefaults.standard.object(forKey: logClicksDefaultsKey) as? Bool ?? true {
+        didSet { UserDefaults.standard.set(logClicks, forKey: logClicksDefaultsKey) }
+    }
 
     var isLoading: Bool = false
     var loadError: String?
@@ -422,7 +435,7 @@ struct PrecaptureView: View {
 
     private var overflowMenu: some View {
         Menu {
-            Toggle("Log mouse clicks (auto-zoom)", isOn: $model.logClicks)
+            Toggle("Track cursor (zoom follow + auto-zoom)", isOn: $model.logClicks)
                 .disabled(!accessibilityGranted)
             if !accessibilityGranted {
                 Button("Grant Accessibility…") { onRequestAccessibility() }

@@ -114,6 +114,11 @@ extension Theme {
         public static let trackOverlay     = SwiftUI.Color(hex: Palette.trackOverlay)
         public static let trackEffects     = SwiftUI.Color(hex: Palette.trackEffects)
 
+        // Effect-keyframe roles (mirror of the NSColor tokens below)
+        public static let effectZoomAuto    = SwiftUI.Color(hex: Palette.effectZoomAuto)
+        public static let effectZoomManual  = SwiftUI.Color(hex: Palette.effectZoomManual)
+        public static let effectTalkingHead = SwiftUI.Color(hex: Palette.effectTalkingHead)
+
         // Timeline chrome
         public static let timelineRuler    = SwiftUI.Color(hex: Palette.timelineRuler)
         public static let timelinePlayhead = SwiftUI.Color(hex: Palette.timelinePlayhead)

@@ -58,6 +58,12 @@ public final class MetalRenderGraph: @unchecked Sendable {
     private var cursorSpriteTexture: MTLTexture?
     private lazy var cursorTextureLoader: MTKTextureLoader = MTKTextureLoader(device: device)
 
+    // Image-wallpaper texture cache — same idea as the cursor sprite. The
+    // instruction hands us one CGImage (center-cropped to the output aspect)
+    // for the whole composition, so we upload once and reuse it every frame.
+    private var backgroundImageIdentity: ObjectIdentifier?
+    private var backgroundImageTexture: MTLTexture?
+
     public init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw SetupError.noMetalDevice
@@ -227,6 +233,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
         layout: ResolvedLayout,
         sources: [LayerKind: CVPixelBuffer],
         destination: CVPixelBuffer,
+        backgroundImage: CGImage? = nil,
         cursorSprite: CursorSpriteData? = nil,
         cursorState: CursorRenderState? = nil,
         completion: @escaping @Sendable () -> Void
@@ -260,7 +267,20 @@ public final class MetalRenderGraph: @unchecked Sendable {
         encoder.label = "Pixelbay.layer-pass"
 
         // Background pass (clear cases skip — render-target clearColor 0,0,0,1 already covered)
-        drawBackground(encoder: encoder, background: layout.background)
+        let bgAspect = layout.outputSize.height > 0
+            ? Float(layout.outputSize.width / layout.outputSize.height)
+            : 1
+        // Image wallpapers: the CGImage is already center-cropped to the output
+        // aspect, so a full-screen draw is aspect-fill with no distortion. The
+        // texture is cached by image identity (like the cursor sprite). If the
+        // image is missing (decode failed) we fall through to the solid fallback.
+        if case .image = layout.background,
+           let backgroundImage,
+           let bgTexture = backgroundTexture(for: backgroundImage) {
+            drawBackgroundImage(encoder: encoder, texture: bgTexture, outputSize: layout.outputSize)
+        } else {
+            drawBackground(encoder: encoder, background: layout.background, aspect: bgAspect)
+        }
 
         try drawLayer(
             encoder: encoder,
@@ -334,32 +354,114 @@ public final class MetalRenderGraph: @unchecked Sendable {
 
     // MARK: - Background pass
 
+    // Matches `BackgroundUniforms` in Shaders.metal (two float4 + four float =
+    // 48 bytes, 16-aligned). `mode`: 0 solid, 1 linear gradient, 2 mesh.
     private struct BackgroundUniforms {
         var topColor: SIMD4<Float>
         var bottomColor: SIMD4<Float>
-        var isGradient: Float
-        var pad0: Float = 0
-        var pad1: Float = 0
+        var mode: Float
+        var blobCount: Float = 0
+        var aspect: Float = 1
         var pad2: Float = 0
     }
 
-    private func drawBackground(encoder: MTLRenderCommandEncoder, background: ResolvedBackground) {
+    private func drawBackground(
+        encoder: MTLRenderCommandEncoder,
+        background: ResolvedBackground,
+        aspect: Float
+    ) {
+        // The render target's clearColor already painted black, so the Phase 1
+        // `.clear` look needs no pass at all.
+        if case .clear = background { return }
+
+        var uniforms: BackgroundUniforms
+        // Interleaved [color, geo] per mesh blob bound at buffer(1). The
+        // fragment function always references buffer(1), so even solid/gradient
+        // must bind a (1-element) dummy or Metal errors on the draw; `mode`
+        // and `blobCount` keep the shader from actually reading it.
+        var blobData: [SIMD4<Float>] = [SIMD4<Float>(repeating: 0)]
+
         switch background {
         case .clear:
-            // The render target's clearColor already painted black. Nothing
-            // more to do for the Phase 1 look.
-            return
+            return  // handled above; keeps the switch exhaustive
         case .solid(let color):
-            var uniforms = BackgroundUniforms(topColor: color, bottomColor: color, isGradient: 0)
-            encoder.setRenderPipelineState(backgroundPipelineState)
-            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BackgroundUniforms>.stride, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            uniforms = BackgroundUniforms(topColor: color, bottomColor: color, mode: 0)
         case .gradient(let top, let bottom):
-            var uniforms = BackgroundUniforms(topColor: top, bottomColor: bottom, isGradient: 1)
-            encoder.setRenderPipelineState(backgroundPipelineState)
-            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BackgroundUniforms>.stride, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            uniforms = BackgroundUniforms(topColor: top, bottomColor: bottom, mode: 1)
+        case .mesh(let base, let blobs):
+            uniforms = BackgroundUniforms(
+                topColor: base,
+                bottomColor: base,
+                mode: 2,
+                blobCount: Float(blobs.count),
+                aspect: aspect
+            )
+            if !blobs.isEmpty {
+                blobData = blobs.flatMap { [$0.color, $0.geo] }
+            }
+        case .image(let fallback):
+            // Reached only when the image buffer was missing (render() draws
+            // the buffer itself when present). Paint the flat fallback.
+            uniforms = BackgroundUniforms(topColor: fallback, bottomColor: fallback, mode: 0)
         }
+
+        encoder.setRenderPipelineState(backgroundPipelineState)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BackgroundUniforms>.stride, index: 0)
+        encoder.setFragmentBytes(
+            &blobData,
+            length: blobData.count * MemoryLayout<SIMD4<Float>>.stride,
+            index: 1
+        )
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    }
+
+    /// Upload (and cache) the wallpaper image to a texture, keyed by CGImage
+    /// identity — mirrors the cursor-sprite cache. Same `MTKTextureLoader`
+    /// path, so orientation matches the cursor (CGImage top-down → sampled
+    /// with `makeQuadVertices`' texCoord(0,0)=top-left).
+    private func backgroundTexture(for image: CGImage) -> MTLTexture? {
+        let identity = ObjectIdentifier(image)
+        if backgroundImageIdentity != identity || backgroundImageTexture == nil {
+            do {
+                backgroundImageTexture = try cursorTextureLoader.newTexture(
+                    cgImage: image,
+                    options: [
+                        .SRGB: false,
+                        .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue)
+                    ]
+                )
+                backgroundImageIdentity = identity
+            } catch {
+                log.error("background image texture upload failed: \(String(describing: error), privacy: .public)")
+                backgroundImageTexture = nil
+                backgroundImageIdentity = nil
+                return nil
+            }
+        }
+        return backgroundImageTexture
+    }
+
+    /// Draw the wallpaper texture full-screen (BGRA pipeline). The image is
+    /// pre-cropped to the output aspect, so a 0…1 texCoord fill is aspect-fill.
+    private func drawBackgroundImage(
+        encoder: MTLRenderCommandEncoder,
+        texture: MTLTexture,
+        outputSize: CGSize
+    ) {
+        let fullRect = LayerRect(origin: .zero, size: outputSize)
+        let vertices = makeQuadVertices(rect: fullRect, outputSize: outputSize)
+        encoder.setVertexBytes(vertices, length: MemoryLayout<Vertex>.stride * vertices.count, index: 0)
+        var uniforms = LayerUniforms(
+            outputSizePx: SIMD2(Float(outputSize.width), Float(outputSize.height)),
+            layerSizePx: SIMD2(Float(outputSize.width), Float(outputSize.height)),
+            cornerRadiusPx: 0,
+            isCircle: 0,
+            opacity: 1
+        )
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerUniforms>.stride, index: 0)
+        encoder.setRenderPipelineState(bgraPipelineState)
+        encoder.setFragmentTexture(texture, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
     // MARK: - Per-layer draw

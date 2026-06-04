@@ -567,7 +567,7 @@ private struct DefaultsBlock: View {
     private var clickLogToggle: some View {
         let accessibilityGranted = permissions.statuses[.accessibility] == .granted
         return VStack(alignment: .leading, spacing: 4) {
-            Toggle("Log mouse clicks for auto-zoom", isOn: $draft.logClicks)
+            Toggle("Track cursor (zoom follow + auto-zoom)", isOn: $draft.logClicks)
                 .disabled(!accessibilityGranted)
             if !accessibilityGranted {
                 Text("Requires Accessibility permission.")

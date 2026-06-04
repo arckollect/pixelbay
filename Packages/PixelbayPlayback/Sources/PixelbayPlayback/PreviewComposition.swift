@@ -29,19 +29,28 @@ public struct PreviewComposition: @unchecked Sendable {
     public var duration: CMTime
     public var outputSize: CGSize
     public var hasVideo: Bool { videoComposition != nil }
+    // The composition's video track IDs, retained so a *presentation-only*
+    // edit (layout / background / effects / cursor) can rebuild just the
+    // videoComposition against the SAME composition — no new AVPlayerItem.
+    public var screenTrackID: CMPersistentTrackID
+    public var webcamTrackID: CMPersistentTrackID?
 
     public init(
         composition: AVComposition,
         videoComposition: AVVideoComposition?,
         audioMix: AVAudioMix?,
         duration: CMTime,
-        outputSize: CGSize
+        outputSize: CGSize,
+        screenTrackID: CMPersistentTrackID = kCMPersistentTrackID_Invalid,
+        webcamTrackID: CMPersistentTrackID? = nil
     ) {
         self.composition = composition
         self.videoComposition = videoComposition
         self.audioMix = audioMix
         self.duration = duration
         self.outputSize = outputSize
+        self.screenTrackID = screenTrackID
+        self.webcamTrackID = webcamTrackID
     }
 }
 
@@ -82,6 +91,7 @@ public enum PreviewCompositionBuilder {
         project: Project,
         bundleURL: URL,
         wallpaperSource: WallpaperSource? = nil,
+        wallpaperImageProvider: WallpaperImageProvider? = nil,
         cursorTrajectory: [MouseTrajectorySample]? = nil,
         cursorSprite: CursorSpriteData? = nil
     ) async throws -> PreviewComposition {
@@ -151,57 +161,16 @@ public enum PreviewCompositionBuilder {
 
         let duration = maxTimelineEnd
         let outputSize = computeOutputSize(from: screenSize)
-        let resolvedPreset = wallpaperSource?.resolve(project.layout) ?? project.layout
-        // Phase 3d iteration 2 — sprite and anchor share the SAME upstream
-        // smoothing (`spriteSmoothed`, τ≈0.02 EMA). Earlier Phase 3c split
-        // ran the anchor through `cameraDamped` (velocity-adaptive τ up to
-        // 0.32 s) before `anchorFollow`, so even with anchorFollow at
-        // τ=0.08 the camera saw a 320 ms-lagged signal on fast cursor
-        // motion and the cursor visibly out-ran the camera to the
-        // safe-zone wall. Sharing `spriteSmoothed` means the only lag
-        // between cursor sprite and camera is `anchorFollow`'s spring,
-        // which Phase 3d-iter2 tightens to τRelaxed=0.05 / safeZone=0.30 —
-        // cursor visually locks to camera frame instead of pushing it.
-        //
-        //   • Sprite path: `spriteSmoothed` (light τ≈0.02 EMA) — kills
-        //     capture jitter only; cursor moves at near-real speed so
-        //     clicks feel snappy.
-        //   • Anchor path: same `spriteSmoothed`, then `anchorFollow`
-        //     (continuous soft spring τ=0.05 s, 30 % safe zone, no
-        //     lookahead). Steady-state cursor-vs-camera lag at v=0.2
-        //     norm/s ≈ 2·v·τ = 0.02 norm-units, far below the safe-zone
-        //     half-width (0.075) so the hard barrier almost never bites.
-        let spriteMaster: [MouseTrajectorySample]
-        if let master = cursorTrajectory, !master.isEmpty {
-            spriteMaster = MouseTrajectory.spriteSmoothed(master)
-        } else {
-            spriteMaster = []
-        }
-        let effects = applyCursorTrajectory(
-            to: project.effects,
-            cursorTrajectory: spriteMaster.isEmpty ? nil : spriteMaster
-        )
-        // Phase 3c — only enable the synthetic cursor pass when the screen
-        // asset was captured with `showsCursor = false` (flagged via
-        // `MediaAsset.cursorRenderedSynthetically`). Legacy recordings
-        // have the OS cursor baked in, so drawing on top would produce a
-        // double cursor; we keep `cursorTrajectoryForRender` empty in
-        // that case and the compositor skips the pass.
-        let cursorSyntheticallyRendered = project.assets.contains { asset in
-            asset.kind == .display && asset.cursorRenderedSynthetically
-        }
-        let cursorTrajectoryForRender: [MouseTrajectorySample] =
-            cursorSyntheticallyRendered ? spriteMaster : []
-        let videoComposition = makeVideoComposition(
-            duration: duration,
+        let videoComposition = await buildVideoComposition(
+            project: project,
             outputSize: outputSize,
-            layoutPreset: resolvedPreset,
-            effects: effects,
+            duration: duration,
             screenTrackID: screenTrackID,
             webcamTrackID: webcamTrackID,
-            cursorSprite: cursorSyntheticallyRendered ? cursorSprite : nil,
-            cursorSettings: cursorSyntheticallyRendered ? project.cursorSettings : nil,
-            cursorTrajectory: cursorTrajectoryForRender
+            cursorTrajectory: cursorTrajectory,
+            cursorSprite: cursorSprite,
+            wallpaperSource: wallpaperSource,
+            wallpaperImageProvider: wallpaperImageProvider
         )
         let audioMix: AVAudioMix?
         if audioMixInputParams.isEmpty {
@@ -217,7 +186,72 @@ public enum PreviewCompositionBuilder {
             videoComposition: videoComposition,
             audioMix: audioMix,
             duration: duration,
-            outputSize: outputSize
+            outputSize: outputSize,
+            screenTrackID: screenTrackID,
+            webcamTrackID: webcamTrackID
+        )
+    }
+
+    /// Build *only* the videoComposition (layout / background / effects /
+    /// cursor) for a project, against pre-existing composition track IDs. This
+    /// is the presentation half of `build`, factored out so a layout-only edit
+    /// can rebuild it in place against the SAME `AVComposition` — no track
+    /// re-insertion, no new `AVPlayerItem`, no decoder churn. `nonisolated
+    /// async` so the (potentially heavy) wallpaper-image decode runs off the
+    /// main actor.
+    public static func buildVideoComposition(
+        project: Project,
+        outputSize: CGSize,
+        duration: CMTime,
+        screenTrackID: CMPersistentTrackID,
+        webcamTrackID: CMPersistentTrackID?,
+        cursorTrajectory: [MouseTrajectorySample]?,
+        cursorSprite: CursorSpriteData?,
+        wallpaperSource: WallpaperSource?,
+        wallpaperImageProvider: WallpaperImageProvider?
+    ) async -> AVMutableVideoComposition {
+        await Task.yield()  // hop off the caller's actor before the image decode
+        let resolvedPreset = wallpaperSource?.resolve(project.layout) ?? project.layout
+        // Image wallpaper: decode + aspect-crop once so the per-frame
+        // compositor just blits a cached texture. Nil for every other bg kind.
+        let backgroundImage: CGImage?
+        if case .image(let ref) = resolvedPreset.background {
+            backgroundImage = wallpaperImageProvider?.provide(ref, outputSize)
+        } else {
+            backgroundImage = nil
+        }
+        // Phase 3d iteration 2 — sprite and anchor share the SAME upstream
+        // smoothing (`spriteSmoothed`, τ≈0.02 EMA), so the only cursor-vs-camera
+        // lag is `anchorFollow`'s spring (τRelaxed=0.05 / safeZone=0.30).
+        let spriteMaster: [MouseTrajectorySample]
+        if let master = cursorTrajectory, !master.isEmpty {
+            spriteMaster = MouseTrajectory.spriteSmoothed(master)
+        } else {
+            spriteMaster = []
+        }
+        let effects = applyCursorTrajectory(
+            to: project.effects,
+            cursorTrajectory: spriteMaster.isEmpty ? nil : spriteMaster
+        )
+        // Phase 3c — only enable the synthetic cursor pass when the screen
+        // asset was captured with `showsCursor = false`. Legacy recordings
+        // have the OS cursor baked in, so drawing on top would double it.
+        let cursorSyntheticallyRendered = project.assets.contains { asset in
+            asset.kind == .display && asset.cursorRenderedSynthetically
+        }
+        let cursorTrajectoryForRender: [MouseTrajectorySample] =
+            cursorSyntheticallyRendered ? spriteMaster : []
+        return makeVideoComposition(
+            duration: duration,
+            outputSize: outputSize,
+            layoutPreset: resolvedPreset,
+            effects: effects,
+            screenTrackID: screenTrackID,
+            webcamTrackID: webcamTrackID,
+            cursorSprite: cursorSyntheticallyRendered ? cursorSprite : nil,
+            cursorSettings: cursorSyntheticallyRendered ? project.cursorSettings : nil,
+            cursorTrajectory: cursorTrajectoryForRender,
+            backgroundImage: backgroundImage
         )
     }
 
@@ -522,7 +556,8 @@ public enum PreviewCompositionBuilder {
         webcamTrackID: CMPersistentTrackID?,
         cursorSprite: CursorSpriteData?,
         cursorSettings: CursorSettings?,
-        cursorTrajectory: [MouseTrajectorySample]
+        cursorTrajectory: [MouseTrajectorySample],
+        backgroundImage: CGImage?
     ) -> AVMutableVideoComposition {
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = outputSize
@@ -545,7 +580,8 @@ public enum PreviewCompositionBuilder {
             effects: effects,
             cursorSprite: cursorSprite,
             cursorSettings: cursorSettings,
-            cursorTrajectory: cursorTrajectory
+            cursorTrajectory: cursorTrajectory,
+            backgroundImage: backgroundImage
         )
         videoComposition.instructions = [instruction]
         return videoComposition

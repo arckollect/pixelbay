@@ -107,6 +107,26 @@ public enum ResolvedBackground: Sendable, Equatable {
     case clear   // legacy "fill with black, no extra pass" — Phase 1 behavior
     case solid(SIMD4<Float>)
     case gradient(top: SIMD4<Float>, bottom: SIMD4<Float>)
+    /// Procedural "wallpaper" mesh: a base fill with N soft radial color blobs
+    /// blended over it. `blobs` is already in GPU form (see `MeshBlob`).
+    case mesh(base: SIMD4<Float>, blobs: [MeshBlob])
+    /// An image wallpaper. The pixels travel separately (the compositor passes
+    /// a pre-aspect-filled `CVPixelBuffer` into `render`); this case only
+    /// carries the `fallback` colour drawn if that buffer is missing.
+    case image(fallback: SIMD4<Float>)
+}
+
+/// One radial blob of a `ResolvedBackground.mesh`, packed for the shader.
+/// `color` is rgb + strength-at-centre in `.w`; `geo` is (x, y, radius, _) with
+/// x/y normalized 0...1 and radius in output-height units.
+public struct MeshBlob: Sendable, Equatable {
+    public var color: SIMD4<Float>
+    public var geo: SIMD4<Float>
+
+    public init(color: SIMD4<Float>, geo: SIMD4<Float>) {
+        self.color = color
+        self.geo = geo
+    }
 }
 
 // MARK: - LayoutCalculator
@@ -299,6 +319,16 @@ public enum LayoutCalculator {
             // the actual desktop image into a `.solid` (or pre-rendered
             // texture, eventually) before passing the preset here.
             return .solid(toSIMD(fallback))
+        case .wallpaper(let wallpaper):
+            let blobs = wallpaper.blobs.map { blob in
+                MeshBlob(
+                    color: toSIMD(blob.color),
+                    geo: SIMD4<Float>(Float(blob.x), Float(blob.y), Float(blob.radius), 0)
+                )
+            }
+            return .mesh(base: toSIMD(wallpaper.base), blobs: blobs)
+        case .image(let ref):
+            return .image(fallback: toSIMD(ref.fallback))
         }
     }
 

@@ -138,6 +138,10 @@ struct PostCaptureView: View {
                 project: project,
                 bundleURL: bundle.url,
                 wallpaperSource: .live,
+                wallpaperImageProvider: .live(
+                    bundleURL: bundle.url,
+                    builtinURL: { WallpaperCatalog.url(forBuiltinID: $0) }
+                ),
                 cursorTrajectory: cursorTrajectory,
                 cursorSprite: SystemCursorSprite.make()
             )

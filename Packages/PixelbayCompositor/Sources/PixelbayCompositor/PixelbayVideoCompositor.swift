@@ -232,6 +232,7 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
                     layout: layout,
                     sources: sources,
                     destination: destination,
+                    backgroundImage: instruction.backgroundImage,
                     cursorSprite: cursorState != nil ? instruction.cursorSprite : nil,
                     cursorState: cursorState,
                     completion: {
@@ -243,6 +244,14 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
                         bridge.request.finish(withComposedVideoFrame: bridge.destination)
                     }
                 )
+            } catch MetalRenderGraph.RenderError.missingScreenLayer {
+                // Transient: the screen track hasn't produced a frame for this
+                // composition time yet — routine during preview reloads (each
+                // edit swaps the AVPlayerItem). Pass through + finish quietly;
+                // logging it as an error just floods the console during edits.
+                log.debug("render: screen frame unavailable at this time, passing through")
+                passthroughScreen(into: destination, sources: sources)
+                request.finish(withComposedVideoFrame: destination)
             } catch {
                 log.error("render() failed: \(String(describing: error), privacy: .public)")
                 // Fall through to passthrough — synchronous, finish now.
@@ -459,6 +468,12 @@ public final class PixelbayCompositionInstruction: NSObject, AVVideoCompositionI
     public let cursorSprite: CursorSpriteData?
     public let cursorSettings: CursorSettings?
     public let cursorTrajectory: [MouseTrajectorySample]
+    // Image-wallpaper background, already center-cropped to the output aspect
+    // ratio (so a full-screen draw is aspect-fill with no distortion). Static
+    // across the whole instruction — the render graph uploads it to a texture
+    // once and caches by identity, like the cursor sprite. Nil unless
+    // `layout.background` is `.image`.
+    public let backgroundImage: CGImage?
 
     public init(
         timeRange: CMTimeRange,
@@ -467,7 +482,8 @@ public final class PixelbayCompositionInstruction: NSObject, AVVideoCompositionI
         effects: [EffectKeyframe] = [],
         cursorSprite: CursorSpriteData? = nil,
         cursorSettings: CursorSettings? = nil,
-        cursorTrajectory: [MouseTrajectorySample] = []
+        cursorTrajectory: [MouseTrajectorySample] = [],
+        backgroundImage: CGImage? = nil
     ) {
         self.timeRange = timeRange
         self.layout = layout
@@ -476,6 +492,7 @@ public final class PixelbayCompositionInstruction: NSObject, AVVideoCompositionI
         self.cursorSprite = cursorSprite
         self.cursorSettings = cursorSettings
         self.cursorTrajectory = cursorTrajectory
+        self.backgroundImage = backgroundImage
         super.init()
     }
 }

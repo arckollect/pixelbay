@@ -41,12 +41,17 @@ struct LayerUniforms {
 };
 
 // Phase 3a background pass.
+// `mode`: 0 = solid (topColor), 1 = linear gradient (top→bottom by uv.y),
+//         2 = wallpaper mesh (base = topColor + radial blobs from buffer(1)).
+// For mesh, `blobCount` blobs are read from a `float4` buffer at index 1, two
+// float4 per blob: [color(rgb + strength), geo(x, y, radius, _)]. `aspect` is
+// outputWidth/outputHeight so blobs stay circular on a wide frame.
 struct BackgroundUniforms {
     float4 topColor;
     float4 bottomColor;
-    float isGradient;
-    float _pad0;
-    float _pad1;
+    float mode;
+    float blobCount;
+    float aspect;
     float _pad2;
 };
 
@@ -75,12 +80,30 @@ vertex BackgroundVertexOut backgroundVertex(uint vid [[vertex_id]]) {
 
 fragment float4 backgroundFragment(
     BackgroundVertexOut in [[stage_in]],
-    constant BackgroundUniforms &u [[buffer(0)]]
+    constant BackgroundUniforms &u [[buffer(0)]],
+    constant float4 *blobs [[buffer(1)]]
 ) {
-    if (u.isGradient > 0.5) {
-        return mix(u.topColor, u.bottomColor, in.uv.y);
+    if (u.mode < 0.5) {
+        return u.topColor;                               // solid
     }
-    return u.topColor;
+    if (u.mode < 1.5) {
+        return mix(u.topColor, u.bottomColor, in.uv.y);  // linear gradient
+    }
+    // Wallpaper mesh: start from the base, then blend each soft radial blob.
+    float3 color = u.topColor.rgb;
+    int n = int(u.blobCount + 0.5);
+    for (int i = 0; i < n; i++) {
+        float4 c = blobs[i * 2];        // rgb + strength
+        float4 g = blobs[i * 2 + 1];    // x, y, radius, _
+        // Aspect-correct x so a blob is a circle on the output, not an ellipse.
+        float2 d = float2((in.uv.x - g.x) * u.aspect, in.uv.y - g.y);
+        float dist = length(d);
+        // 1 at the centre, smoothly to 0 at `radius`; scaled by the blob's
+        // centre strength.
+        float w = smoothstep(g.z, 0.0, dist) * c.a;
+        color = mix(color, c.rgb, w);
+    }
+    return float4(color, 1.0);
 }
 
 // Rounded-rectangle SDF.

@@ -11,7 +11,10 @@ let package = Package(
     ],
     dependencies: [],
     targets: [
-        .target(name: "PixelbayDesignSystem"),
+        .target(
+            name: "PixelbayDesignSystem",
+            resources: [.copy("Resources/Wallpapers")]
+        ),
         .testTarget(
             name: "PixelbayDesignSystemTests",
             dependencies: ["PixelbayDesignSystem"]

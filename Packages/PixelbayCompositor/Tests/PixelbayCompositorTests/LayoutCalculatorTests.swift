@@ -201,6 +201,39 @@ final class LayoutCalculatorTests: XCTestCase {
         }
     }
 
+    func test_resolve_wallpaperBackground_insetsScreenAndResolvesMesh() {
+        let preset = LayoutPreset(
+            mode: .pip(position: .bottomRight, size: .medium),
+            background: .wallpaper(WallpaperGradient(
+                name: "Aurora",
+                base: RGBColor(r: 0.05, g: 0.06, b: 0.13),
+                blobs: [
+                    WallpaperGradient.Blob(color: RGBColor(r: 0.2, g: 0.4, b: 0.9, a: 0.9), x: 0.18, y: 0.2, radius: 0.95),
+                    WallpaperGradient.Blob(color: RGBColor(r: 0.5, g: 0.2, b: 0.85, a: 0.85), x: 0.82, y: 0.85, radius: 1.0),
+                ]
+            )),
+            padding: 48
+        )
+        let resolved = LayoutCalculator.resolve(
+            preset: preset,
+            outputSize: CGSize(width: 1920, height: 1080),
+            hasWebcam: true
+        )
+        // Wallpaper is treated like solid/gradient — the screen insets by padding.
+        XCTAssertEqual(resolved.screen.minX, 48)
+        XCTAssertEqual(resolved.screen.size.width, 1920 - 96)
+        if case .mesh(let base, let blobs) = resolved.background {
+            XCTAssertEqual(base.x, 0.05, accuracy: 1e-6)
+            XCTAssertEqual(blobs.count, 2)
+            // Blob geo packs (x, y, radius, _); strength rides in color.w.
+            XCTAssertEqual(blobs[0].geo.x, 0.18, accuracy: 1e-6)
+            XCTAssertEqual(blobs[0].geo.z, 0.95, accuracy: 1e-6)
+            XCTAssertEqual(blobs[0].color.w, 0.9, accuracy: 1e-6)
+        } else {
+            XCTFail("expected mesh background")
+        }
+    }
+
     func test_resolve_systemWallpaperBackground_fallsBackToSolid() {
         let preset = LayoutPreset(
             background: .systemWallpaper(fallback: .black)

@@ -84,6 +84,21 @@ struct ProjectView: View {
         // doesn't bump revision (content unchanged) so the preview
         // doesn't reload then either.
         .task(id: ProjectViewKey(bundleURL: document.bundleURL, revision: document.revision)) {
+            // Debounce preview rebuilds. Every committed edit bumps `revision`
+            // and re-keys this task; rapid edits — e.g. clicking through the
+            // background-swatch gallery — would otherwise spawn a fresh
+            // AVPlayerItem + custom compositor each time. That churn floods the
+            // log with transient decoder errors (`missingScreenLayer`, VRP
+            // -12852, CustomVideoCompositor -12784) and can exhaust
+            // VideoToolbox decode sessions. Sleeping first lets a burst
+            // coalesce: SwiftUI cancels this task when the next edit arrives,
+            // so only the settled state actually reloads. ~140 ms is below
+            // perceptible preview latency for a single edit.
+            do {
+                try await Task.sleep(nanoseconds: 140_000_000)
+            } catch {
+                return  // superseded by a newer edit
+            }
             let cursorTrajectory = await CursorTrajectoryLoader.load(
                 for: document.project,
                 bundleURL: document.bundleURL
@@ -92,6 +107,10 @@ struct ProjectView: View {
                 project: document.project,
                 bundleURL: document.bundleURL,
                 wallpaperSource: .live,
+                wallpaperImageProvider: .live(
+                    bundleURL: document.bundleURL,
+                    builtinURL: { WallpaperCatalog.url(forBuiltinID: $0) }
+                ),
                 cursorTrajectory: cursorTrajectory,
                 cursorSprite: SystemCursorSprite.make()
             )
@@ -504,12 +523,34 @@ struct ProjectView: View {
     // MARK: - Layout inspector (Phase 3a)
 
     private var layoutInspector: some View {
-        LayoutInspector(
-            layout: document.project.layout,
-            onChange: { newLayout in
-                Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            LayoutInspector(
+                layout: document.project.layout,
+                bundleURL: document.bundleURL,
+                onChange: { newLayout in
+                    Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
+                }
+            )
+            PBDivider()
+            // Quick-access zoom actions, mirrored from the Zoom & Effects tab so
+            // the user can drop a zoom without leaving the Layout surface. The
+            // Zoom tab keeps the keyframe list + per-keyframe editors.
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                PBSectionHeader("Zoom")
+                ZoomActionsBar(
+                    project: document.project,
+                    bundleURL: document.bundleURL,
+                    playheadTime: player.currentTime.seconds,
+                    onApply: { command in
+                        Task { await document.apply(command) }
+                    },
+                    onSeek: { time in
+                        let cmTime = CMTime(value: time.value, timescale: time.timescale)
+                        player.seek(to: cmTime)
+                    }
+                )
             }
-        )
+        }
     }
 
     // MARK: - Cursor inspector (Phase 3c)

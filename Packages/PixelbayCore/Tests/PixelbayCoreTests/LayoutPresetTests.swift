@@ -54,6 +54,25 @@ final class LayoutPresetTests: XCTestCase {
         try roundTripBackground(.none)
     }
 
+    func test_background_image_builtin_roundTripsThroughCodable() throws {
+        try roundTripBackground(.image(.builtin(id: "Drift", name: "Drift")))
+    }
+
+    func test_background_image_upload_roundTripsThroughCodable() throws {
+        try roundTripBackground(.image(.upload(relativePath: "backgrounds/my-bg.png", name: "My BG")))
+    }
+
+    func test_background_wallpaper_roundTripsThroughCodable() throws {
+        try roundTripBackground(.wallpaper(WallpaperGradient(
+            name: "Aurora",
+            base: RGBColor(r: 0.05, g: 0.06, b: 0.13),
+            blobs: [
+                WallpaperGradient.Blob(color: RGBColor(r: 0.2, g: 0.4, b: 0.9, a: 0.9), x: 0.18, y: 0.2, radius: 0.95),
+                WallpaperGradient.Blob(color: RGBColor(r: 0.5, g: 0.2, b: 0.85, a: 0.85), x: 0.82, y: 0.85, radius: 1.0),
+            ]
+        )))
+    }
+
     // MARK: - Migrator v1 → v2
 
     func test_migrator_addsLayoutPresetToV1Document() throws {

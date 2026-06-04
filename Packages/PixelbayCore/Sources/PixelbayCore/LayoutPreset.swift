@@ -176,6 +176,16 @@ public enum Background: Codable, Sendable, Equatable {
     case solid(color: RGBColor)
     case gradient(from: RGBColor, to: RGBColor)
     case systemWallpaper(fallback: RGBColor)
+    /// A curated "wallpaper" — a soft multi-blob mesh gradient (the Screen
+    /// Studio / Loom look). Self-contained (carries its own base + blobs) so
+    /// it serializes without a shared preset registry and old projects keep
+    /// rendering even if the app's preset catalog later changes.
+    case wallpaper(WallpaperGradient)
+    /// An image wallpaper — either a built-in bundled with the app or a
+    /// user-uploaded file copied into the project bundle. The pixels live
+    /// outside the model (resolved at render time from `WallpaperImageRef`);
+    /// `fallback` is shown if the image can't be loaded.
+    case image(WallpaperImageRef)
 
     private enum CodingKeys: String, CodingKey {
         case kind
@@ -183,6 +193,8 @@ public enum Background: Codable, Sendable, Equatable {
         case from
         case to
         case fallback
+        case wallpaper
+        case image
     }
 
     private enum Kind: String, Codable {
@@ -190,6 +202,8 @@ public enum Background: Codable, Sendable, Equatable {
         case solid
         case gradient
         case systemWallpaper
+        case wallpaper
+        case image
     }
 
     public init(from decoder: Decoder) throws {
@@ -209,6 +223,10 @@ public enum Background: Codable, Sendable, Equatable {
             self = .systemWallpaper(
                 fallback: try c.decode(RGBColor.self, forKey: .fallback)
             )
+        case .wallpaper:
+            self = .wallpaper(try c.decode(WallpaperGradient.self, forKey: .wallpaper))
+        case .image:
+            self = .image(try c.decode(WallpaperImageRef.self, forKey: .image))
         }
     }
 
@@ -227,7 +245,82 @@ public enum Background: Codable, Sendable, Equatable {
         case .systemWallpaper(let fallback):
             try c.encode(Kind.systemWallpaper, forKey: .kind)
             try c.encode(fallback, forKey: .fallback)
+        case .wallpaper(let wallpaper):
+            try c.encode(Kind.wallpaper, forKey: .kind)
+            try c.encode(wallpaper, forKey: .wallpaper)
+        case .image(let ref):
+            try c.encode(Kind.image, forKey: .kind)
+            try c.encode(ref, forKey: .image)
         }
+    }
+}
+
+/// Reference to an image wallpaper. Exactly one of `builtinID` (a wallpaper
+/// bundled with the app, keyed by its file's base name) or `relativePath` (a
+/// user upload copied into the project bundle, path relative to the bundle
+/// root) is non-nil. The pixels are loaded at render time; `fallback` is the
+/// flat colour shown if loading fails. `name` is the display label.
+public struct WallpaperImageRef: Codable, Sendable, Equatable, Hashable {
+    public var name: String
+    public var builtinID: String?
+    public var relativePath: String?
+    public var fallback: RGBColor
+
+    public init(
+        name: String,
+        builtinID: String? = nil,
+        relativePath: String? = nil,
+        fallback: RGBColor = RGBColor(r: 0.10, g: 0.11, b: 0.14)
+    ) {
+        self.name = name
+        self.builtinID = builtinID
+        self.relativePath = relativePath
+        self.fallback = fallback
+    }
+
+    public static func builtin(id: String, name: String, fallback: RGBColor = RGBColor(r: 0.10, g: 0.11, b: 0.14)) -> WallpaperImageRef {
+        WallpaperImageRef(name: name, builtinID: id, fallback: fallback)
+    }
+
+    public static func upload(relativePath: String, name: String, fallback: RGBColor = RGBColor(r: 0.10, g: 0.11, b: 0.14)) -> WallpaperImageRef {
+        WallpaperImageRef(name: name, relativePath: relativePath, fallback: fallback)
+    }
+}
+
+/// A procedural "wallpaper" background: a base fill with a handful of soft
+/// radial color blobs blended over it (a mesh gradient). Both the Metal
+/// compositor and the SwiftUI inspector swatch render from this same data, so
+/// the picker preview matches the exported frame.
+///
+/// Coordinates are normalized: `x`/`y` in 0...1 (0,0 = top-left of the output),
+/// `radius` in units of output HEIGHT (the renderer aspect-corrects x so blobs
+/// stay circular on a wide frame). `color.a` is the blob's blend strength at
+/// its centre (0...1), not classic opacity.
+public struct WallpaperGradient: Codable, Sendable, Equatable, Hashable {
+    public struct Blob: Codable, Sendable, Equatable, Hashable {
+        public var color: RGBColor
+        public var x: Double
+        public var y: Double
+        public var radius: Double
+
+        public init(color: RGBColor, x: Double, y: Double, radius: Double) {
+            self.color = color
+            self.x = x
+            self.y = y
+            self.radius = radius
+        }
+    }
+
+    /// Stable identifier for the source preset (display name). Lets the UI
+    /// highlight the active swatch and label it without comparing every blob.
+    public var name: String
+    public var base: RGBColor
+    public var blobs: [Blob]
+
+    public init(name: String, base: RGBColor, blobs: [Blob]) {
+        self.name = name
+        self.base = base
+        self.blobs = blobs
     }
 }
 

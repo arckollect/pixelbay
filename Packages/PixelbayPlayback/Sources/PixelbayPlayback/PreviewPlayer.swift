@@ -41,6 +41,20 @@ public final class PreviewPlayer {
     private var rateObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
 
+    /// Snapshot of the last full build. Lets `load` tell a presentation-only
+    /// edit (layout / background / effects / cursor — same composition) from a
+    /// structural one (clips / trims / volume / mute — new composition). For
+    /// the former we rebuild just the videoComposition in place; `nil` until
+    /// the first build, forcing a full build.
+    private struct BuiltContext {
+        var project: Project
+        var outputSize: CGSize
+        var duration: CMTime
+        var screenTrackID: CMPersistentTrackID
+        var webcamTrackID: CMPersistentTrackID?
+    }
+    private var lastBuilt: BuiltContext?
+
     public init() {
         self.player = AVPlayer()
         self.player.allowsExternalPlayback = false
@@ -68,6 +82,7 @@ public final class PreviewPlayer {
         statusObservation = nil
         rateObservation = nil
         player.replaceCurrentItem(with: nil)
+        lastBuilt = nil
     }
 
     public var underlyingPlayer: AVPlayer { player }
@@ -76,9 +91,43 @@ public final class PreviewPlayer {
         project: Project,
         bundleURL: URL,
         wallpaperSource: WallpaperSource? = nil,
+        wallpaperImageProvider: WallpaperImageProvider? = nil,
         cursorTrajectory: [MouseTrajectorySample]? = nil,
         cursorSprite: CursorSpriteData? = nil
     ) async {
+        // Presentation-only fast path. If the composition-affecting structure
+        // (tracks / clips / assets) is unchanged since the last build, the edit
+        // only touched layout / background / effects / cursor — which live in
+        // the videoComposition, not the AVComposition. Rebuild just that and
+        // set it on the EXISTING item: no new AVPlayerItem, no track
+        // re-insertion, no decoder churn (the source of the `missingScreenLayer`
+        // / VRP / CustomVideoCompositor error storms during rapid edits).
+        if let item = player.currentItem,
+           let ctx = lastBuilt,
+           sameStructure(ctx.project, project) {
+            let videoComposition = await PreviewCompositionBuilder.buildVideoComposition(
+                project: project,
+                outputSize: ctx.outputSize,
+                duration: ctx.duration,
+                screenTrackID: ctx.screenTrackID,
+                webcamTrackID: ctx.webcamTrackID,
+                cursorTrajectory: cursorTrajectory,
+                cursorSprite: cursorSprite,
+                wallpaperSource: wallpaperSource,
+                wallpaperImageProvider: wallpaperImageProvider
+            )
+            item.videoComposition = videoComposition
+            lastBuilt?.project = project
+            // A paused item won't re-render on its own when the
+            // videoComposition changes — nudge a zero-distance seek to force a
+            // recompose. (A playing item picks up the new VC on the next frame.)
+            if !isPlaying {
+                player.seek(to: currentTime, toleranceBefore: .zero, toleranceAfter: .zero, completionHandler: { _ in })
+            }
+            status = .ready
+            return
+        }
+
         // Preserve playback continuity across reloads (Phase-2 edits
         // bump the document's revision counter; ProjectView re-keys the
         // .task per edit so this fires repeatedly during an editing
@@ -92,10 +141,18 @@ public final class PreviewPlayer {
                 project: project,
                 bundleURL: bundleURL,
                 wallpaperSource: wallpaperSource,
+                wallpaperImageProvider: wallpaperImageProvider,
                 cursorTrajectory: cursorTrajectory,
                 cursorSprite: cursorSprite
             )
             install(preview: preview)
+            lastBuilt = BuiltContext(
+                project: project,
+                outputSize: preview.outputSize,
+                duration: preview.duration,
+                screenTrackID: preview.screenTrackID,
+                webcamTrackID: preview.webcamTrackID
+            )
             // Restore playhead within the new duration. If the new
             // duration is shorter than the previous time (user trimmed
             // the tail), clamp to the new duration.
@@ -132,6 +189,30 @@ public final class PreviewPlayer {
             log.error("PreviewPlayer load failed: \(String(describing: error), privacy: .public)")
             status = .failed(message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
         }
+    }
+
+    /// True when two projects share the same composition + audio structure —
+    /// i.e. they differ (if at all) only in presentation (layout / background /
+    /// effects / cursor), which the videoComposition fast path can apply
+    /// without rebuilding the `AVComposition`. Conservative: anything it
+    /// doesn't explicitly treat as presentation forces a full reload.
+    ///
+    /// `Track` is `Equatable`, so `tracks ==` covers clip geometry (assetID,
+    /// source/timeline ranges, speed), per-clip `volume`, and per-track
+    /// `muted` — the audioMix inputs. `MediaAsset` isn't `Equatable`, so its
+    /// render-affecting fields are compared by hand.
+    private func sameStructure(_ a: Project, _ b: Project) -> Bool {
+        guard a.tracks == b.tracks else { return false }
+        guard a.assets.count == b.assets.count else { return false }
+        for (x, y) in zip(a.assets, b.assets) {
+            if x.id != y.id
+                || x.relativePath != y.relativePath
+                || x.kind != y.kind
+                || x.cursorRenderedSynthetically != y.cursorRenderedSynthetically {
+                return false
+            }
+        }
+        return true
     }
 
     public func play() {

@@ -64,7 +64,23 @@ extension WallpaperSource {
     /// ExportSheet.runExport on a View), so the `@MainActor`-isolated
     /// `NSScreen.main` access is reached via `MainActor.assumeIsolated`.
     public static let live = WallpaperSource(sampleBackground: {
-        MainActor.assumeIsolated { loadLiveSample() }
+        // `resolve(_:)` is invoked from inside `PreviewCompositionBuilder.build`
+        // — a `nonisolated` async function, so even though its callers
+        // (`PreviewPlayer.load`, ExportSheet, PostCaptureView) are @MainActor,
+        // the awaited `build` body runs OFF the main actor on the cooperative
+        // pool. `NSScreen.main` / `NSWorkspace` are main-actor-isolated, so we
+        // must hop to main to sample them; calling `assumeIsolated` directly
+        // off-main fatal-errors. (This path was unreachable until the Layout
+        // tab's "Desktop" swatch let the user pick `.systemWallpaper`.)
+        func sampleOnMain() -> WallpaperSample? {
+            MainActor.assumeIsolated { loadLiveSample() }
+        }
+        if Thread.isMainThread {
+            return sampleOnMain()
+        }
+        // Safe: the calling @MainActor task is suspended at its `await`, so the
+        // main runloop is free to service this — no deadlock.
+        return DispatchQueue.main.sync(execute: sampleOnMain)
     })
 
     @MainActor
