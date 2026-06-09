@@ -30,7 +30,7 @@ final class ScenesSessionModel {
 
     enum Phase: Equatable {
         case idle
-        case recordingScene(sceneIndex: Int, startedAt: Date)
+        case recordingScene(sceneID: SceneID, startedAt: Date)
         case finalizing
         case merged(bundleURL: URL)
         case failed(message: String)
@@ -322,7 +322,8 @@ final class ScenesSessionModel {
             return
         }
 
-        phase = .recordingScene(sceneIndex: index, startedAt: Date())
+        let sceneID = scene.id
+        phase = .recordingScene(sceneID: sceneID, startedAt: Date())
         await recording.start(request, existingBundle: bundle, sceneLabel: "Scene \(index + 1)")
 
         // Wait for the user to stop. `recording.stop()` is called from the
@@ -344,7 +345,7 @@ final class ScenesSessionModel {
 
         switch terminal {
         case .stopped(let result):
-            await handleSceneRecordingDidStop(result: result, sceneIndex: index)
+            await handleSceneRecordingDidStop(result: result, sceneID: sceneID)
         case .failed(let message):
             phase = .failed(message: message)
             recording.acknowledgeResult()
@@ -357,7 +358,7 @@ final class ScenesSessionModel {
 
     private func handleSceneRecordingDidStop(
         result: RecordingService.Result,
-        sceneIndex: Int
+        sceneID: SceneID
     ) async {
         defer { recording.acknowledgeResult() }
         phase = .finalizing
@@ -372,7 +373,7 @@ final class ScenesSessionModel {
             thumbnailRelativePath: nil
         )
 
-        guard session.scenes.indices.contains(sceneIndex) else {
+        guard let sceneIndex = session.scenes.firstIndex(where: { $0.id == sceneID }) else {
             phase = .idle
             return
         }
@@ -398,9 +399,10 @@ final class ScenesSessionModel {
             )
         }
         if let relativePath {
-            let lastIdx = session.scenes[sceneIndex].takes.count - 1
-            if session.scenes[sceneIndex].takes.indices.contains(lastIdx) {
-                session.scenes[sceneIndex].takes[lastIdx].thumbnailRelativePath = relativePath
+            if let currentSceneIndex = session.scenes.firstIndex(where: { $0.id == sceneID }),
+               let takeIndex = session.scenes[currentSceneIndex].takes.firstIndex(where: { $0.sessionID == result.sessionID })
+            {
+                session.scenes[currentSceneIndex].takes[takeIndex].thumbnailRelativePath = relativePath
             }
         }
 
@@ -665,11 +667,15 @@ final class ScenesSessionModel {
                 // CursorTrajectoryLoader needs it in the editor's bundle.
                 let stem = (asset.relativePath as NSString).lastPathComponent
                 if let sessionPrefix = ScenesBundleStore.extractSessionPrefix(from: stem) {
-                    try? Self.copySidecarIfNeeded(
-                        sessionPrefix: sessionPrefix,
-                        from: scenesBundleURL,
-                        to: editorBundleURL
-                    )
+                    do {
+                        try Self.copySidecarIfNeeded(
+                            sessionPrefix: sessionPrefix,
+                            from: scenesBundleURL,
+                            to: editorBundleURL
+                        )
+                    } catch {
+                        log.error("append sidecar copy failed sessionPrefix=\(sessionPrefix, privacy: .public): \(String(describing: error), privacy: .public)")
+                    }
                 }
             }
 
@@ -694,7 +700,7 @@ final class ScenesSessionModel {
             // every change rides the standard undo stack.
             let postMergeTracks = snapshot.tracks
             let appendedAssetIDs = Set(snapshot.assets.map(\.id)).subtracting(preMergeAssetIDs)
-            await applyAppendDiff(
+            try await applyAppendDiff(
                 preMergeTracks: preMergeTrackSnapshot,
                 postMergeTracks: postMergeTracks,
                 appendedAssets: snapshot.assets.filter { appendedAssetIDs.contains($0.id) },
@@ -729,7 +735,7 @@ final class ScenesSessionModel {
         postMergeTracks: [Track],
         appendedAssets: [MediaAsset],
         document: ProjectDocument
-    ) async {
+    ) async throws {
         // Side-channel: directly extend project.assets via a dedicated
         // command (no built-in AddAsset exists; we add via a tiny inline
         // command file would be heavy — instead we use the simpler path
@@ -742,13 +748,16 @@ final class ScenesSessionModel {
         // bundle: emit an _AppendAssetsCommand (declared in
         // EditCommands+ScenesFlow.swift) followed by track + clip ops.
         if !appendedAssets.isEmpty {
-            await document.apply(_AppendAssetsCommand(assets: appendedAssets))
+            try await document.applyOrThrow(_AppendAssetsCommand(assets: appendedAssets))
         }
 
         // Walk pre/post tracks paired by ID. New tracks (post-only) get
         // AddTrackCommand'd. Existing tracks get clip-by-clip diff.
         let preTrackIDs = Set(preMergeTracks.map(\.id))
-        let preTrackByID = Dictionary(uniqueKeysWithValues: preMergeTracks.map { ($0.id, $0) })
+        let preTrackByID = Dictionary(
+            preMergeTracks.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
 
         // Tracks new to post-merge: emit AddTrackCommand with an empty
         // clips list, then insert each clip. Track equality by .id —
@@ -757,7 +766,7 @@ final class ScenesSessionModel {
         var newClipsByTrackID: [TrackID: [Clip]] = [:]
         for track in postMergeTracks {
             if preTrackIDs.contains(track.id) {
-                let preTrack = preTrackByID[track.id]!
+                guard let preTrack = preTrackByID[track.id] else { continue }
                 let preClipIDs = Set(preTrack.clips.map(\.id))
                 let newClips = track.clips.filter { !preClipIDs.contains($0.id) }
                 if !newClips.isEmpty {
@@ -771,7 +780,7 @@ final class ScenesSessionModel {
                     clips: [],
                     extras: track.extras
                 )
-                await document.apply(AddTrackCommand(track: emptyTrack))
+                try await document.applyOrThrow(AddTrackCommand(track: emptyTrack))
                 if !track.clips.isEmpty {
                     newClipsByTrackID[track.id] = track.clips
                 }
@@ -780,7 +789,7 @@ final class ScenesSessionModel {
 
         for (trackID, clips) in newClipsByTrackID {
             for clip in clips {
-                await document.apply(InsertClipCommand(trackID: trackID, clip: clip))
+                try await document.applyOrThrow(InsertClipCommand(trackID: trackID, clip: clip))
             }
         }
     }
@@ -838,7 +847,7 @@ final class ScenesSessionModel {
 
     /// Updates the description for a history row by dispatching
     /// `SetClipExtraCommand` per clip in the group. The UI calls this from
-    /// the history row's TextField onChange / onSubmit, debounced (the
+    /// the history row's TextField submit / focus-loss commit path (the
     /// editor's command pipeline is fast enough that one command per
     /// keystroke would still feel fine, but the row commits on focus-loss
     /// to keep undo entries usable).
@@ -889,11 +898,18 @@ final class ScenesSessionModel {
             project.scenesSession = session
             let report = try ScenesBundleStore.cleanupUnusedTakes(
                 in: &project,
-                bundleURL: bundle.url
+                bundleURL: bundle.url,
+                deleteFilesImmediately: false
             )
             try store.writeProject(project, to: bundle)
             if let newSession = project.scenesSession {
                 self.session = newSession
+            }
+            do {
+                try ScenesBundleStore.deleteCleanupFiles(report, bundleURL: bundle.url)
+            } catch {
+                log.error("cleanup file deletion failed after project write: \(String(describing: error), privacy: .public)")
+                phase = .failed(message: humanReadable(error))
             }
             log.info(
                 "cleanup removed assetCount=\(report.removedAssetIDs.count) fileCount=\(report.removedFilePaths.count)"
@@ -947,7 +963,8 @@ final class ScenesSessionModel {
         do {
             var project = try store.loadProject(from: bundle)
             let assetByID = Dictionary(
-                uniqueKeysWithValues: project.assets.map { ($0.id, $0) }
+                project.assets.map { ($0.id, $0) },
+                uniquingKeysWith: { first, _ in first }
             )
             let takeAssets = take.assetIDs.compactMap { assetByID[$0] }
             guard !takeAssets.isEmpty else { return nil }
@@ -994,7 +1011,14 @@ final class ScenesSessionModel {
                 project.tracks[trackIdx].insertClipMaintainingOrder(clip)
             }
 
-            return try await PreviewCompositionBuilder.build(project: project, bundleURL: bundle.url)
+            // Preview-grade consumers only (take preview player + 480×270
+            // composite thumbnails) — cap the composition like the editor
+            // preview does instead of compositing at full UHD.
+            return try await PreviewCompositionBuilder.build(
+                project: project,
+                bundleURL: bundle.url,
+                maxOutputSize: PreviewCompositionBuilder.previewMaxOutputSize
+            )
         } catch {
             log.error("take preview composition build failed: \(String(describing: error), privacy: .public)")
             return nil
@@ -1025,7 +1049,9 @@ final class ScenesSessionModel {
         persistTask = nil
         let url = bundle.url
         do {
-            try? FileManager.default.removeItem(at: url)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
             // Cold-start a fresh bundle at the same path (the delete above
             // makes openOrCreatePersistent take its create-fresh branch).
             let archiveDir = try ScenesBundleStore.defaultArchiveDirectory()
@@ -1043,6 +1069,8 @@ final class ScenesSessionModel {
             // doesn't keep showing phantom takes (recording would need the
             // window reopened to rebuild a bundle).
             session = .freshDefault()
+            phase = .failed(message: humanReadable(error))
+            return
         }
         phase = .idle
     }

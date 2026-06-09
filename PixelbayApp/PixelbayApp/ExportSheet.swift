@@ -169,7 +169,7 @@ struct ExportSheet: View {
         panel.allowedContentTypes = [UTType.mpeg4Movie]
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = defaultFilename()
-        let response = await panel.beginSheetModalAsync(for: keyWindow())
+        let response = await panel.beginModalAsync(parentWindow: keyWindow())
         guard response == .OK, let outputURL = panel.url else {
             onDone()
             return
@@ -187,6 +187,7 @@ struct ExportSheet: View {
                 for: project,
                 bundleURL: bundle.url
             )
+            guard !Task.isCancelled else { return }
             let preview = try await PreviewCompositionBuilder.build(
                 project: project,
                 bundleURL: bundle.url,
@@ -198,6 +199,7 @@ struct ExportSheet: View {
                 cursorTrajectory: cursorTrajectory,
                 cursorSprite: SystemCursorSprite.make()
             )
+            guard !Task.isCancelled else { return }
             await exporter.export(
                 composition: preview.composition,
                 videoComposition: preview.videoComposition,
@@ -209,6 +211,7 @@ struct ExportSheet: View {
             // AVAssetExportSession — surface via local state so the UI
             // shows the actual cause instead of stuck "Preparing…". The
             // exporter itself is still .idle, no acknowledge() needed.
+            guard !Task.isCancelled else { return }
             preExportError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
@@ -218,17 +221,24 @@ struct ExportSheet: View {
         return "\(stem).mp4"
     }
 
-    private func keyWindow() -> NSWindow {
-        NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first { $0.canBecomeKey } ?? NSWindow()
+    private func keyWindow() -> NSWindow? {
+        NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first { $0.canBecomeKey && $0.isVisible }
     }
 }
 
-// NSSavePanel.beginSheetModal is callback-based; bridge it to async/await.
+// NSSavePanel is callback-based; bridge it to async/await. Use a sheet when
+// there is a real parent window, otherwise fall back to an app-modal panel.
 private extension NSSavePanel {
-    func beginSheetModalAsync(for window: NSWindow) async -> NSApplication.ModalResponse {
+    func beginModalAsync(parentWindow window: NSWindow?) async -> NSApplication.ModalResponse {
         await withCheckedContinuation { continuation in
-            self.beginSheetModal(for: window) { response in
-                continuation.resume(returning: response)
+            if let window {
+                self.beginSheetModal(for: window) { response in
+                    continuation.resume(returning: response)
+                }
+            } else {
+                self.begin { response in
+                    continuation.resume(returning: response)
+                }
             }
         }
     }

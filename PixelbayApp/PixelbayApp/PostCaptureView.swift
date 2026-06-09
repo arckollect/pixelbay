@@ -134,6 +134,7 @@ struct PostCaptureView: View {
                 for: project,
                 bundleURL: bundle.url
             )
+            guard !Task.isCancelled else { return }
             await player.load(
                 project: project,
                 bundleURL: bundle.url,
@@ -145,6 +146,7 @@ struct PostCaptureView: View {
                 cursorTrajectory: cursorTrajectory,
                 cursorSprite: SystemCursorSprite.make()
             )
+            guard !Task.isCancelled else { return }
         } catch {
             await MainActor.run {
                 // PreviewPlayer's own status will surface a more informative

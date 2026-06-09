@@ -42,6 +42,24 @@ final class SplitClipTests: XCTestCase {
         XCTAssertEqual(left.assetID, right.assetID)
     }
 
+    func test_split_acceptsSplitTimeWithDifferentTimescale() throws {
+        var (project, clipID) = EditorFixture.minimalSingleClip()
+
+        // 1.5s at timescale 1000. The fixture clip stores timeline values
+        // at timescale 600, so the command must normalize before comparing
+        // raw RationalTime values or constructing the right-hand range.
+        let splitTime = RationalTime(value: 1_500, timescale: 1_000)
+        _ = try SplitClipCommand(clipID: clipID, splitTime: splitTime).apply(to: &project)
+
+        XCTAssertEqual(project.tracks[0].clips.count, 2)
+        let left = project.tracks[0].clips[0]
+        let right = project.tracks[0].clips[1]
+        XCTAssertEqual(left.timelineRange.duration, EditorFixture.rt(value: 900))
+        XCTAssertEqual(right.timelineRange.start, EditorFixture.rt(value: 900))
+        XCTAssertEqual(right.timelineRange.duration, EditorFixture.rt(value: 3_900))
+        XCTAssertEqual(right.timelineRange.start.timescale, right.timelineRange.duration.timescale)
+    }
+
     func test_split_inverse_restoresOriginalClip() throws {
         var (project, clipID) = EditorFixture.minimalSingleClip()
         let originalClip = try XCTUnwrap(project.clip(clipID))
@@ -57,6 +75,29 @@ final class SplitClipTests: XCTestCase {
         XCTAssertEqual(restored.sourceRange, originalClip.sourceRange)
         XCTAssertEqual(restored.timelineRange, originalClip.timelineRange)
         XCTAssertEqual(restored.volume, originalClip.volume)
+    }
+
+    func test_split_spedClip_mapsTimelineSplitProportionallyToSourceRange() throws {
+        var (project, clipID) = EditorFixture.minimalSingleClip()
+        _ = try SetClipSpeedCommand(clipID: clipID, newSpeed: 2.0).apply(to: &project)
+
+        // At 2x, the original 8s source range occupies 4s on the timeline.
+        // Splitting 1s into the timeline must consume 2s of source.
+        _ = try SplitClipCommand(clipID: clipID, splitTime: EditorFixture.rt(value: 600)).apply(to: &project)
+
+        XCTAssertEqual(project.tracks[0].clips.count, 2)
+        let left = project.tracks[0].clips[0]
+        let right = project.tracks[0].clips[1]
+
+        XCTAssertEqual(left.timelineRange.duration.value, 600)
+        XCTAssertEqual(right.timelineRange.duration.value, 1800)
+        XCTAssertEqual(left.sourceRange.start.value, 600)
+        XCTAssertEqual(left.sourceRange.duration.value, 1200)
+        XCTAssertEqual(right.sourceRange.start.value, 1800)
+        XCTAssertEqual(right.sourceRange.duration.value, 3600)
+        XCTAssertEqual(left.sourceRange.duration.value + right.sourceRange.duration.value, 4800)
+        XCTAssertEqual(left.speed, 2.0)
+        XCTAssertEqual(right.speed, 2.0)
     }
 
     func test_split_inverse_returnsCommandThatRedoesTheSplit() throws {

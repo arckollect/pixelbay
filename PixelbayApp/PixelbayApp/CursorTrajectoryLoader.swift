@@ -19,13 +19,12 @@ private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "Curso
 // Phase 5 multi-scene support: after a scenes merge, the project carries
 // N screen assets (one per merged scene) each with its own clicks-*.json
 // sidecar. The loader walks every screen-kind track's clips, pairs each
-// clip with its underlying asset's sidecar, shifts the per-asset samples
-// by `clip.timelineRange.start - clip.sourceRange.start` so they land at
-// the right project-timeline position, then concatenates into a single
-// master trajectory. The compositor consumes the merged stream unchanged;
-// per-frame trajectory sampling already does a linear scan by
-// timelineTime, so back-to-back scene clips render cursor-follow as one
-// continuous path.
+// clip with its underlying asset's sidecar, maps each per-asset sample's
+// progress through `clip.sourceRange` into the clip's actual timeline span
+// (including speed changes), then concatenates into a single master
+// trajectory. The compositor consumes the merged stream unchanged; per-frame
+// trajectory sampling already does a linear scan by timelineTime, so
+// back-to-back scene clips render cursor-follow as one continuous path.
 //
 // Three call sites use this (ProjectView's .task, PostCaptureView's load
 // path, ExportSheet.runExport) so it lives here rather than being
@@ -80,12 +79,9 @@ enum CursorTrajectoryLoader {
             }
         }
 
-        // Defensive sort: ClickLogger dispatches each move through a
-        // `Task { await self.recordMove }` and Swift's actor scheduler
-        // does not guarantee FIFO enqueue order; concatenating per-clip
-        // shifted slices preserves out-of-order errors. The compositor's
-        // linear-bracket-pair scan would otherwise pick the wrong
-        // neighbours.
+        // Defensive sort: scenes can be merged/reordered and each screen clip
+        // contributes its own shifted sidecar slice. The compositor's
+        // linear-bracket-pair scan expects a timeline-ordered master stream.
         let sorted = merged.sorted { $0.timelineTime < $1.timelineTime }
         return sorted.isEmpty ? nil : sorted
     }
@@ -96,9 +92,10 @@ enum CursorTrajectoryLoader {
         in project: Project
     ) -> [(asset: MediaAsset, clips: [Clip])] {
         let screenAssetByID: [MediaAssetID: MediaAsset] = Dictionary(
-            uniqueKeysWithValues: project.assets
+            project.assets
                 .filter { $0.kind == .display }
-                .map { ($0.id, $0) }
+                .map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
         )
         var grouped: [MediaAssetID: [Clip]] = [:]
         for track in project.tracks where track.kind == .screen {
@@ -121,24 +118,28 @@ enum CursorTrajectoryLoader {
 
     /// Per-asset samples have `timelineTime` in the recording's own time
     /// domain (t=0 at the asset's `captureStart`). To project them onto the
-    /// editor's timeline we subtract the clip's `sourceRange.start` (which
-    /// part of the asset the clip uses) and add the clip's
-    /// `timelineRange.start` (where the clip sits in the timeline). Samples
-    /// outside the clip's source range are dropped — they correspond to
-    /// material the editor trimmed off.
+    /// editor's timeline we map progress through the clip's `sourceRange`
+    /// (which part of the asset the clip uses) into `timelineRange` (where
+    /// and how long the clip sits in the timeline). Samples outside the clip's
+    /// source range are dropped — they correspond to material the editor
+    /// trimmed off.
     private static func shift(
         _ samples: [MouseTrajectorySample],
         intoClipTimeline clip: Clip
     ) -> [MouseTrajectorySample] {
         let sourceStart = clip.sourceRange.start.seconds
         let sourceEnd = clip.sourceRange.end.seconds
+        let sourceDuration = clip.sourceRange.duration.seconds
         let timelineStart = clip.timelineRange.start.seconds
+        let timelineDuration = clip.timelineRange.duration.seconds
+        guard sourceDuration > 0, timelineDuration > 0 else { return [] }
         return samples.compactMap { sample -> MouseTrajectorySample? in
             guard sample.timelineTime >= sourceStart,
                   sample.timelineTime <= sourceEnd
             else { return nil }
+            let sourceProgress = (sample.timelineTime - sourceStart) / sourceDuration
             return MouseTrajectorySample(
-                timelineTime: timelineStart + (sample.timelineTime - sourceStart),
+                timelineTime: timelineStart + sourceProgress * timelineDuration,
                 centerX: sample.centerX,
                 centerY: sample.centerY
             )

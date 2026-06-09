@@ -46,6 +46,7 @@ struct ProjectView: View {
     /// invasive change off `TimelineView.swift` so the parallel Branch B
     /// can keep restructuring timeline row rendering without conflict.
     @State private var appendPopoverPresented: Bool = false
+    @State private var zoomFollowSafeZoneOverlayFraction: Double?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -103,6 +104,7 @@ struct ProjectView: View {
                 for: document.project,
                 bundleURL: document.bundleURL
             )
+            guard !Task.isCancelled else { return }
             await player.load(
                 project: document.project,
                 bundleURL: document.bundleURL,
@@ -114,6 +116,7 @@ struct ProjectView: View {
                 cursorTrajectory: cursorTrajectory,
                 cursorSprite: SystemCursorSprite.make()
             )
+            guard !Task.isCancelled else { return }
             editingName = document.project.name
             if selectedClipID == nil {
                 selectedClipID = document.project.tracks.flatMap(\.clips).first?.id
@@ -125,6 +128,9 @@ struct ProjectView: View {
             if editingName != newName {
                 editingName = newName
             }
+        }
+        .onChange(of: document.revision) { _, _ in
+            reconcileSelections()
         }
         .onDisappear {
             player.dispose()
@@ -252,14 +258,25 @@ struct ProjectView: View {
             .background(Theme.Color.bgBase)
         case .ready:
             VStack(spacing: Theme.Spacing.sm) {
-                PreviewPlayerView(player: player, fill: previewFill)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Theme.Color.bgBase, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Theme.Radius.medium)
-                            .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
-                    )
+                ZStack {
+                    PreviewPlayerView(player: player, fill: previewFill)
+                    if let fraction = zoomFollowSafeZoneOverlayFraction {
+                        ZoomFollowSafeZoneOverlay(
+                            fraction: fraction,
+                            videoSize: player.outputSize,
+                            fill: previewFill
+                        )
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Theme.Color.bgBase, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                        .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+                )
                 transportBar
             }
             .padding(Theme.Spacing.lg)
@@ -468,7 +485,8 @@ struct ProjectView: View {
     }
 
     private static let inspectorTabs: [PBTabItem<InspectorTab>] = [
-        PBTabItem(tag: .layout, systemImage: "rectangle.on.rectangle", help: "Layout"),
+        PBTabItem(tag: .layout, systemImage: "rectangle.on.rectangle", help: "Background & Scene"),
+        PBTabItem(tag: .camera, systemImage: "video", help: "Camera"),
         PBTabItem(tag: .cursor, systemImage: "cursorarrow.rays", help: "Cursor"),
         PBTabItem(tag: .zoom, systemImage: "plus.magnifyingglass", help: "Zoom & Effects"),
         PBTabItem(tag: .audio, systemImage: "speaker.wave.2", help: "Audio")
@@ -478,6 +496,7 @@ struct ProjectView: View {
     private func tabContent(_ tab: InspectorTab) -> some View {
         switch tab {
         case .layout: layoutInspector
+        case .camera: cameraInspector
         case .cursor: cursorInspector
         case .zoom: effectsInspector
         case .audio: audioInspector
@@ -520,37 +539,45 @@ struct ProjectView: View {
         Task { await document.apply(RenameProjectCommand(newName: editingName)) }
     }
 
-    // MARK: - Layout inspector (Phase 3a)
+    private func reconcileSelections() {
+        let clips = document.project.tracks.flatMap(\.clips)
+        let clipIDs = Set(clips.map(\.id))
+        if let selectedClipID, !clipIDs.contains(selectedClipID) {
+            self.selectedClipID = clips.first?.id
+        } else if selectedClipID == nil {
+            selectedClipID = clips.first?.id
+        }
+
+        let keyframeIDs = Set(document.project.effects.map(\.id))
+        if let selectedEffectKeyframeID, !keyframeIDs.contains(selectedEffectKeyframeID) {
+            self.selectedEffectKeyframeID = nil
+        }
+    }
+
+    // MARK: - Background & Scene inspector (Phase 3a)
 
     private var layoutInspector: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-            LayoutInspector(
-                layout: document.project.layout,
-                bundleURL: document.bundleURL,
-                onChange: { newLayout in
-                    Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
-                }
-            )
-            PBDivider()
-            // Quick-access zoom actions, mirrored from the Zoom & Effects tab so
-            // the user can drop a zoom without leaving the Layout surface. The
-            // Zoom tab keeps the keyframe list + per-keyframe editors.
-            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                PBSectionHeader("Zoom")
-                ZoomActionsBar(
-                    project: document.project,
-                    bundleURL: document.bundleURL,
-                    playheadTime: player.currentTime.seconds,
-                    onApply: { command in
-                        Task { await document.apply(command) }
-                    },
-                    onSeek: { time in
-                        let cmTime = CMTime(value: time.value, timescale: time.timescale)
-                        player.seek(to: cmTime)
-                    }
-                )
+        BackgroundInspector(
+            layout: document.project.layout,
+            bundleURL: document.bundleURL,
+            onChange: { newLayout in
+                Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
+            },
+            onError: { message in
+                document.reportError(message)
             }
-        }
+        )
+    }
+
+    // MARK: - Camera inspector
+
+    private var cameraInspector: some View {
+        CameraInspector(
+            layout: document.project.layout,
+            onChange: { newLayout in
+                Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
+            }
+        )
     }
 
     // MARK: - Cursor inspector (Phase 3c)
@@ -590,6 +617,9 @@ struct ProjectView: View {
             onSeek: { time in
                 let cmTime = CMTime(value: time.value, timescale: time.timescale)
                 player.seek(to: cmTime)
+            },
+            onFollowSafeZonePreview: { fraction in
+                zoomFollowSafeZoneOverlayFraction = fraction
             }
         )
     }
@@ -599,6 +629,78 @@ struct ProjectView: View {
     private func rationalTime(_ cmTime: CMTime) -> RationalTime? {
         guard cmTime.isValid, !cmTime.isIndefinite else { return nil }
         return RationalTime(value: cmTime.value, timescale: cmTime.timescale)
+    }
+}
+
+private struct ZoomFollowSafeZoneOverlay: View {
+    let fraction: Double
+    let videoSize: CGSize
+    let fill: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let videoRect = fittedVideoRect(container: geo.size)
+            let safeFraction = CGFloat(min(max(fraction, 0.01), 1.0))
+            let safeSize = CGSize(
+                width: videoRect.width * safeFraction,
+                height: videoRect.height * safeFraction
+            )
+            let safeRect = CGRect(
+                x: videoRect.midX - safeSize.width / 2,
+                y: videoRect.midY - safeSize.height / 2,
+                width: safeSize.width,
+                height: safeSize.height
+            )
+            ZStack {
+                Rectangle()
+                    .fill(Color.red.opacity(0.10))
+                    .frame(width: safeRect.width, height: safeRect.height)
+                    .position(x: safeRect.midX, y: safeRect.midY)
+                Rectangle()
+                    .stroke(Color.red.opacity(0.82), lineWidth: 2)
+                    .frame(width: safeRect.width, height: safeRect.height)
+                    .position(x: safeRect.midX, y: safeRect.midY)
+                Rectangle()
+                    .stroke(Color.red.opacity(0.28), style: StrokeStyle(lineWidth: 1, dash: [6, 5]))
+                    .frame(width: videoRect.width, height: videoRect.height)
+                    .position(x: videoRect.midX, y: videoRect.midY)
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+    }
+
+    private func fittedVideoRect(container: CGSize) -> CGRect {
+        guard container.width > 0, container.height > 0,
+              videoSize.width > 0, videoSize.height > 0 else {
+            return CGRect(origin: .zero, size: container)
+        }
+        let containerAspect = container.width / container.height
+        let videoAspect = videoSize.width / videoSize.height
+        let width: CGFloat
+        let height: CGFloat
+        if fill {
+            if containerAspect > videoAspect {
+                width = container.width
+                height = container.width / videoAspect
+            } else {
+                height = container.height
+                width = container.height * videoAspect
+            }
+        } else {
+            if containerAspect > videoAspect {
+                height = container.height
+                width = container.height * videoAspect
+            } else {
+                width = container.width
+                height = container.width / videoAspect
+            }
+        }
+        return CGRect(
+            x: (container.width - width) / 2,
+            y: (container.height - height) / 2,
+            width: width,
+            height: height
+        )
     }
 }
 
@@ -613,7 +715,10 @@ private struct ProjectViewKey: Hashable {
 
 /// The right-rail inspector categories, surfaced as a vertical icon-tab rail.
 enum InspectorTab: Hashable {
+    /// "Background & Scene" — background gallery + frame padding.
     case layout
+    /// Webcam composition: PiP/side-by-side mode, position, size, shape.
+    case camera
     case cursor
     case zoom
     case audio

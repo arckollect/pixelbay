@@ -7,13 +7,35 @@ import PixelbayCore
 
 private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "Exporter")
 
+enum ExportFileCommitter {
+    static func temporaryURL(for outputURL: URL) -> URL {
+        let directory = outputURL.deletingLastPathComponent()
+        let basename = outputURL.deletingPathExtension().lastPathComponent
+        let ext = outputURL.pathExtension.isEmpty ? "mp4" : outputURL.pathExtension
+        return directory.appendingPathComponent(".\(basename)-\(UUID().uuidString).tmp.\(ext)")
+    }
+
+    static func commit(tempURL: URL, to outputURL: URL, fileManager: FileManager = .default) throws {
+        if fileManager.fileExists(atPath: outputURL.path) {
+            _ = try fileManager.replaceItemAt(outputURL, withItemAt: tempURL)
+        } else {
+            try fileManager.moveItem(at: tempURL, to: outputURL)
+        }
+    }
+
+    static func discard(_ tempURL: URL, fileManager: FileManager = .default) {
+        guard fileManager.fileExists(atPath: tempURL.path) else { return }
+        try? fileManager.removeItem(at: tempURL)
+    }
+}
+
 // Drives AVAssetExportSession against the same PreviewComposition the post-
 // capture preview surface uses. Per HANDOFF §6.6: one render path for
 // preview and export, never fork.
 //
-// Phase 1 ships a single preset — "High 1080p H.264 MP4". AVAssetExport's
-// `AVAssetExportPreset1920x1080` produces ~10Mbps H.264 at 1080p, which is
-// the spec from HANDOFF §4.10. Phase 4 adds the preset matrix.
+// Single export path for now: highest-quality MP4 from the preview
+// composition. The render size comes from PreviewCompositionBuilder, so this
+// preserves UHD output when the source recording has enough detail.
 @MainActor
 @Observable
 public final class Exporter {
@@ -33,10 +55,10 @@ public final class Exporter {
 
     public init() {}
 
-    // Start an export. `outputURL` should not exist (AVAssetExportSession
-    // refuses to overwrite). The composition + videoComposition come from
-    // PreviewCompositionBuilder — pass the SAME instances you fed to the
-    // PreviewPlayer.
+    // Start an export. AVAssetExportSession refuses to overwrite, so export
+    // to a sibling temp file first and only replace the requested destination
+    // after the new export succeeds. This preserves an existing MP4 if the
+    // replacement export fails or is cancelled.
     public func export(
         composition: AVComposition,
         videoComposition: AVVideoComposition?,
@@ -48,22 +70,16 @@ public final class Exporter {
             return
         }
         status = .preparing
-        if FileManager.default.fileExists(atPath: outputURL.path) {
-            do {
-                try FileManager.default.removeItem(at: outputURL)
-            } catch {
-                status = .failed(message: "Could not overwrite existing file: \(error.localizedDescription)")
-                return
-            }
-        }
+        let tempURL = ExportFileCommitter.temporaryURL(for: outputURL)
+        ExportFileCommitter.discard(tempURL)
         guard let session = AVAssetExportSession(
             asset: composition,
-            presetName: AVAssetExportPreset1920x1080
+            presetName: AVAssetExportPresetHighestQuality
         ) else {
-            status = .failed(message: "AVAssetExportSession could not be created with the 1080p preset")
+            status = .failed(message: "AVAssetExportSession could not be created with the highest-quality preset")
             return
         }
-        session.outputURL = outputURL
+        session.outputURL = tempURL
         session.outputFileType = .mp4
         session.shouldOptimizeForNetworkUse = true
         if let videoComposition {
@@ -76,12 +92,14 @@ public final class Exporter {
 
         startProgressMonitor()
         do {
-            try await session.export(to: outputURL, as: .mp4)
+            try await session.export(to: tempURL, as: .mp4)
+            try ExportFileCommitter.commit(tempURL: tempURL, to: outputURL)
             stopProgressMonitor()
             status = .finished(outputURL)
             log.info("export complete url=\(outputURL.path, privacy: .public)")
         } catch {
             stopProgressMonitor()
+            ExportFileCommitter.discard(tempURL)
             if Task.isCancelled || isCancellation(error) {
                 status = .cancelled
             } else {

@@ -166,6 +166,16 @@ public struct MediaAsset: Codable, Sendable, Identifiable {
         case nativeDuration
         case extras
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(MediaAssetID.self, forKey: .id)
+        self.kind = try c.decode(CaptureSourceKind.self, forKey: .kind)
+        self.relativePath = try c.decode(String.self, forKey: .relativePath)
+        self.captureStart = try c.decodeIfPresent(RationalTime.self, forKey: .captureStart)
+        self.nativeDuration = try c.decode(RationalTime.self, forKey: .nativeDuration)
+        self.extras = try c.decodeIfPresent([String: JSONValue].self, forKey: .extras) ?? [:]
+    }
 }
 
 // A clip is a non-destructive slice into a MediaAsset.
@@ -215,6 +225,18 @@ public struct Clip: Codable, Sendable, Identifiable, Equatable {
         case speed
         case enabled
         case extras
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(ClipID.self, forKey: .id)
+        self.assetID = try c.decode(MediaAssetID.self, forKey: .assetID)
+        self.sourceRange = try c.decode(TimeRange.self, forKey: .sourceRange)
+        self.timelineRange = try c.decode(TimeRange.self, forKey: .timelineRange)
+        self.volume = try c.decodeIfPresent(Double.self, forKey: .volume) ?? 1.0
+        self.speed = try c.decodeIfPresent(Double.self, forKey: .speed) ?? 1.0
+        self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        self.extras = try c.decodeIfPresent([String: JSONValue].self, forKey: .extras) ?? [:]
     }
 }
 
@@ -267,6 +289,17 @@ public struct Track: Codable, Sendable, Identifiable, Equatable {
         case hidden
         case extras
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(TrackID.self, forKey: .id)
+        self.kind = try c.decode(TrackKind.self, forKey: .kind)
+        self.name = try c.decode(String.self, forKey: .name)
+        self.clips = try c.decode([Clip].self, forKey: .clips)
+        self.muted = try c.decodeIfPresent(Bool.self, forKey: .muted) ?? false
+        self.hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
+        self.extras = try c.decodeIfPresent([String: JSONValue].self, forKey: .extras) ?? [:]
+    }
 }
 
 // Represents which screen-recording asset is "active" at a given timeline
@@ -291,6 +324,13 @@ public struct SourceSegment: Codable, Sendable {
         case assetID
         case timelineRange
         case extras
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.assetID = try c.decode(MediaAssetID.self, forKey: .assetID)
+        self.timelineRange = try c.decode(TimeRange.self, forKey: .timelineRange)
+        self.extras = try c.decodeIfPresent([String: JSONValue].self, forKey: .extras) ?? [:]
     }
 }
 
@@ -375,5 +415,23 @@ public struct Project: Codable, Sendable, Identifiable {
         case cursorSettings
         case scenesSession
         case extras
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.schemaVersion = try c.decode(Int.self, forKey: .schemaVersion)
+        self.bundleVersion = try c.decodeIfPresent(Int.self, forKey: .bundleVersion) ?? currentBundleVersion
+        self.id = try c.decode(ProjectID.self, forKey: .id)
+        self.name = try c.decode(String.self, forKey: .name)
+        self.createdAt = try c.decode(Date.self, forKey: .createdAt)
+        self.modifiedAt = try c.decode(Date.self, forKey: .modifiedAt)
+        self.assets = try c.decodeIfPresent([MediaAsset].self, forKey: .assets) ?? []
+        self.tracks = try c.decodeIfPresent([Track].self, forKey: .tracks) ?? []
+        self.sourceSegments = try c.decodeIfPresent([SourceSegment].self, forKey: .sourceSegments) ?? []
+        self.layout = try c.decodeIfPresent(LayoutPreset.self, forKey: .layout) ?? .phase1Default
+        self.effects = try c.decodeIfPresent([EffectKeyframe].self, forKey: .effects) ?? []
+        self.cursorSettings = try c.decodeIfPresent(CursorSettings.self, forKey: .cursorSettings) ?? .default
+        self.scenesSession = try c.decodeIfPresent(ScenesSession.self, forKey: .scenesSession)
+        self.extras = try c.decodeIfPresent([String: JSONValue].self, forKey: .extras) ?? [:]
     }
 }

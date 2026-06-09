@@ -99,6 +99,23 @@ final class EffectKeyframeTests: XCTestCase {
         XCTAssertEqual(decoded.origin, .auto)
     }
 
+    func test_keyframe_extrasDefaultsToEmptyOnDecodeWhenMissing() throws {
+        let json = """
+        {
+            "id": "kf-1",
+            "kind": "zoom",
+            "timelineRange": {"start": {"value": 0, "timescale": 600}, "duration": {"value": 1200, "timescale": 600}},
+            "zoomFactor": 1.5,
+            "centerX": 0.5,
+            "centerY": 0.5,
+            "easeIn": {"value": 120, "timescale": 600},
+            "easeOut": {"value": 120, "timescale": 600}
+        }
+        """
+        let decoded = try JSONDecoder().decode(EffectKeyframe.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.extras, [:])
+    }
+
     func test_keyframe_manualHotkeyOrigin_roundTripsThroughCodable() throws {
         let kf = EffectKeyframe(
             kind: .zoom,
@@ -164,6 +181,66 @@ final class EffectKeyframeTests: XCTestCase {
     }
 
     // MARK: - strength(at:)
+
+    func test_zoomEaseDefaults_areSharedSmoothCadence() {
+        let kf = EffectKeyframe(
+            kind: .zoom,
+            timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2))
+        )
+
+        XCTAssertEqual(EffectKeyframe.defaultZoomEaseIn.seconds, 0.55, accuracy: 1e-9)
+        XCTAssertEqual(EffectKeyframe.defaultZoomEaseOut.seconds, 0.55, accuracy: 1e-9)
+        XCTAssertEqual(kf.easeIn, EffectKeyframe.defaultZoomEaseIn)
+        XCTAssertEqual(kf.easeOut, EffectKeyframe.defaultZoomEaseOut)
+    }
+
+    func test_zoomFollowDefaults_areTightAndAdjustable() {
+        var kf = EffectKeyframe(
+            kind: .zoom,
+            timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2))
+        )
+        XCTAssertEqual(kf.zoomFollowSafeZoneFraction, 0.48, accuracy: 1e-9)
+        XCTAssertEqual(kf.zoomFollowMotionBlur, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(kf.zoomFollowMaxAnchorSpeed, 2.20, accuracy: 1e-9)
+        XCTAssertEqual(kf.zoomFollowLookaheadSeconds, 0.07, accuracy: 1e-9)
+
+        kf.zoomFollowSafeZoneFraction = 0.36
+        kf.zoomFollowMotionBlur = 1.8
+        kf.zoomFollowMaxAnchorSpeed = 1.4
+        kf.zoomFollowLookaheadSeconds = 0.08
+        XCTAssertEqual(kf.zoomFollowSafeZoneFraction, 0.36, accuracy: 1e-9)
+        XCTAssertEqual(kf.zoomFollowMotionBlur, 1.8, accuracy: 1e-9)
+        XCTAssertEqual(kf.zoomFollowMaxAnchorSpeed, 1.4, accuracy: 1e-9)
+        XCTAssertEqual(kf.zoomFollowLookaheadSeconds, 0.08, accuracy: 1e-9)
+        XCTAssertEqual(kf.extras["zoomFollowSafeZoneFraction"], .double(0.36))
+        XCTAssertEqual(kf.extras["zoomFollowMotionBlur"], .double(1.8))
+        XCTAssertEqual(kf.extras["zoomFollowMaxAnchorSpeed"], .double(1.4))
+        XCTAssertEqual(kf.extras["zoomFollowLookaheadSeconds"], .double(0.08))
+    }
+
+    func test_zoomFollowSettings_clampAndClearAtDefaults() {
+        var kf = EffectKeyframe(
+            kind: .zoom,
+            timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2))
+        )
+        kf.zoomFollowSafeZoneFraction = 99
+        kf.zoomFollowMotionBlur = -5
+        kf.zoomFollowMaxAnchorSpeed = 99
+        kf.zoomFollowLookaheadSeconds = -1
+        XCTAssertEqual(kf.zoomFollowSafeZoneFraction, EffectKeyframe.zoomFollowSafeZoneRange.upperBound)
+        XCTAssertEqual(kf.zoomFollowMotionBlur, EffectKeyframe.zoomFollowMotionBlurRange.lowerBound)
+        XCTAssertEqual(kf.zoomFollowMaxAnchorSpeed, EffectKeyframe.zoomFollowMaxAnchorSpeedRange.upperBound)
+        XCTAssertEqual(kf.zoomFollowLookaheadSeconds, EffectKeyframe.zoomFollowLookaheadSecondsRange.lowerBound)
+
+        kf.zoomFollowSafeZoneFraction = EffectKeyframe.defaultZoomFollowSafeZoneFraction
+        kf.zoomFollowMotionBlur = EffectKeyframe.defaultZoomFollowMotionBlur
+        kf.zoomFollowMaxAnchorSpeed = EffectKeyframe.defaultZoomFollowMaxAnchorSpeed
+        kf.zoomFollowLookaheadSeconds = EffectKeyframe.defaultZoomFollowLookaheadSeconds
+        XCTAssertNil(kf.extras["zoomFollowSafeZoneFraction"])
+        XCTAssertNil(kf.extras["zoomFollowMotionBlur"])
+        XCTAssertNil(kf.extras["zoomFollowMaxAnchorSpeed"])
+        XCTAssertNil(kf.extras["zoomFollowLookaheadSeconds"])
+    }
 
     func test_strength_returnsZeroOutsideRange() {
         let kf = EffectKeyframe(

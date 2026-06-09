@@ -70,6 +70,43 @@ final class ProjectBundleTests: XCTestCase {
                        "atomic write must not leave .project.json.tmp-* files behind")
     }
 
+    func test_writeProject_replaceFailure_removesTempArtifact() throws {
+        let bundleURL = tempDirectory.appendingPathComponent("FailingAtomic.pixelbay")
+        let bundle = ProjectBundle(url: bundleURL)
+        try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
+        try "{}".write(to: bundle.projectFileURL, atomically: true, encoding: .utf8)
+
+        struct ReplaceFailed: Error {}
+        let wrapper = FileManagerWrapper(
+            fileExists: { FileManager.default.fileExists(atPath: $0) },
+            createDirectory: { url, intermediates in
+                try FileManager.default.createDirectory(
+                    at: url,
+                    withIntermediateDirectories: intermediates
+                )
+            },
+            contentsOfDirectory: { url in
+                try FileManager.default.contentsOfDirectory(
+                    at: url,
+                    includingPropertiesForKeys: nil
+                )
+            },
+            replaceItem: { _, _ in throw ReplaceFailed() },
+            removeItem: { url in try FileManager.default.removeItem(at: url) }
+        )
+        let store = ProjectBundleStore(fileManager: wrapper)
+
+        XCTAssertThrowsError(try store.writeProject(Project(name: "Fail"), to: bundle))
+
+        let contents = try FileManager.default.contentsOfDirectory(
+            at: bundle.url,
+            includingPropertiesForKeys: nil
+        )
+        let leftoverTempFiles = contents.filter { $0.lastPathComponent.hasPrefix(".project.json.tmp-") }
+        XCTAssertEqual(leftoverTempFiles, [],
+                       "failed atomic write must remove the staged temp project file")
+    }
+
     // MARK: - Refusing to overwrite
 
     func test_createBundle_refusesIfPathAlreadyExists() throws {
@@ -82,6 +119,36 @@ final class ProjectBundleTests: XCTestCase {
                 return XCTFail("expected .bundleAlreadyExists, got \(error)")
             }
         }
+    }
+
+    func test_createBundle_initialWriteFailure_removesPartialBundle() throws {
+        let bundleURL = tempDirectory.appendingPathComponent("Partial.pixelbay")
+
+        struct ReplaceFailed: Error {}
+        let wrapper = FileManagerWrapper(
+            fileExists: { FileManager.default.fileExists(atPath: $0) },
+            createDirectory: { url, intermediates in
+                try FileManager.default.createDirectory(
+                    at: url,
+                    withIntermediateDirectories: intermediates
+                )
+            },
+            contentsOfDirectory: { url in
+                try FileManager.default.contentsOfDirectory(
+                    at: url,
+                    includingPropertiesForKeys: nil
+                )
+            },
+            replaceItem: { _, _ in throw ReplaceFailed() },
+            removeItem: { url in try FileManager.default.removeItem(at: url) }
+        )
+        let store = ProjectBundleStore(fileManager: wrapper)
+
+        XCTAssertThrowsError(try store.createBundle(at: bundleURL, project: Project(name: "Partial")))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: bundleURL.path),
+            "failed bundle creation must not leave a partial .pixelbay package behind"
+        )
     }
 
     // MARK: - Recovery scan

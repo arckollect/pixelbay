@@ -56,18 +56,22 @@ public actor EditHistory {
     /// Pops the top inverse off the undo stack, applies it (which produces
     /// its own inverse — the "redo of the original"), and pushes that onto
     /// the redo stack.
-    public func undo() throws {
-        guard let inverse = undoStack.popLast() else { return }
+    @discardableResult
+    public func undo() throws -> Bool {
+        guard let inverse = undoStack.popLast() else { return false }
         let redoCommand = try inverse.apply(to: &project)
         redoStack.append(redoCommand)
         log.debug("undo — undoStack=\(self.undoStack.count) redoStack=\(self.redoStack.count)")
+        return true
     }
 
-    public func redo() throws {
-        guard let redoCommand = redoStack.popLast() else { return }
+    @discardableResult
+    public func redo() throws -> Bool {
+        guard let redoCommand = redoStack.popLast() else { return false }
         let inverse = try redoCommand.apply(to: &project)
         undoStack.append(inverse)
         log.debug("redo — undoStack=\(self.undoStack.count) redoStack=\(self.redoStack.count)")
+        return true
     }
 
     /// Replaces the project entirely (e.g. on bundle reload from disk).

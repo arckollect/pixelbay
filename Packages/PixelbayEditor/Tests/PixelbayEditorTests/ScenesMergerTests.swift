@@ -88,6 +88,38 @@ final class ScenesMergerTests: XCTestCase {
         XCTAssertTrue(project.tracks.isEmpty)
     }
 
+    func test_merge_duplicateProjectAssetIDs_usesFirstAssetWithoutCrashing() throws {
+        let sharedID = MediaAssetID.generate()
+        let firstAsset = MediaAsset(
+            id: sharedID,
+            kind: .display,
+            relativePath: "media/screen-first.mov",
+            nativeDuration: .seconds(5)
+        )
+        let duplicateAsset = MediaAsset(
+            id: sharedID,
+            kind: .display,
+            relativePath: "media/screen-duplicate.mov",
+            nativeDuration: .seconds(9)
+        )
+        let take = Take(sessionID: "dupeasset", assetIDs: [sharedID])
+        let scene = Scene(takes: [take], activeTakeIndex: 0)
+        var project = Project(
+            name: "Duplicate asset IDs",
+            assets: [firstAsset, duplicateAsset],
+            scenesSession: ScenesSession(scenes: [scene])
+        )
+
+        let merged = try ScenesMerger.merge(into: &project)
+
+        XCTAssertEqual(merged, 1)
+        XCTAssertEqual(project.tracks.count, 1)
+        let clip = try XCTUnwrap(project.tracks.first?.clips.first)
+        XCTAssertEqual(clip.assetID, sharedID)
+        XCTAssertEqual(clip.sourceRange.duration.seconds, 5, accuracy: 1e-9)
+        XCTAssertEqual(clip.timelineRange.duration.seconds, 5, accuracy: 1e-9)
+    }
+
     func test_merge_throwsWhenActiveTakeHasNoAssets() {
         let take = Take(sessionID: "empty", assetIDs: [])
         let scene = Scene(takes: [take], activeTakeIndex: 0)
@@ -379,6 +411,38 @@ final class ScenesMergerTests: XCTestCase {
         // sourceRange uses the tail: start = 12 − 10 = 2 s, duration = 10 s.
         XCTAssertEqual(camClip?.sourceRange.start.seconds ?? 0, 2.0, accuracy: 1e-6)
         XCTAssertEqual(camClip?.sourceRange.duration.seconds ?? 0, 10.0, accuracy: 1e-6)
+    }
+
+    func test_merge_shorterNonScreenAssetSpansCanonicalTimelineDuration() throws {
+        let screenID = MediaAssetID.generate()
+        let camID = MediaAssetID.generate()
+        let screenAsset = MediaAsset(
+            id: screenID,
+            kind: .display,
+            relativePath: "media/screen.mov",
+            nativeDuration: .seconds(10)
+        )
+        let camAsset = MediaAsset(
+            id: camID,
+            kind: .webcam,
+            relativePath: "media/cam.mov",
+            nativeDuration: .seconds(3)
+        )
+        let take = Take(sessionID: "shortcam", assetIDs: [screenID, camID], durationSeconds: 10)
+        var project = Project(
+            name: "Short cam",
+            assets: [screenAsset, camAsset],
+            scenesSession: ScenesSession(scenes: [
+                Scene(takes: [take], activeTakeIndex: 0)
+            ])
+        )
+
+        try ScenesMerger.merge(into: &project)
+
+        let camClip = try XCTUnwrap(project.tracks.first { $0.kind == .webcam }?.clips.first)
+        XCTAssertEqual(camClip.sourceRange.start.seconds, 0, accuracy: 1e-6)
+        XCTAssertEqual(camClip.sourceRange.duration.seconds, 3, accuracy: 1e-6)
+        XCTAssertEqual(camClip.timelineRange.duration.seconds, 10, accuracy: 1e-6)
     }
 
     func test_merge_twoScenesWithLongerCam_producesNonOverlappingClipsOnSharedCamTrack() throws {

@@ -22,6 +22,21 @@ final class TrimClipTests: XCTestCase {
         XCTAssertEqual(post.timelineRange.duration.value, priorTimelineDuration.value - 600)
     }
 
+    func test_trimIn_acceptsDeltaWithDifferentTimescale() throws {
+        var (project, clipID) = EditorFixture.minimalSingleClip()
+
+        // 1s at timescale 1000. The command should normalize to the clip's
+        // 600-timescale timeline range before applying exact arithmetic.
+        let delta = RationalTime(value: 1_000, timescale: 1_000)
+        _ = try TrimClipInCommand(clipID: clipID, delta: delta).apply(to: &project)
+
+        let post = try XCTUnwrap(project.clip(clipID))
+        XCTAssertEqual(post.sourceRange.start, EditorFixture.rt(value: 1_200))
+        XCTAssertEqual(post.sourceRange.duration, EditorFixture.rt(value: 4_200))
+        XCTAssertEqual(post.timelineRange.start, EditorFixture.rt(value: 600))
+        XCTAssertEqual(post.timelineRange.duration, EditorFixture.rt(value: 4_200))
+    }
+
     func test_trimIn_negativeDelta_expandsBackOut_recoveringTrimmedMaterial() throws {
         // The "drag clip edges back out" feature from HANDOFF §5 / Phase 2.
         // Source range starts at 1s into the asset (value 600); negative delta
@@ -47,6 +62,25 @@ final class TrimClipTests: XCTestCase {
         let post = try XCTUnwrap(project.clip(clipID))
         XCTAssertEqual(post.sourceRange, pre.sourceRange)
         XCTAssertEqual(post.timelineRange, pre.timelineRange)
+    }
+
+    func test_trimIn_spedClip_scalesSourceDeltaBySpeed() throws {
+        var (project, clipID) = EditorFixture.minimalSingleClip()
+        _ = try SetClipSpeedCommand(clipID: clipID, newSpeed: 2.0).apply(to: &project)
+
+        _ = try TrimClipInCommand(clipID: clipID, delta: EditorFixture.rt(value: 600)).apply(to: &project)
+
+        let post = try XCTUnwrap(project.clip(clipID))
+        XCTAssertEqual(post.speed, 2.0)
+        XCTAssertEqual(post.sourceRange.start.value, 1_800)
+        XCTAssertEqual(post.sourceRange.duration.value, 3_600)
+        XCTAssertEqual(post.timelineRange.start.value, 600)
+        XCTAssertEqual(post.timelineRange.duration.value, 1_800)
+        XCTAssertEqual(
+            post.sourceRange.duration.seconds / post.timelineRange.duration.seconds,
+            2.0,
+            accuracy: 1e-9
+        )
     }
 
     func test_trimIn_throws_whenInPointWouldGoNegative() {
@@ -79,6 +113,17 @@ final class TrimClipTests: XCTestCase {
         XCTAssertEqual(post.timelineRange.duration.value, priorEnd.value + 600)
     }
 
+    func test_trimOut_acceptsDeltaWithDifferentTimescale() throws {
+        var (project, clipID) = EditorFixture.minimalSingleClip()
+
+        let delta = RationalTime(value: 1_000, timescale: 1_000)
+        _ = try TrimClipOutCommand(clipID: clipID, delta: delta).apply(to: &project)
+
+        let post = try XCTUnwrap(project.clip(clipID))
+        XCTAssertEqual(post.sourceRange.duration, EditorFixture.rt(value: 5_400))
+        XCTAssertEqual(post.timelineRange.duration, EditorFixture.rt(value: 5_400))
+    }
+
     func test_trimOut_negativeDelta_shrinksFromTail() throws {
         var (project, clipID) = EditorFixture.minimalSingleClip()
         let cmd = TrimClipOutCommand(clipID: clipID, delta: EditorFixture.rt(value: -1200))
@@ -98,6 +143,23 @@ final class TrimClipTests: XCTestCase {
         let post = try XCTUnwrap(project.clip(clipID))
         XCTAssertEqual(post.sourceRange, pre.sourceRange)
         XCTAssertEqual(post.timelineRange, pre.timelineRange)
+    }
+
+    func test_trimOut_slowClip_scalesSourceDeltaBySpeed() throws {
+        var (project, clipID) = EditorFixture.minimalSingleClip()
+        _ = try SetClipSpeedCommand(clipID: clipID, newSpeed: 0.5).apply(to: &project)
+
+        _ = try TrimClipOutCommand(clipID: clipID, delta: EditorFixture.rt(value: -1_200)).apply(to: &project)
+
+        let post = try XCTUnwrap(project.clip(clipID))
+        XCTAssertEqual(post.speed, 0.5)
+        XCTAssertEqual(post.sourceRange.duration.value, 4_200)
+        XCTAssertEqual(post.timelineRange.duration.value, 8_400)
+        XCTAssertEqual(
+            post.sourceRange.duration.seconds / post.timelineRange.duration.seconds,
+            0.5,
+            accuracy: 1e-9
+        )
     }
 
     func test_trimOut_throws_whenDurationWouldZero() {

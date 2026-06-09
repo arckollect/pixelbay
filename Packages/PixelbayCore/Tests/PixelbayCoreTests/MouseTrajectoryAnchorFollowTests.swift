@@ -153,6 +153,56 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
                        "anchor must sit exactly at the trailing safe-zone wall after a forward teleport")
     }
 
+    func test_anchorFollow_maxAnchorSpeedPreventsTeleportClamp() {
+        let samples: [ZoomTrajectorySample] = [
+            ZoomTrajectorySample(t: 0.0, x: 0.2, y: 0.5),
+            ZoomTrajectorySample(t: 0.02, x: 0.7, y: 0.5)
+        ]
+        let out = MouseTrajectory.anchorFollow(
+            samples,
+            zoomFactor: 2.0,
+            maxAnchorSpeed: 1.0
+        )
+        XCTAssertLessThanOrEqual(abs(out[1].x - out[0].x), 0.02 + 1e-9,
+                                 "speed-limited follow must glide instead of snapping to the safe-zone wall")
+        XCTAssertGreaterThan(abs(samples[1].x - out[1].x), hSafeAtZoom2,
+                             "finite speed limit may temporarily allow extra trail during teleports")
+    }
+
+    func test_spritePolished_slowMotionPreservesRawCursorPath() {
+        let samples: [MouseTrajectorySample] = (0...8).map { i in
+            MouseTrajectorySample(
+                timelineTime: 0.05 * Double(i),
+                centerX: 0.50 + 0.004 * Double(i),
+                centerY: 0.50
+            )
+        }
+        let out = MouseTrajectory.spritePolished(samples)
+        XCTAssertEqual(out, samples, "slow precise motion should remain authoritative and unsmoothed")
+    }
+
+    func test_spritePolished_fastJitterSmoothsInteriorButPreservesEndpoints() {
+        let samples: [MouseTrajectorySample] = [
+            MouseTrajectorySample(timelineTime: 0.00, centerX: 0.20, centerY: 0.50),
+            MouseTrajectorySample(timelineTime: 0.02, centerX: 0.30, centerY: 0.57),
+            MouseTrajectorySample(timelineTime: 0.04, centerX: 0.40, centerY: 0.43),
+            MouseTrajectorySample(timelineTime: 0.06, centerX: 0.50, centerY: 0.57),
+            MouseTrajectorySample(timelineTime: 0.08, centerX: 0.60, centerY: 0.43),
+            MouseTrajectorySample(timelineTime: 0.10, centerX: 0.70, centerY: 0.50)
+        ]
+        let out = MouseTrajectory.spritePolished(
+            samples,
+            windowSeconds: 0.05,
+            speedLow: 0.1,
+            speedHigh: 0.2,
+            maxRawDeviation: 0.08
+        )
+        XCTAssertEqual(out.first, samples.first)
+        XCTAssertEqual(out.last, samples.last)
+        XCTAssertLessThan(abs(out[2].centerY - 0.50), abs(samples[2].centerY - 0.50),
+                          "fast zig-zag motion should be pulled toward a smoother path")
+    }
+
     // MARK: - Monotonicity under sustained motion
 
     func test_anchorFollow_monotoneInput_producesMonotoneAnchor() {
@@ -248,5 +298,137 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
         // recording samples).
         XCTAssertEqual(out[2].x, 0.5, accuracy: 0.01,
                        "tiny moves at the same timestamp must NOT trigger the boundary snap")
+    }
+
+    // MARK: - Anticipated targets (offline future-window camera path)
+
+    /// 30 Hz rightward sweep from x=0.2 to x=0.8 over 1 s, then held for
+    /// `holdSeconds`. y constant at 0.5.
+    private func sweepThenHold(holdSeconds: Double = 1.0) -> [ZoomTrajectorySample] {
+        var samples: [ZoomTrajectorySample] = []
+        let dt = 1.0 / 30.0
+        var t = 0.0
+        while t <= 1.0 {
+            samples.append(ZoomTrajectorySample(t: t, x: 0.2 + 0.6 * t, y: 0.5))
+            t += dt
+        }
+        let last = samples[samples.count - 1]
+        var ht = last.t + dt
+        while ht <= last.t + holdSeconds {
+            samples.append(ZoomTrajectorySample(t: ht, x: last.x, y: last.y))
+            ht += dt
+        }
+        return samples
+    }
+
+    func test_anticipatedTargets_stationaryCursor_isIdentity() {
+        let samples = (0..<60).map {
+            ZoomTrajectorySample(t: Double($0) / 30.0, x: 0.4, y: 0.6)
+        }
+        let out = MouseTrajectory.anticipatedTargets(samples)
+        XCTAssertEqual(out.count, samples.count)
+        for (a, b) in zip(samples, out) {
+            XCTAssertEqual(a.x, b.x, accuracy: 1e-9)
+            XCTAssertEqual(a.y, b.y, accuracy: 1e-9)
+        }
+    }
+
+    func test_anticipatedTargets_midSweep_targetLeadsCursor() {
+        let samples = sweepThenHold()
+        let out = MouseTrajectory.anticipatedTargets(
+            samples, halfWindowSeconds: 0.25, leadSeconds: 0.07
+        )
+        // Mid-sweep (t = 0.5): rightward motion, forward-biased window →
+        // the target must sit AHEAD of the cursor along +x.
+        let mid = samples.firstIndex { $0.t >= 0.5 }!
+        XCTAssertGreaterThan(out[mid].x, samples[mid].x + 0.01,
+                             "anticipated target must lead the cursor mid-sweep")
+        XCTAssertEqual(out[mid].y, 0.5, accuracy: 1e-9)
+    }
+
+    func test_anticipatedTargets_nearLanding_convergesOntoLandingPoint() {
+        let samples = sweepThenHold(holdSeconds: 1.0)
+        let out = MouseTrajectory.anticipatedTargets(
+            samples, halfWindowSeconds: 0.25, leadSeconds: 0.07
+        )
+        // Shortly before the sweep ends (t = 0.9, cursor at 0.74) the
+        // target should already be pulled toward the landing point (0.8)
+        // — the camera settles WITH the cursor, not after it.
+        let nearEnd = samples.firstIndex { $0.t >= 0.9 }!
+        XCTAssertGreaterThan(out[nearEnd].x, samples[nearEnd].x,
+                             "target should be drawn toward the landing point")
+        XCTAssertLessThanOrEqual(out[nearEnd].x, 0.8 + 1e-9,
+                                 "averaging can never overshoot the landing point")
+        // Well into the hold, the target must sit exactly on the cursor.
+        let held = samples.firstIndex { $0.t >= 1.6 }!
+        XCTAssertEqual(out[held].x, 0.8, accuracy: 1e-6)
+    }
+
+    func test_anticipatedTargets_doesNotAverageAcrossSceneBoundary() {
+        // Scene 1 holds at (0.2, 0.2); scene 2 holds at (0.8, 0.8); the
+        // merge places them back-to-back at t = 1.0. The window must not
+        // blend positions across the cut.
+        var samples: [ZoomTrajectorySample] = []
+        let dt = 1.0 / 30.0
+        var t = 0.0
+        while t < 1.0 {
+            samples.append(ZoomTrajectorySample(t: t, x: 0.2, y: 0.2))
+            t += dt
+        }
+        let boundaryT = samples[samples.count - 1].t
+        var t2 = boundaryT
+        while t2 < boundaryT + 1.0 {
+            samples.append(ZoomTrajectorySample(t: t2, x: 0.8, y: 0.8))
+            t2 += dt
+        }
+        let out = MouseTrajectory.anticipatedTargets(
+            samples, halfWindowSeconds: 0.25, leadSeconds: 0.07
+        )
+        // Last scene-1 sample: window reaches into scene 2's samples by
+        // time, but the boundary guard must stop it.
+        let lastScene1 = samples.lastIndex { $0.x < 0.5 }!
+        XCTAssertEqual(out[lastScene1].x, 0.2, accuracy: 1e-6,
+                       "anticipation must not smear the target across a scene cut")
+        let firstScene2 = lastScene1 + 1
+        XCTAssertEqual(out[firstScene2].x, 0.8, accuracy: 1e-6)
+    }
+
+    func test_anchorFollow_withAnticipatedTargets_safeZoneInvariantStillHolds() {
+        // Aggressive anticipation must never let the REAL cursor escape
+        // the safe zone — the hard barrier keys off the cursor samples,
+        // not the anticipated targets.
+        let samples = sweepThenHold()
+        let targets = MouseTrajectory.anticipatedTargets(
+            samples, halfWindowSeconds: 0.4, leadSeconds: 0.2
+        )
+        let out = MouseTrajectory.anchorFollow(
+            samples,
+            zoomFactor: 2.0,
+            anticipatedTargets: targets
+        )
+        for (cursor, anchor) in zip(samples, out) {
+            XCTAssertLessThanOrEqual(
+                abs(cursor.x - anchor.x), hSafeAtZoom2 + 1e-9,
+                "cursor escaped the safe zone at t=\(cursor.t)"
+            )
+            XCTAssertLessThanOrEqual(abs(cursor.y - anchor.y), hSafeAtZoom2 + 1e-9)
+        }
+    }
+
+    func test_anchorFollow_withAnticipatedTargets_settlesOnLandingPoint() {
+        let samples = sweepThenHold(holdSeconds: 1.5)
+        let targets = MouseTrajectory.anticipatedTargets(
+            samples, halfWindowSeconds: 0.25, leadSeconds: 0.07
+        )
+        let out = MouseTrajectory.anchorFollow(
+            samples,
+            zoomFactor: 2.0,
+            anticipatedTargets: targets
+        )
+        // By the end of the hold the anchor must have converged onto the
+        // landing point (0.8, 0.5).
+        let last = out[out.count - 1]
+        XCTAssertEqual(last.x, 0.8, accuracy: 0.005)
+        XCTAssertEqual(last.y, 0.5, accuracy: 0.005)
     }
 }

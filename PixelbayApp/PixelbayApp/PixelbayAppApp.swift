@@ -153,6 +153,12 @@ final class AppState {
     private var editorObservers: [NSObjectProtocol] = []
     private weak var recording: RecordingService?
 
+    deinit {
+        for observer in editorObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
     func bindHotkeys(recording: RecordingService) {
         guard !hotkeysBound else { return }
         hotkeysBound = true
@@ -321,23 +327,34 @@ final class AppState {
         guard editorObservers.isEmpty else { return }
         self.recording = recording
         let center = NotificationCenter.default
-        func isEditor(_ note: Notification) -> Bool {
-            let id = (note.object as? NSWindow)?.identifier?.rawValue ?? ""
+        func isEditorWindow(_ object: Any?) -> Bool {
+            let id = (object as? NSWindow)?.identifier?.rawValue ?? ""
             return id.contains(WindowID.project) || id.contains(WindowID.scenes)
         }
         editorObservers.append(center.addObserver(
             forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
         ) { [weak self] note in
-            guard isEditor(note) else { return }
-            Task { @MainActor [weak self] in self?.reconcileLauncher() }
+            let shouldReconcile = MainActor.assumeIsolated {
+                isEditorWindow(note.object)
+            }
+            guard shouldReconcile else { return }
+            Task { @MainActor [weak self] in
+                self?.reconcileLauncher()
+            }
         })
         editorObservers.append(center.addObserver(
             forName: NSWindow.willCloseNotification, object: nil, queue: .main
         ) { [weak self] note in
-            guard isEditor(note) else { return }
             // Defer: the closing window is still in NSApp.windows during
             // willClose; reconcile once it's gone.
-            Task { @MainActor [weak self] in self?.reconcileLauncher() }
+            let shouldReconcile = MainActor.assumeIsolated {
+                isEditorWindow(note.object)
+            }
+            guard shouldReconcile else { return }
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 1)
+                self?.reconcileLauncher()
+            }
         })
     }
 

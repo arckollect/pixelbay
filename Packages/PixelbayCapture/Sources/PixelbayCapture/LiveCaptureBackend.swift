@@ -104,17 +104,15 @@ public actor LiveCaptureBackend: CaptureBackend {
         }
 
         let config = SCStreamConfiguration()
-        // Capture at native pixel resolution, then cap at 1920 max edge for
-        // v0.1. SCDisplay's width/height are in points; ×2 is Retina-native.
-        // Without the cap, a Retina display produces 5K+ frames at 60fps
-        // which the default H.264 encoder choked on with
-        // AVFoundationErrorDomain -11800 / NSOSStatus -16122 ("operation
-        // could not be completed") after ~0.5s of recording.
-        // Phase 4 revisits true-pixel capture with an explicit bitrate
-        // ladder; v0.1 is "it records at all".
+        // Capture at native pixel resolution, then cap at UHD max edge.
+        // SCDisplay's width/height are in points; ×2 is Retina-native.
+        // The old 1920 max edge made Retina UI text and cursor edges look
+        // soft before the compositor/export path got a chance to preserve
+        // them. UHD keeps a clean source while avoiding raw 5K/6K frames that
+        // still put unnecessary pressure on the real-time H.264 writer.
         let nativeWidth = display.width * 2
         let nativeHeight = display.height * 2
-        let maxEdge = 1920
+        let maxEdge = 3840
         let downscale = max(1.0, max(Double(nativeWidth), Double(nativeHeight)) / Double(maxEdge))
         // Round to even — H.264 chroma subsampling (YUV420) requires
         // even-numbered width/height. Off-by-one odd dimensions can be

@@ -20,7 +20,7 @@ let package = Package(
         ),
         .testTarget(
             name: "PixelbayPlaybackTests",
-            dependencies: ["PixelbayPlayback"]
+            dependencies: ["PixelbayPlayback", "PixelbayCompositor"]
         )
     ]
 )

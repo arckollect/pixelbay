@@ -309,6 +309,50 @@ final class ScenesBundleStoreTests: XCTestCase {
         XCTAssertNil(live.scenesSession)
     }
 
+    func test_cleanup_canDeferFileDeletionUntilAfterProjectWrite() throws {
+        let now = Date()
+        let opened = try ScenesBundleStore.openOrCreatePersistent(
+            at: bundleURL,
+            archiveDirectory: archiveDir,
+            now: now
+        )
+        let bundle = opened.bundle
+
+        let orphanID = MediaAssetID.generate()
+        let orphanPath = "media/screen-deferred.mov"
+        let sidecarPath = "media/clicks-deferred.json"
+        let orphanAsset = MediaAsset(
+            id: orphanID,
+            kind: .display,
+            relativePath: orphanPath,
+            nativeDuration: .seconds(5)
+        )
+        try Data("discarded".utf8).write(to: bundle.url.appendingPathComponent(orphanPath))
+        try Data("[]".utf8).write(to: bundle.url.appendingPathComponent(sidecarPath))
+
+        var live = try ProjectBundleStore().loadProject(from: bundle)
+        live.assets = [orphanAsset]
+        live.scenesSession = nil
+
+        let report = try ScenesBundleStore.cleanupUnusedTakes(
+            in: &live,
+            bundleURL: bundle.url,
+            deleteFilesImmediately: false
+        )
+
+        XCTAssertTrue(report.removedAssetIDs.contains(orphanID))
+        XCTAssertTrue(report.removedFilePaths.contains(orphanPath))
+        XCTAssertTrue(report.removedFilePaths.contains(sidecarPath))
+        XCTAssertTrue(live.assets.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: bundle.url.appendingPathComponent(orphanPath).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: bundle.url.appendingPathComponent(sidecarPath).path))
+
+        try ScenesBundleStore.deleteCleanupFiles(report, bundleURL: bundle.url)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: bundle.url.appendingPathComponent(orphanPath).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: bundle.url.appendingPathComponent(sidecarPath).path))
+    }
+
     func test_cleanup_preservesAssetsReferencedByClips() throws {
         // Belt-and-suspenders: if some clip in project.tracks points at an
         // asset that's NOT referenced by an active take, don't delete it.

@@ -34,10 +34,9 @@ struct LayerUniforms {
     float isCircle;             // 1 → mask to inscribed circle (overrides cornerRadius)
     float opacity;              // Phase 3b talking-head crossfade — multiplies final alpha
     float screenBlurSigmaPx;    // Phase 3d Gaussian sigma in pixels; 0 = no blur
+    float2 motionBlurUV;        // directional pan-blur half-extent in layer UV; 0 = none
     float _pad0;
     float _pad1;
-    float _pad2;
-    float _pad3;
 };
 
 // Phase 3a background pass.
@@ -150,13 +149,18 @@ static inline float4 screenBlurSample(
     );
     const float w0 = 1.0;
     const float w1 = 0.6065;
+    const float wd = 0.3679;  // diagonals at distance σ√2 — keeps the kernel round
     const float w2 = 0.1353;
-    const float wSum = w0 + 4.0 * w1 + 4.0 * w2;
+    const float wSum = w0 + 4.0 * w1 + 4.0 * wd + 4.0 * w2;
     float4 acc = tex.sample(s, uv) * w0;
     acc += tex.sample(s, uv + float2( sigmaUV.x, 0.0)) * w1;
     acc += tex.sample(s, uv + float2(-sigmaUV.x, 0.0)) * w1;
     acc += tex.sample(s, uv + float2(0.0,  sigmaUV.y)) * w1;
     acc += tex.sample(s, uv + float2(0.0, -sigmaUV.y)) * w1;
+    acc += tex.sample(s, uv + float2( sigmaUV.x,  sigmaUV.y)) * wd;
+    acc += tex.sample(s, uv + float2(-sigmaUV.x,  sigmaUV.y)) * wd;
+    acc += tex.sample(s, uv + float2( sigmaUV.x, -sigmaUV.y)) * wd;
+    acc += tex.sample(s, uv + float2(-sigmaUV.x, -sigmaUV.y)) * wd;
     acc += tex.sample(s, uv + float2( 2.0 * sigmaUV.x, 0.0)) * w2;
     acc += tex.sample(s, uv + float2(-2.0 * sigmaUV.x, 0.0)) * w2;
     acc += tex.sample(s, uv + float2(0.0,  2.0 * sigmaUV.y)) * w2;
@@ -164,16 +168,100 @@ static inline float4 screenBlurSample(
     return acc / wSum;
 }
 
-// BGRA fragment: Gaussian-veiled sample, optional alpha mask.
+// Interleaved gradient noise (Jimenez 2014) — per-pixel tap-phase dither.
+static inline float gradientNoise(float2 px) {
+    return fract(52.9829189 * fract(0.06711056 * px.x + 0.00583715 * px.y));
+}
+
+// Directional camera-pan motion blur, film-style: adaptive tap count,
+// per-pixel dithered tap phase (kills ghost banding), ±0.75 px per-tap
+// perpendicular jitter (soft cross-section), trapezoid weights (uniform
+// shutter with soft ends). `blurUV` is the kernel half-extent in layer UV.
+// Collapses to the Gaussian path when the extent is under a pixel.
+static inline float4 screenMotionBlurSample(
+    texture2d<float, access::sample> tex,
+    sampler s,
+    float2 uv,
+    float2 layerSizePx,
+    float2 blurUV,
+    float sigmaPx,
+    float2 fragPx
+) {
+    float extentPx = length(blurUV * layerSizePx);
+    if (extentPx < 0.75) {
+        return screenBlurSample(tex, s, uv, layerSizePx, sigmaPx);
+    }
+    int taps = clamp(int(extentPx / 2.5), 9, 31);
+    float noise = gradientNoise(fragPx);
+    float2 dirPx = normalize(blurUV * layerSizePx);
+    float2 perpUV = float2(-dirPx.y, dirPx.x) * 0.75 / layerSizePx;
+    float4 acc = float4(0.0);
+    float wSum = 0.0;
+    for (int i = 0; i < taps; ++i) {
+        float t = ((float(i) + noise) / float(taps)) * 2.0 - 1.0;
+        float w = saturate((1.0 - abs(t)) * 4.0);
+        float pj = fract(noise + float(i) * 0.61803398875) * 2.0 - 1.0;
+        acc += tex.sample(s, uv + blurUV * t + perpUV * pj) * w;
+        wSum += w;
+    }
+    return acc / wSum;
+}
+
+// BGRA fragment: motion/Gaussian-veiled sample, optional alpha mask.
 fragment float4 bgraFragment(
     VertexOut in [[stage_in]],
     texture2d<float, access::sample> tex [[texture(0)]],
     constant LayerUniforms &u [[buffer(0)]]
 ) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float4 c = screenBlurSample(tex, s, in.texCoord, u.layerSizePx, u.screenBlurSigmaPx);
+    float4 c = screenMotionBlurSample(tex, s, in.texCoord, u.layerSizePx, u.motionBlurUV, u.screenBlurSigmaPx, in.position.xy);
     c.a *= layerAlphaMask(in, u) * u.opacity;
     return c;
+}
+
+// Cursor pass uniforms — see MetalRenderGraph.CursorUniforms.
+struct CursorUniforms {
+    float2 outputSizePx;
+    float2 layerSizePx;
+    float2 blurOffsetUV;
+    float opacity;
+    float _pad0;
+};
+
+// Cursor pass. Velocity-aligned motion blur with a bright Gaussian core so
+// the cursor head stays legible inside a long streak. clamp_to_zero because
+// the quad is padded past the sprite bounds to give the trail room.
+fragment float4 cursorFragment(
+    VertexOut in [[stage_in]],
+    texture2d<float, access::sample> tex [[texture(0)]],
+    constant CursorUniforms &u [[buffer(0)]]
+) {
+    constexpr sampler s(address::clamp_to_zero, filter::linear);
+    float2 offset = u.blurOffsetUV;
+    float minPx = min(u.layerSizePx.x, u.layerSizePx.y);
+    if (length(offset) * minPx < 0.33) {
+        float4 c = tex.sample(s, in.texCoord);
+        c.a *= u.opacity;
+        return c;
+    }
+    float extentPx = length(offset * u.layerSizePx);
+    int taps = clamp(int(extentPx), 13, 61);
+    float noise = gradientNoise(in.position.xy);
+    float4 acc = float4(0.0);
+    float wSum = 0.0;
+    for (int i = 0; i < taps; ++i) {
+        float t = ((float(i) + noise) / float(taps)) * 2.0 - 1.0;
+        float w = exp(-2.0 * t * t);
+        float2 uv = in.texCoord + offset * t;
+        acc += tex.sample(s, uv) * w;
+        wSum += w;
+    }
+    acc /= wSum;
+    // Sharp-head guarantee: the cursor at its true position stays ≥60% solid.
+    float4 head = tex.sample(s, in.texCoord);
+    acc = mix(acc, head, head.a * 0.6);
+    acc.a *= u.opacity;
+    return acc;
 }
 
 // NV12 fragment: samples Y (R8) + CbCr (RG8), converts BT.709 limited-range
@@ -186,8 +274,8 @@ fragment float4 nv12Fragment(
     constant LayerUniforms &u [[buffer(0)]]
 ) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float4 yAcc = screenBlurSample(yPlane, s, in.texCoord, u.layerSizePx, u.screenBlurSigmaPx);
-    float4 cbcrAcc = screenBlurSample(cbcrPlane, s, in.texCoord, u.layerSizePx, u.screenBlurSigmaPx);
+    float4 yAcc = screenMotionBlurSample(yPlane, s, in.texCoord, u.layerSizePx, u.motionBlurUV, u.screenBlurSigmaPx, in.position.xy);
+    float4 cbcrAcc = screenMotionBlurSample(cbcrPlane, s, in.texCoord, u.layerSizePx, u.motionBlurUV, u.screenBlurSigmaPx, in.position.xy);
     float y = yAcc.r;
     float2 cbcr = cbcrAcc.rg;
 

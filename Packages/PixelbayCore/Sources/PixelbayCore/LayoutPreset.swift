@@ -63,6 +63,18 @@ public struct LayoutPreset: Codable, Sendable, Equatable {
         case screenCornerRadius
         case extras
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.mode = try c.decodeIfPresent(LayoutMode.self, forKey: .mode)
+            ?? .pip(position: .bottomRight, size: .medium)
+        self.camShape = try c.decodeIfPresent(CamShape.self, forKey: .camShape) ?? .rectangle
+        self.camCornerRadius = try c.decodeIfPresent(Double.self, forKey: .camCornerRadius) ?? 12
+        self.background = try c.decodeIfPresent(Background.self, forKey: .background) ?? .none
+        self.padding = try c.decodeIfPresent(Double.self, forKey: .padding) ?? 0
+        self.screenCornerRadius = try c.decodeIfPresent(Double.self, forKey: .screenCornerRadius) ?? 0
+        self.extras = try c.decodeIfPresent([String: JSONValue].self, forKey: .extras) ?? [:]
+    }
 }
 
 // MARK: - LayoutMode

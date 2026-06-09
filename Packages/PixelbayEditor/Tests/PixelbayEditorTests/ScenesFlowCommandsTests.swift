@@ -347,6 +347,55 @@ final class ScenesFlowCommandsTests: XCTestCase {
         XCTAssertNotNil(appended?.extras["sceneID"])
     }
 
+    func test_mergeAppending_duplicateProjectAssetIDs_usesFirstAssetWithoutCrashing() throws {
+        let existingAsset = MediaAsset(
+            id: MediaAssetID.generate(),
+            kind: .display,
+            relativePath: "media/existing.mov",
+            nativeDuration: .seconds(4)
+        )
+        let existingClip = Clip(
+            assetID: existingAsset.id,
+            sourceRange: TimeRange(start: .zero, duration: .seconds(4)),
+            timelineRange: TimeRange(start: .zero, duration: .seconds(4))
+        )
+
+        let sharedID = MediaAssetID.generate()
+        let firstAsset = MediaAsset(
+            id: sharedID,
+            kind: .display,
+            relativePath: "media/screen-first.mov",
+            nativeDuration: .seconds(3)
+        )
+        let duplicateAsset = MediaAsset(
+            id: sharedID,
+            kind: .display,
+            relativePath: "media/screen-duplicate.mov",
+            nativeDuration: .seconds(8)
+        )
+        let take = Take(sessionID: "dupeasset", assetIDs: [sharedID])
+
+        var project = Project(name: "Append duplicate IDs")
+        project.assets = [existingAsset, firstAsset, duplicateAsset]
+        project.tracks = [
+            Track(kind: .screen, name: "Screen", clips: [existingClip])
+        ]
+        project.scenesSession = ScenesSession(scenes: [
+            Scene(takes: [take], activeTakeIndex: 0)
+        ])
+
+        let merged = try ScenesMerger.mergeAppending(into: &project)
+
+        XCTAssertEqual(merged, 1)
+        let screenTrack = try XCTUnwrap(project.tracks.first { $0.kind == .screen })
+        XCTAssertEqual(screenTrack.clips.count, 2)
+        let appended = screenTrack.clips[1]
+        XCTAssertEqual(appended.assetID, sharedID)
+        XCTAssertEqual(appended.timelineRange.start.seconds, 4, accuracy: 1e-9)
+        XCTAssertEqual(appended.sourceRange.duration.seconds, 3, accuracy: 1e-9)
+        XCTAssertEqual(appended.timelineRange.duration.seconds, 3, accuracy: 1e-9)
+    }
+
     func test_mergeAppending_createsMissingTrack_whenNewSceneHasWebcamButProjectDoesNot() throws {
         // Editor project has only a screen track. New scene includes cam.
         let existingAsset = MediaAsset(
@@ -386,6 +435,52 @@ final class ScenesFlowCommandsTests: XCTestCase {
         XCTAssertEqual(camTrack?.clips.first?.timelineRange.duration.seconds ?? -1, 2.0, accuracy: 1e-6)
     }
 
+    func test_mergeAppending_shorterNonScreenAssetSpansCanonicalTimelineDuration() throws {
+        let existingAsset = MediaAsset(
+            id: MediaAssetID.generate(),
+            kind: .display,
+            relativePath: "media/existing.mov",
+            nativeDuration: .seconds(4)
+        )
+        let existingClip = Clip(
+            assetID: existingAsset.id,
+            sourceRange: TimeRange(start: .zero, duration: .seconds(4)),
+            timelineRange: TimeRange(start: .zero, duration: .seconds(4))
+        )
+        let screenID = MediaAssetID.generate()
+        let camID = MediaAssetID.generate()
+        let screenAsset = MediaAsset(
+            id: screenID,
+            kind: .display,
+            relativePath: "media/screen.mov",
+            nativeDuration: .seconds(10)
+        )
+        let camAsset = MediaAsset(
+            id: camID,
+            kind: .webcam,
+            relativePath: "media/cam.mov",
+            nativeDuration: .seconds(3)
+        )
+        let take = Take(sessionID: "shortcam", assetIDs: [screenID, camID], durationSeconds: 10)
+
+        var project = Project(name: "Append short cam")
+        project.assets = [existingAsset, screenAsset, camAsset]
+        project.tracks = [
+            Track(kind: .screen, name: "Screen", clips: [existingClip])
+        ]
+        project.scenesSession = ScenesSession(scenes: [
+            Scene(takes: [take], activeTakeIndex: 0)
+        ])
+
+        try ScenesMerger.mergeAppending(into: &project)
+
+        let camClip = try XCTUnwrap(project.tracks.first { $0.kind == .webcam }?.clips.first)
+        XCTAssertEqual(camClip.timelineRange.start.seconds, 4, accuracy: 1e-6)
+        XCTAssertEqual(camClip.timelineRange.duration.seconds, 10, accuracy: 1e-6)
+        XCTAssertEqual(camClip.sourceRange.start.seconds, 0, accuracy: 1e-6)
+        XCTAssertEqual(camClip.sourceRange.duration.seconds, 3, accuracy: 1e-6)
+    }
+
     func test_mergeAppending_throwsWhenNoScenesSession() {
         var project = Project(name: "No session")
         XCTAssertThrowsError(try ScenesMerger.mergeAppending(into: &project)) { error in
@@ -393,6 +488,33 @@ final class ScenesFlowCommandsTests: XCTestCase {
                 return XCTFail("expected .noScenesSession, got \(error)")
             }
         }
+    }
+
+    func test_appendAssetsCommand_skipsDuplicateIDsWithinSameBatch() throws {
+        let sharedID = MediaAssetID.generate()
+        let firstAsset = MediaAsset(
+            id: sharedID,
+            kind: .display,
+            relativePath: "media/screen-first.mov",
+            nativeDuration: .seconds(3)
+        )
+        let duplicateAsset = MediaAsset(
+            id: sharedID,
+            kind: .display,
+            relativePath: "media/screen-duplicate.mov",
+            nativeDuration: .seconds(7)
+        )
+        var project = Project(name: "Duplicate append batch")
+
+        let inverse = try _AppendAssetsCommand(
+            assets: [firstAsset, duplicateAsset]
+        ).apply(to: &project)
+
+        XCTAssertEqual(project.assets.count, 1)
+        XCTAssertEqual(project.assets.first?.relativePath, "media/screen-first.mov")
+
+        _ = try inverse.apply(to: &project)
+        XCTAssertTrue(project.assets.isEmpty)
     }
 
     // MARK: - appendRecordingToTimeline-equivalent (Slice A.3)

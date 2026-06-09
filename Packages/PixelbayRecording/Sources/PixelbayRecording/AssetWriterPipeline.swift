@@ -522,25 +522,21 @@ public final class AssetWriterPipeline: CaptureSink, @unchecked Sendable {
             throw RecordingError.missingFormatDescription
         }
         let dims = CMVideoFormatDescriptionGetDimensions(format)
-        // Bitrate: ~0.1 bits per pixel per frame at 60fps (industry-standard
-        // H.264 high-quality 1080p60 ≈ 12Mbps, 1440p60 ≈ 22Mbps, 4K60 ≈
-        // 50Mbps). Capped at 50Mbps. Iteration 6's `pixelCount * 60 * 8`
-        // computed ~995Mbps clamped at 100Mbps for 1080p — way past what the
-        // hardware encoder accepts, hence the AVErrorUnknown / NSOSStatus
-        // -16122 we kept seeing. With NO explicit bitrate the encoder still
-        // picks defaults that fail at high resolutions, so we set one — just
-        // a sane one this time.
+        // Bitrate: screen recordings need more bits than camera footage
+        // because text and UI edges show compression immediately. Use a
+        // higher bpp/frame ladder and a larger cap now that capture can keep
+        // UHD frames. This yields ≈22 Mbps at 1080p60, ≈40 Mbps at 1440p60,
+        // and ≈90 Mbps at 4K60, while still staying below the runaway rates
+        // that caused the early encoder failures.
         let pixelCount = Int(dims.width) * Int(dims.height)
-        let bitrate = min(Int(Double(pixelCount) * 60 * 0.1), 50_000_000)
+        let bitrate = min(Int(Double(pixelCount) * 60 * 0.18), 120_000_000)
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: Int(dims.width),
             AVVideoHeightKey: Int(dims.height),
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: bitrate,
-                // Main profile (not High) for broader encoder compatibility.
-                // 1080p60 / 1440p60 fit comfortably in Main 5.x.
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264MainAutoLevel,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
                 // Keyframe every 2s at 60fps. 60-frame intervals at high
                 // bitrate force a huge I-frame every second — too much
                 // pressure on the encoder.

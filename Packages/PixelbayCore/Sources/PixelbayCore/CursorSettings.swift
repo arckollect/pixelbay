@@ -47,6 +47,13 @@ public struct CursorSettings: Codable, Sendable, Equatable {
         case scale
         case extras
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        self.scale = try c.decodeIfPresent(Double.self, forKey: .scale) ?? 3.25
+        self.extras = try c.decodeIfPresent([String: JSONValue].self, forKey: .extras) ?? [:]
+    }
 }
 
 // MARK: - MediaAsset extras key

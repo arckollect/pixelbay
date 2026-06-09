@@ -344,6 +344,196 @@ public enum MouseTrajectory {
         return result
     }
 
+    /// Post-production cursor polish for the *rendered* synthetic cursor.
+    /// This is deliberately zero-phase: each output sample blends the raw
+    /// point with a centered time-window average, so it removes high-speed
+    /// jaggedness without introducing a temporal catch-up delay. Slow or
+    /// stopped cursor samples stay raw, preserving hover/click alignment and
+    /// final positions.
+    public static func spritePolished(
+        _ master: [MouseTrajectorySample],
+        windowSeconds: Double = 0.055,
+        speedLow: Double = 0.35,
+        speedHigh: Double = 1.80,
+        maxRawDeviation: Double = 0.018
+    ) -> [MouseTrajectorySample] {
+        guard master.count > 2 else { return master }
+        let safeWindow = max(0.001, windowSeconds)
+        let speeds = instantaneousSpeeds(master)
+        var result: [MouseTrajectorySample] = []
+        result.reserveCapacity(master.count)
+        for i in master.indices {
+            let sample = master[i]
+            if i == master.startIndex || i == master.index(before: master.endIndex) {
+                result.append(sample)
+                continue
+            }
+            let speedBlend = smoothstep(speedLow, speedHigh, speeds[i])
+            guard speedBlend > 0 else {
+                result.append(sample)
+                continue
+            }
+            let start = sample.timelineTime - safeWindow
+            let end = sample.timelineTime + safeWindow
+            var sumX = 0.0
+            var sumY = 0.0
+            var totalWeight = 0.0
+            for neighbor in master {
+                guard neighbor.timelineTime >= start, neighbor.timelineTime <= end else { continue }
+                let distance = abs(neighbor.timelineTime - sample.timelineTime) / safeWindow
+                let weight = max(0.0, 1.0 - distance)
+                sumX += neighbor.centerX * weight
+                sumY += neighbor.centerY * weight
+                totalWeight += weight
+            }
+            guard totalWeight > 0 else {
+                result.append(sample)
+                continue
+            }
+            var smoothX = sumX / totalWeight
+            var smoothY = sumY / totalWeight
+            let dx = smoothX - sample.centerX
+            let dy = smoothY - sample.centerY
+            let deviation = (dx * dx + dy * dy).squareRoot()
+            let maxDeviation = max(0.0, maxRawDeviation)
+            if deviation > maxDeviation, deviation > 0 {
+                let scale = maxDeviation / deviation
+                smoothX = sample.centerX + dx * scale
+                smoothY = sample.centerY + dy * scale
+            }
+            result.append(MouseTrajectorySample(
+                timelineTime: sample.timelineTime,
+                centerX: sample.centerX + (smoothX - sample.centerX) * speedBlend,
+                centerY: sample.centerY + (smoothY - sample.centerY) * speedBlend
+            ))
+        }
+        return result
+    }
+
+    private static func instantaneousSpeeds(_ trajectory: [MouseTrajectorySample]) -> [Double] {
+        guard trajectory.count > 1 else { return Array(repeating: 0, count: trajectory.count) }
+        var speeds = [Double](repeating: 0.0, count: trajectory.count)
+        for i in trajectory.indices {
+            if i == trajectory.startIndex {
+                let next = trajectory[trajectory.index(after: i)]
+                let dt = max(1e-6, next.timelineTime - trajectory[i].timelineTime)
+                let dx = next.centerX - trajectory[i].centerX
+                let dy = next.centerY - trajectory[i].centerY
+                speeds[i] = (dx * dx + dy * dy).squareRoot() / dt
+            } else if i == trajectory.index(before: trajectory.endIndex) {
+                let prev = trajectory[trajectory.index(before: i)]
+                let dt = max(1e-6, trajectory[i].timelineTime - prev.timelineTime)
+                let dx = trajectory[i].centerX - prev.centerX
+                let dy = trajectory[i].centerY - prev.centerY
+                speeds[i] = (dx * dx + dy * dy).squareRoot() / dt
+            } else {
+                let prev = trajectory[trajectory.index(before: i)]
+                let next = trajectory[trajectory.index(after: i)]
+                let dt = max(1e-6, next.timelineTime - prev.timelineTime)
+                let dx = next.centerX - prev.centerX
+                let dy = next.centerY - prev.centerY
+                speeds[i] = (dx * dx + dy * dy).squareRoot() / dt
+            }
+        }
+        return speeds
+    }
+
+    /// Offline anticipated camera-target path (Screen Studio-style "the
+    /// camera knows where the cursor is going"). Because rendering happens
+    /// after the recording, every keyframe's full cursor path is known —
+    /// so instead of extrapolating along instantaneous velocity (causal
+    /// prediction, wrong on every direction change), each output sample is
+    /// a triangular-weighted average of the cursor's ACTUAL surrounding
+    /// path, with the window centre shifted `leadSeconds` into the future.
+    ///
+    /// Properties that fall out of the windowed average:
+    ///   • The target starts moving toward a sweep's destination *before*
+    ///     the cursor covers the distance — the camera eases out early
+    ///     instead of being yanked once the cursor escapes the safe zone.
+    ///   • Direction changes are corner-cut smoothly (an average can't
+    ///     overshoot the way velocity extrapolation does).
+    ///   • As the cursor decelerates into a landing point, the window
+    ///     converges on that point — the camera settles *with* the cursor,
+    ///     no separate decel-confidence gating needed.
+    ///   • A stationary cursor produces an identical target (zero phase,
+    ///     zero drift), so held frames stay locked.
+    ///
+    /// `halfWindowSeconds` is the triangular window's half-width; larger
+    /// values trade responsiveness for glide. `leadSeconds` biases the
+    /// window centre into the future — 0 gives pure zero-phase smoothing,
+    /// larger values make the camera visibly lead fast motion.
+    ///
+    /// Scenes-merge defense: the window never averages across a merge
+    /// boundary (adjacent samples ≤ 1 ms apart but > 5 % of the screen
+    /// apart — same detector as the sprite interpolator), so the target
+    /// can't smear across a scene cut.
+    ///
+    /// Output shape matches input (`t` preserved, only `x`/`y` rewritten).
+    /// Feed the result to `anchorFollow(anticipatedTargets:)`; the spring
+    /// chases this path while the hard safe-zone barrier keeps using the
+    /// real cursor, so a generous window can never push the cursor out of
+    /// frame.
+    public static func anticipatedTargets(
+        _ samples: [ZoomTrajectorySample],
+        halfWindowSeconds: Double = 0.25,
+        leadSeconds: Double = 0.07
+    ) -> [ZoomTrajectorySample] {
+        guard samples.count > 2 else { return samples }
+        let halfW = max(0.01, halfWindowSeconds)
+        let lead = max(0.0, leadSeconds)
+        var result: [ZoomTrajectorySample] = []
+        result.reserveCapacity(samples.count)
+        for i in samples.indices {
+            let center = samples[i].t + lead
+            let start = center - halfW
+            let end = center + halfW
+            var sumX = 0.0
+            var sumY = 0.0
+            var sumW = 0.0
+            func accumulate(_ s: ZoomTrajectorySample) {
+                let w = max(0.0, 1.0 - abs(s.t - center) / halfW)
+                guard w > 0 else { return }
+                sumX += s.x * w
+                sumY += s.y * w
+                sumW += w
+            }
+            accumulate(samples[i])
+            var j = i - 1
+            while j >= 0 {
+                if samples[j].t < start { break }
+                if isMergeBoundary(samples[j], samples[j + 1]) { break }
+                accumulate(samples[j])
+                j -= 1
+            }
+            j = i + 1
+            while j < samples.count {
+                if samples[j].t > end { break }
+                if isMergeBoundary(samples[j - 1], samples[j]) { break }
+                accumulate(samples[j])
+                j += 1
+            }
+            if sumW > 0 {
+                result.append(ZoomTrajectorySample(t: samples[i].t, x: sumX / sumW, y: sumY / sumW))
+            } else {
+                result.append(samples[i])
+            }
+        }
+        return result
+    }
+
+    /// True when two adjacent trajectory samples straddle a scenes-merge
+    /// boundary: near-zero time delta with a non-trivial position delta.
+    /// Same constants as the compositor's sprite-path detector.
+    private static func isMergeBoundary(
+        _ a: ZoomTrajectorySample,
+        _ b: ZoomTrajectorySample
+    ) -> Bool {
+        guard b.t - a.t <= 0.001 else { return false }
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        return (dx * dx + dy * dy) > (0.05 * 0.05)
+    }
+
     /// Deadzone-aware critically-damped spring that pulls the zoom anchor
     /// toward the (already-smoothed) cursor position. Two-stage model
     /// chosen specifically to fix the "cursor in slow motion" failure
@@ -399,6 +589,14 @@ public enum MouseTrajectory {
     /// invariant, so a wrong prediction (cursor changes direction
     /// mid-decel) still cannot exceed the safe zone.
     ///
+    /// `anticipatedTargets` (optional) replaces the spring target outright
+    /// with a precomputed path — see `anticipatedTargets(_:halfWindowSeconds:
+    /// leadSeconds:)`. Index-aligned with `samples`. When provided, the
+    /// velocity-extrapolation lookahead above is bypassed (the anticipated
+    /// path already encodes the future); the hard barrier and the
+    /// scenes-merge snap still key off the REAL cursor samples, so the
+    /// safe-zone invariant holds no matter how aggressive the anticipation.
+    ///
     /// τ ramp inside the active band:
     ///   `e = max(|cx-ax|, |cy-ay|) − h_dead) / (h_safe − h_dead)`,
     ///   clamped to `[0, 1]`. Then
@@ -424,8 +622,10 @@ public enum MouseTrajectory {
         safeZoneFraction: Double = 0.30,
         tauRelaxed: Double = 0.05,
         tauTight: Double = 0.04,
+        maxAnchorSpeed: Double = .infinity,
         lookaheadSeconds: Double = 0.0,
-        lookaheadConfidence: [Double]? = nil
+        lookaheadConfidence: [Double]? = nil,
+        anticipatedTargets: [ZoomTrajectorySample]? = nil
     ) -> [ZoomTrajectorySample] {
         guard let first = samples.first else { return [] }
         guard samples.count > 1 else { return samples }
@@ -438,6 +638,7 @@ public enum MouseTrajectory {
         let hDead = (deadFrac / 2.0) / safeZoom
         let activeBand = max(1e-9, hSafe - hDead)
         let safeLookahead = max(0.0, lookaheadSeconds)
+        let speedLimit = maxAnchorSpeed.isFinite ? max(0.0, maxAnchorSpeed) : .infinity
         var anchorX = first.x
         var anchorY = first.y
         var vx: Double = 0
@@ -450,6 +651,8 @@ public enum MouseTrajectory {
             let s = samples[i]
             let prev = samples[i - 1]
             let dtTotal = max(0.0, s.t - prevT)
+            let sampleStartAnchorX = anchorX
+            let sampleStartAnchorY = anchorY
             if dtTotal <= 0 {
                 // Scenes-merge defense: ScenesMerger places clips
                 // back-to-back, so scene N's last sample and scene
@@ -499,16 +702,26 @@ public enum MouseTrajectory {
                 guard i < arr.count else { return 0.0 }
                 return max(0.0, min(1.0, arr[i]))
             }()
-            let leadX = cursorVx * safeLookahead * conf
-            let leadY = cursorVy * safeLookahead * conf
+            // Spring target: the anticipated path when one was precomputed
+            // (offline future-window average — already encodes lookahead),
+            // otherwise the cursor plus the velocity-extrapolated lead.
+            let targetX: Double
+            let targetY: Double
+            if let targets = anticipatedTargets, i < targets.count {
+                targetX = targets[i].x
+                targetY = targets[i].y
+            } else {
+                targetX = s.x + cursorVx * safeLookahead * conf
+                targetY = s.y + cursorVy * safeLookahead * conf
+            }
             var remaining = dtTotal
             while remaining > 0 {
-                // Spring target offset: cursor (+ lookahead·v·conf) offset
+                // Spring target offset: target (anticipated or lookahead)
                 // minus the deadzone radius in the cursor's direction.
                 // Inside the deadzone the target offset is zero, so the
                 // spring exerts no force — anchor velocity damps to a stop.
-                let dxRaw = (s.x + leadX) - anchorX
-                let dyRaw = (s.y + leadY) - anchorY
+                let dxRaw = targetX - anchorX
+                let dyRaw = targetY - anchorY
                 let targetDx = abs(dxRaw) > hDead ? dxRaw - copysign(hDead, dxRaw) : 0
                 let targetDy = abs(dyRaw) > hDead ? dyRaw - copysign(hDead, dyRaw) : 0
                 // Adaptive τ: ramps from relaxed (just past deadzone) to
@@ -549,6 +762,19 @@ public enum MouseTrajectory {
             } else if dy < -hSafe {
                 anchorY = s.y + hSafe
                 vy = 0
+            }
+            if speedLimit.isFinite {
+                let maxDistance = speedLimit * dtTotal
+                let moveX = anchorX - sampleStartAnchorX
+                let moveY = anchorY - sampleStartAnchorY
+                let moveDistance = (moveX * moveX + moveY * moveY).squareRoot()
+                if moveDistance > maxDistance, moveDistance > 0 {
+                    let scale = maxDistance / moveDistance
+                    anchorX = sampleStartAnchorX + moveX * scale
+                    anchorY = sampleStartAnchorY + moveY * scale
+                    vx = 0
+                    vy = 0
+                }
             }
             prevT = s.t
             result.append(ZoomTrajectorySample(t: s.t, x: anchorX, y: anchorY))

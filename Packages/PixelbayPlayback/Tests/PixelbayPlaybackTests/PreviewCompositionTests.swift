@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreGraphics
 import Foundation
+import PixelbayCompositor
 import PixelbayCore
 @testable import PixelbayPlayback
 import XCTest
@@ -73,9 +74,9 @@ final class PreviewCompositionTests: XCTestCase {
         XCTAssertGreaterThan(preview.duration.seconds, 0)
     }
 
-    func test_outputSize_capsAt1080p_whenSourceIsLarger() async throws {
+    func test_outputSize_capsAtUHD_whenSourceIsLarger() async throws {
         let screenURL = bundleURL.appendingPathComponent("media/screen.mov")
-        try writeSilentVideo(to: screenURL, durationSeconds: 0.5, size: CGSize(width: 3840, height: 2160))
+        try writeSilentVideo(to: screenURL, durationSeconds: 0.5, size: CGSize(width: 5120, height: 2880))
 
         let project = makeProject(
             screenAssetPath: "media/screen.mov",
@@ -87,8 +88,9 @@ final class PreviewCompositionTests: XCTestCase {
             project: project,
             bundleURL: bundleURL
         )
-        XCTAssertLessThanOrEqual(preview.outputSize.width, 1920)
-        XCTAssertLessThanOrEqual(preview.outputSize.height, 1080)
+        XCTAssertLessThanOrEqual(preview.outputSize.width, 3840)
+        XCTAssertLessThanOrEqual(preview.outputSize.height, 2160)
+        XCTAssertEqual(preview.outputSize, CGSize(width: 3840, height: 2160))
         let aspect = preview.outputSize.width / preview.outputSize.height
         XCTAssertEqual(aspect, 16.0 / 9.0, accuracy: 0.01)
     }
@@ -109,6 +111,86 @@ final class PreviewCompositionTests: XCTestCase {
         )
         XCTAssertEqual(Int(preview.outputSize.width) % 2, 0)
         XCTAssertEqual(Int(preview.outputSize.height) % 2, 0)
+    }
+
+    func test_build_syntheticCursorInstructionKeepsSlowTrajectoryRaw_withoutSmoothingLag() async throws {
+        let screenURL = bundleURL.appendingPathComponent("media/screen.mov")
+        try writeSilentVideo(to: screenURL, durationSeconds: 0.5, size: CGSize(width: 640, height: 360))
+
+        let assetID = MediaAssetID.generate()
+        var asset = MediaAsset(
+            id: assetID,
+            kind: .display,
+            relativePath: "media/screen.mov",
+            nativeDuration: .seconds(0.5)
+        )
+        asset.cursorRenderedSynthetically = true
+        let clip = Clip(
+            assetID: assetID,
+            sourceRange: TimeRange(start: .zero, duration: .seconds(0.5)),
+            timelineRange: TimeRange(start: .zero, duration: .seconds(0.5))
+        )
+        var project = Project(name: "Raw cursor")
+        project.assets = [asset]
+        project.tracks = [Track(kind: .screen, name: "Screen", clips: [clip])]
+
+        let rawTrajectory: [MouseTrajectorySample] = [
+            MouseTrajectorySample(timelineTime: 0.00, centerX: 0.10, centerY: 0.50),
+            MouseTrajectorySample(timelineTime: 0.05, centerX: 0.105, centerY: 0.50),
+            MouseTrajectorySample(timelineTime: 0.10, centerX: 0.11, centerY: 0.50)
+        ]
+        let preview = try await PreviewCompositionBuilder.build(
+            project: project,
+            bundleURL: bundleURL,
+            cursorTrajectory: rawTrajectory
+        )
+        let instruction = try XCTUnwrap(
+            preview.videoComposition?.instructions.first as? PixelbayCompositionInstruction
+        )
+
+        XCTAssertEqual(instruction.cursorTrajectory, rawTrajectory)
+        XCTAssertEqual(instruction.cursorTrajectory[1].centerX, 0.105, accuracy: 1e-9)
+    }
+
+    func test_build_syntheticCursorInstructionPolishesFastInteriorMotion() async throws {
+        let screenURL = bundleURL.appendingPathComponent("media/screen.mov")
+        try writeSilentVideo(to: screenURL, durationSeconds: 0.5, size: CGSize(width: 640, height: 360))
+
+        let assetID = MediaAssetID.generate()
+        var asset = MediaAsset(
+            id: assetID,
+            kind: .display,
+            relativePath: "media/screen.mov",
+            nativeDuration: .seconds(0.5)
+        )
+        asset.cursorRenderedSynthetically = true
+        let clip = Clip(
+            assetID: assetID,
+            sourceRange: TimeRange(start: .zero, duration: .seconds(0.5)),
+            timelineRange: TimeRange(start: .zero, duration: .seconds(0.5))
+        )
+        var project = Project(name: "Polished cursor")
+        project.assets = [asset]
+        project.tracks = [Track(kind: .screen, name: "Screen", clips: [clip])]
+
+        let rawTrajectory: [MouseTrajectorySample] = [
+            MouseTrajectorySample(timelineTime: 0.00, centerX: 0.10, centerY: 0.50),
+            MouseTrajectorySample(timelineTime: 0.01, centerX: 0.90, centerY: 0.50),
+            MouseTrajectorySample(timelineTime: 0.02, centerX: 0.20, centerY: 0.50)
+        ]
+        let preview = try await PreviewCompositionBuilder.build(
+            project: project,
+            bundleURL: bundleURL,
+            cursorTrajectory: rawTrajectory
+        )
+        let instruction = try XCTUnwrap(
+            preview.videoComposition?.instructions.first as? PixelbayCompositionInstruction
+        )
+
+        XCTAssertEqual(instruction.cursorTrajectory.first, rawTrajectory.first)
+        XCTAssertEqual(instruction.cursorTrajectory.last, rawTrajectory.last)
+        XCTAssertLessThan(instruction.cursorTrajectory[1].centerX, rawTrajectory[1].centerX,
+                          "fast rendered cursor movement should be polished without moving endpoints")
     }
 
     // MARK: - Multi-clip / Phase-2 honouring
@@ -234,6 +316,45 @@ final class PreviewCompositionTests: XCTestCase {
 
         let preview = try await PreviewCompositionBuilder.build(project: project, bundleURL: bundleURL)
         XCTAssertEqual(preview.duration.seconds, 0.5, accuracy: 0.05)
+    }
+
+    func test_build_scaledAudioClip_atDoubleSpeed_scalesAudioSegment() async throws {
+        let screenURL = bundleURL.appendingPathComponent("media/screen.mov")
+        try writeSilentVideo(to: screenURL, durationSeconds: 0.5, size: CGSize(width: 640, height: 360))
+        let micURL = bundleURL.appendingPathComponent("media/mic.caf")
+        try writeSilentAudio(to: micURL, durationSeconds: 1.0)
+
+        let screenAssetID = MediaAssetID.generate()
+        let micAssetID = MediaAssetID.generate()
+        var project = Project(name: "Audio Speed 2x")
+        project.assets = [
+            MediaAsset(id: screenAssetID, kind: .display, relativePath: "media/screen.mov",
+                       nativeDuration: RationalTime.seconds(0.5)),
+            MediaAsset(id: micAssetID, kind: .microphone, relativePath: "media/mic.caf",
+                       nativeDuration: RationalTime.seconds(1.0))
+        ]
+        let screenClip = Clip(
+            assetID: screenAssetID,
+            sourceRange: TimeRange(start: .zero, duration: .seconds(0.5)),
+            timelineRange: TimeRange(start: .zero, duration: .seconds(0.5))
+        )
+        let micClip = Clip(
+            assetID: micAssetID,
+            sourceRange: TimeRange(start: .zero, duration: .seconds(1.0)),
+            timelineRange: TimeRange(start: .zero, duration: .seconds(0.5)),
+            speed: 2.0
+        )
+        project.tracks = [
+            Track(kind: .screen, name: "Screen", clips: [screenClip]),
+            Track(kind: .microphone, name: "Mic", clips: [micClip])
+        ]
+
+        let preview = try await PreviewCompositionBuilder.build(project: project, bundleURL: bundleURL)
+        let audioTrack = try XCTUnwrap(preview.composition.tracks(withMediaType: .audio).first)
+        let nonEmpty = audioTrack.segments.filter { !$0.isEmpty }
+
+        XCTAssertEqual(nonEmpty.count, 1)
+        XCTAssertEqual(nonEmpty.first?.timeMapping.target.duration.seconds ?? 0, 0.5, accuracy: 0.05)
     }
 
     func test_build_shortSourceWithPaddedTimeline_doesNotStretchVideo() async throws {

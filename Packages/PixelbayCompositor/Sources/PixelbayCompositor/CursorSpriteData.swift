@@ -53,18 +53,26 @@ public struct CursorRenderState: Sendable {
     /// the kernel back to a single sample.
     public let velocityXFractionPerSecond: Double
     public let velocityYFractionPerSecond: Double
+    /// Motion-blur gate in [0, 1]. The cursor streak only renders during a
+    /// cursor-follow zoom (Screen Studio behaviour — outside a follow the
+    /// cursor stays crisp no matter how fast it moves). The compositor sets
+    /// this to the active follow keyframe's eased strength so the blur
+    /// fades in/out with the zoom itself rather than hard-cutting.
+    public let motionBlurStrength: Double
 
     public init(
         xFractionInScreen: Double,
         yFractionInScreen: Double,
         scale: Double,
         velocityXFractionPerSecond: Double = 0,
-        velocityYFractionPerSecond: Double = 0
+        velocityYFractionPerSecond: Double = 0,
+        motionBlurStrength: Double = 0
     ) {
         self.xFractionInScreen = xFractionInScreen
         self.yFractionInScreen = yFractionInScreen
         self.scale = scale
         self.velocityXFractionPerSecond = velocityXFractionPerSecond
         self.velocityYFractionPerSecond = velocityYFractionPerSecond
+        self.motionBlurStrength = motionBlurStrength
     }
 }

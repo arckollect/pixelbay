@@ -74,7 +74,9 @@ public struct SetTrackMutedCommand: EditCommand {
 ///
 /// `delta` is in the timeline's time domain. Positive delta = trim more
 /// (shrinks the clip from the front). Negative delta = expand (drag the
-/// edge backward, recovering trimmed material).
+/// edge backward, recovering trimmed material). Source time moves by
+/// `delta * speed`, preserving the model invariant
+/// `timelineRange.duration = sourceRange.duration / speed`.
 public struct TrimClipInCommand: EditCommand {
     public let displayName = "Trim Clip"
     public let clipID: ClipID
@@ -88,10 +90,12 @@ public struct TrimClipInCommand: EditCommand {
     @discardableResult
     public func apply(to project: inout Project) throws -> any EditCommand {
         try project.mutateClip(clipID) { clip in
-            let newSourceStart = clip.sourceRange.start.adding(delta)
-            let newSourceDuration = clip.sourceRange.duration.subtracting(delta)
-            let newTimelineStart = clip.timelineRange.start.adding(delta)
-            let newTimelineDuration = clip.timelineRange.duration.subtracting(delta)
+            let timelineDelta = delta.converted(toTimescale: clip.timelineRange.start.timescale)
+            let sourceDelta = sourceDelta(forTimelineDelta: timelineDelta, clip: clip)
+            let newSourceStart = clip.sourceRange.start.adding(sourceDelta)
+            let newSourceDuration = clip.sourceRange.duration.subtracting(sourceDelta)
+            let newTimelineStart = clip.timelineRange.start.adding(timelineDelta)
+            let newTimelineDuration = clip.timelineRange.duration.subtracting(timelineDelta)
 
             guard newSourceStart.value >= 0 else {
                 throw EditError.invalidSourceRange(reason: "in-point would go below zero")
@@ -115,7 +119,8 @@ public struct TrimClipInCommand: EditCommand {
 /// Drags the OUT-point of a clip — extends/shrinks both `sourceRange.end`
 /// and `timelineRange.end` by `delta` while keeping the head anchored.
 /// `delta` is in the timeline's time domain; positive = expand, negative
-/// = trim.
+/// = trim. Source duration changes by `delta * speed`, preserving the
+/// source/timeline duration ratio for sped-up and slowed-down clips.
 public struct TrimClipOutCommand: EditCommand {
     public let displayName = "Trim Clip"
     public let clipID: ClipID
@@ -129,8 +134,10 @@ public struct TrimClipOutCommand: EditCommand {
     @discardableResult
     public func apply(to project: inout Project) throws -> any EditCommand {
         try project.mutateClip(clipID) { clip in
-            let newSourceDuration = clip.sourceRange.duration.adding(delta)
-            let newTimelineDuration = clip.timelineRange.duration.adding(delta)
+            let timelineDelta = delta.converted(toTimescale: clip.timelineRange.duration.timescale)
+            let sourceDelta = sourceDelta(forTimelineDelta: timelineDelta, clip: clip)
+            let newSourceDuration = clip.sourceRange.duration.adding(sourceDelta)
+            let newTimelineDuration = clip.timelineRange.duration.adding(timelineDelta)
 
             guard newSourceDuration.value > 0 else {
                 throw EditError.invalidSourceRange(reason: "would zero or invert source duration")
@@ -276,23 +283,33 @@ public struct SplitClipCommand: EditCommand {
         let original = project.tracks[t].clips[c]
         let timelineStart = original.timelineRange.start
         let timelineEnd = original.timelineRange.end
-        guard splitTime.value > timelineStart.value && splitTime.value < timelineEnd.value else {
+        let normalizedSplitTime = splitTime.converted(toTimescale: timelineStart.timescale)
+        guard normalizedSplitTime.value > timelineStart.value && normalizedSplitTime.value < timelineEnd.value else {
             throw EditError.invalidTimelineRange(reason: "split time must be strictly inside the clip's timeline range")
         }
         let leftDelta = RationalTime(
-            value: splitTime.value - timelineStart.value,
+            value: normalizedSplitTime.value - timelineStart.value,
             timescale: timelineStart.timescale
         )
         let rightDelta = RationalTime(
-            value: timelineEnd.value - splitTime.value,
+            value: timelineEnd.value - normalizedSplitTime.value,
             timescale: timelineEnd.timescale
         )
-        let sourceMidStart = original.sourceRange.start.adding(leftDelta)
+        let sourceRatio = leftDelta.seconds / original.timelineRange.duration.seconds
+        let leftSourceDuration = RationalTime.seconds(
+            original.sourceRange.duration.seconds * sourceRatio,
+            timescale: original.sourceRange.duration.timescale
+        )
+        let rightSourceDuration = original.sourceRange.duration.subtracting(leftSourceDuration)
+        guard leftSourceDuration.value > 0, rightSourceDuration.value > 0 else {
+            throw EditError.invalidSourceRange(reason: "split would create a zero-duration source side")
+        }
+        let sourceMidStart = original.sourceRange.start.adding(leftSourceDuration)
 
         let leftClip = Clip(
             id: ClipID.generate(),
             assetID: original.assetID,
-            sourceRange: TimeRange(start: original.sourceRange.start, duration: leftDelta),
+            sourceRange: TimeRange(start: original.sourceRange.start, duration: leftSourceDuration),
             timelineRange: TimeRange(start: timelineStart, duration: leftDelta),
             volume: original.volume,
             speed: original.speed,
@@ -302,8 +319,8 @@ public struct SplitClipCommand: EditCommand {
         let rightClip = Clip(
             id: ClipID.generate(),
             assetID: original.assetID,
-            sourceRange: TimeRange(start: sourceMidStart, duration: rightDelta),
-            timelineRange: TimeRange(start: splitTime, duration: rightDelta),
+            sourceRange: TimeRange(start: sourceMidStart, duration: rightSourceDuration),
+            timelineRange: TimeRange(start: normalizedSplitTime, duration: rightDelta),
             volume: original.volume,
             speed: original.speed,
             enabled: original.enabled,
@@ -604,11 +621,7 @@ public struct AutoZoomClick: Sendable, Equatable {
     public var centerY: Double       // 0..1 normalized to screen layer
     /// Mirrors `ZoomMark.source` for manual marks routed through
     /// `GenerateManualZoomsCommand`. Nil for click-sourced auto-zoom (which
-    /// has no equivalent source distinction). When set to `.shakeGesture` or
-    /// `.circleGesture`, the manual-zoom command emits the keyframe with
-    /// `trajectory: nil` so the zoom holds a STATIC anchor on
-    /// `(centerX, centerY)` instead of following the cursor through hold +
-    /// ease-out (which otherwise jitters with every post-gesture micro-move).
+    /// has no equivalent source distinction).
     public var source: ZoomMarkSource?
 
     public init(
@@ -660,20 +673,17 @@ public struct GenerateAutoZoomFromClicksCommand: EditCommand {
 
     public init(
         clicks: [AutoZoomClick],
-        lookahead: Double = 0.45,
+        lookahead: Double = EffectKeyframe.defaultZoomEaseIn.seconds,
         holdDuration: Double = 1.8,
-        easeOutDuration: Double = 0.45,
+        easeOutDuration: Double = EffectKeyframe.defaultZoomEaseOut.seconds,
         zoomFactor: Double = 2.0,
         timelineDuration: Double? = nil,
         maxClusterDuration: Double = 4.5,
         spatialResetThreshold: Double = 0.30,
         mouseTrajectory: [MouseTrajectorySample]? = nil
     ) {
-        // Phase 3c — 450 ms ease-in + 450 ms ease-out per keyframe gives
-        // back-to-back clusters a 900 ms transition envelope (the
-        // Screen-Studio cadence the user picked). Pre-3c defaults were
-        // 700 ms in / 500 ms out — punchier but read as busy when
-        // combined with the new 2.5 s intent-scorer cooldown.
+        // Shared zoom easing defaults live in EffectKeyframe so manual,
+        // gesture, and click-generated zooms keep one consistent cadence.
         self.clicks = clicks
         self.lookahead = max(0.05, lookahead)
         self.holdDuration = max(0.1, holdDuration)
@@ -969,15 +979,9 @@ public struct GenerateManualZoomsCommand: EditCommand {
 
     public init(
         marks: [AutoZoomClick],
-        // Manual zoom defaults are snappier than auto-zoom defaults because
-        // the user has already gestured/keyed — they want immediate response
-        // and a brief hold, not the 3.0s arc auto-zoom uses for clicks. With
-        // gesture-start anchoring (`Detection.timestamp` = window[0]), the
-        // 0.3s ease-in covers the gesture motion itself, hold is just long
-        // enough to register the focal point, then ease-out releases.
-        lookahead: Double = 0.3,
+        lookahead: Double = EffectKeyframe.defaultZoomEaseIn.seconds,
         holdDuration: Double = 0.6,
-        easeOutDuration: Double = 0.5,
+        easeOutDuration: Double = EffectKeyframe.defaultZoomEaseOut.seconds,
         zoomFactor: Double = 2.0,
         timelineDuration: Double? = nil,
         mouseTrajectory: [MouseTrajectorySample]? = nil
@@ -1076,8 +1080,8 @@ public struct GenerateManualZoomsCommand: EditCommand {
 /// anywhere — no click or gesture mark required.
 ///
 /// Mirrors `GenerateManualZoomsCommand`'s envelope and tagging so it
-/// behaves identically downstream: snappy 0.3/0.6/0.5 timing, `origin =
-/// .manualHotkey`, `anchorMode = .followCursor`. The compositor will
+/// behaves identically downstream: shared zoom easing, a short manual hold,
+/// `origin = .manualHotkey`, `anchorMode = .followCursor`. The compositor will
 /// re-slice the master cursor trajectory onto this keyframe at build time,
 /// so it cursor-follows like a gesture-sourced zoom.
 ///
@@ -1100,9 +1104,9 @@ public struct AddZoomAtPlayheadCommand: EditCommand {
         timelineTime: Double,
         centerX: Double = 0.5,
         centerY: Double = 0.5,
-        lookahead: Double = 0.3,
+        lookahead: Double = EffectKeyframe.defaultZoomEaseIn.seconds,
         holdDuration: Double = 0.6,
-        easeOutDuration: Double = 0.5,
+        easeOutDuration: Double = EffectKeyframe.defaultZoomEaseOut.seconds,
         zoomFactor: Double = 2.0,
         timelineDuration: Double? = nil
     ) {
@@ -1218,6 +1222,11 @@ public struct SetCursorSettingsCommand: EditCommand {
 // MARK: - RationalTime arithmetic helpers (editor-internal)
 
 extension RationalTime {
+    fileprivate func converted(toTimescale targetTimescale: Int32) -> RationalTime {
+        guard timescale != targetTimescale else { return self }
+        return RationalTime.seconds(seconds, timescale: targetTimescale)
+    }
+
     fileprivate func adding(_ other: RationalTime) -> RationalTime {
         precondition(timescale == other.timescale,
                      "Mixed timescales in editor arithmetic — convert first")
@@ -1233,4 +1242,11 @@ extension RationalTime {
     fileprivate func negated() -> RationalTime {
         RationalTime(value: -value, timescale: timescale)
     }
+}
+
+private func sourceDelta(forTimelineDelta delta: RationalTime, clip: Clip) -> RationalTime {
+    RationalTime.seconds(
+        delta.seconds * clip.speed,
+        timescale: clip.sourceRange.duration.timescale
+    )
 }

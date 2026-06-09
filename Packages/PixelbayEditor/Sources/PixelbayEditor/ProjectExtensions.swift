@@ -50,16 +50,14 @@ public extension Project {
 
 public extension Track {
     /// Inserts `clip` into `clips`, maintaining ascending order by
-    /// `timelineRange.start.value` (assuming a shared timescale across
-    /// the track — true in v0.1, where everything uses 600). Returns the
-    /// index the clip landed at so callers can carry the position
-    /// forward in their inverse commands.
+    /// `timelineRange.start`. Returns the index the clip landed at so
+    /// callers can carry the position forward in their inverse commands.
     @discardableResult
     mutating func insertClipMaintainingOrder(_ clip: Clip) -> Int {
         let target = clips.firstIndex { existing in
             // Tied starts: append after existing clip with the same start
             // (stable behaviour for the inverse path that re-inserts).
-            existing.timelineRange.start.value > clip.timelineRange.start.value
+            existing.timelineRange.start.seconds > clip.timelineRange.start.seconds
         } ?? clips.endIndex
         clips.insert(clip, at: target)
         return target

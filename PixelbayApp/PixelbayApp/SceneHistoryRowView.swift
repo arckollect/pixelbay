@@ -19,6 +19,7 @@ struct SceneHistoryRowView: View {
     let historyIndex: Int
 
     @State private var draftDescription: String = ""
+    @FocusState private var isEditingDescription: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: Theme.Spacing.md) {
@@ -36,7 +37,7 @@ struct SceneHistoryRowView: View {
             draftDescription = row.description
         }
         .onChange(of: row.description) { _, newValue in
-            if newValue != draftDescription {
+            if !isEditingDescription, newValue != draftDescription {
                 draftDescription = newValue
             }
         }
@@ -66,11 +67,15 @@ struct SceneHistoryRowView: View {
             .lineLimit(1...3)
             .font(Theme.Font.body)
             .foregroundStyle(Theme.Color.textPrimary)
+            .focused($isEditingDescription)
             // Commit on Enter or focus-loss. Each commit dispatches one
             // SetClipExtraCommand per clip in the group through the
             // editor's command pipeline — the editor's revision bumps and
             // any open preview rebuilds.
             .onSubmit { commit() }
+            .onChange(of: isEditingDescription) { _, focused in
+                if !focused { commit() }
+            }
             .onChange(of: draftDescription) { _, newValue in
                 // Live update is too aggressive (one undo entry per
                 // keystroke). Defer to the commit path on focus-loss /

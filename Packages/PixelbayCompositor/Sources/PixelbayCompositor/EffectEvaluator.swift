@@ -32,26 +32,30 @@ public enum EffectEvaluator {
     /// the Phase 3c camera-velocity radial blur for the *transition*
     /// portion — Gaussian, not radial, so it reads as a soft veil rather
     /// than a warp.
-    static let screenZoomBlurPeakSigmaPx: Double = 1.5
+    static let screenZoomBlurPeakSigmaPx: Double = 2.25
 
-    /// Phase 3d iter 2 pan-blur peak sigma in pixels. Combined with the
-    /// transition bell via `max(...)`, so during a transition the bell
-    /// dominates and during held-zoom cursor follows a pan-driven
-    /// Gaussian softens the in-zoom motion. Re-introduces the "buttery
-    /// pan" cue the radial blur was trying (and failing) to provide in
-    /// Phase 3c — same kernel as the transition blur, just velocity-
-    /// gated instead of ease-gated. Held-zoom with a stationary cursor
-    /// still reads as 0 (no blur).
-    static let screenPanBlurPeakSigmaPx: Double = 1.0
+    /// Follow-pan motion blur is DIRECTIONAL (along the camera's velocity
+    /// vector) and velocity-proportional: blur half-extent in layer-UV is
+    /// `cameraSpeed · panBlurShutterSeconds`, gated by a smoothstep onset
+    /// so slow drifts stay crisp, then scaled by the keyframe's eased
+    /// strength and the user's Motion Blur multiplier. Held-zoom with a
+    /// stationary cursor still reads as 0 (no blur), preserving crisp
+    /// paused frames.
+    ///
+    /// `panBlurShutterSeconds` is the synthetic exposure window — 1/50 s
+    /// makes a deliberate follow (~0.5 norm/s) streak ~1 % of the layer
+    /// and a fast chase visibly smear along the motion direction.
+    /// `panBlurMaxUV` caps the half-extent so even a teleport-fast pan
+    /// stays readable.
+    static let panBlurShutterSeconds: Double = 1.0 / 50.0
+    static let panBlurMaxUV: Double = 0.030
 
-    /// Camera-speed ramp for the pan blur, in norm-units/sec on the
+    /// Camera-speed onset ramp for the pan blur, in norm-units/sec on the
     /// per-frame zoom centre. Below threshold the camera is treated as
-    /// still (no blur); above saturation the pan blur hits its peak.
-    /// Tuned so a slow drift produces 0, a deliberate follow produces
-    /// just-visible softening, and a fast chase caps out (rather than
-    /// dominating the frame).
-    static let panBlurThresholdSpeed: Double = 0.10
-    static let panBlurSaturationSpeed: Double = 1.20
+    /// still (no blur); by `panBlurFullSpeed` the blur is fully
+    /// proportional to speed.
+    static let panBlurThresholdSpeed: Double = 0.06
+    static let panBlurFullSpeed: Double = 0.30
 
     /// Δt used to finite-difference the zoom centre when computing the
     /// camera's instantaneous speed for the pan-blur ramp. One 60 fps
@@ -97,33 +101,51 @@ public enum EffectEvaluator {
         }
         if let winner {
             layout = applyZoom(winner.kf, strength: winner.strength, atTime: t, to: layout)
-            // Phase 3d iter 2 — combined transition-bell + pan-velocity
-            // sigma. Transition term peaks mid-ease and resolves crisp at
-            // hold (same as Phase 3d). Pan term ramps with camera speed
-            // (norm-units/s on the zoomCenter finite difference), so
-            // in-zoom cursor follows pick up a soft Gaussian softening
-            // while held-zoom-with-stationary-cursor stays bit-identical
-            // to no blur. Combined via max so transitions and pans don't
-            // double-count — the bigger one wins.
+            // Two blur terms, naturally exclusive by construction (the zoom
+            // centre is locked during the ease windows, so the camera only
+            // moves during hold — when the bell is 0):
+            //   • Transition bell: isotropic Gaussian, peaks mid-ease and
+            //     resolves crisp at hold (Phase 3d).
+            //   • Pan blur: DIRECTIONAL streak along the camera's velocity,
+            //     half-extent proportional to camera speed (synthetic
+            //     shutter), so fast cursor-follow pans read as real motion
+            //     blur — the faster the pan, the longer the streak — while
+            //     held-zoom-with-stationary-cursor stays bit-identical to
+            //     no blur.
+            // Both terms scale with the keyframe's eased strength (no
+            // hard-cut blur pop at t = keyframe.start) and the user's
+            // Motion Blur multiplier.
             let bell = max(0.0, 4.0 * winner.strength * (1.0 - winner.strength))
-            let transitionSigma = bell * Self.screenZoomBlurPeakSigmaPx
+            let transitionSigma = bell
+                * Self.screenZoomBlurPeakSigmaPx
+                * winner.kf.zoomFollowMotionBlur
             let center = zoomCenter(for: winner.kf, atTime: t)
             let prevT = max(0.0, t - Self.panBlurVelocityDt)
             let prevCenter = zoomCenter(for: winner.kf, atTime: prevT)
             let dx = center.x - prevCenter.x
             let dy = center.y - prevCenter.y
             let dt = max(1e-6, t - prevT)
-            let cameraSpeed = (dx * dx + dy * dy).squareRoot() / dt
+            let cameraDist = (dx * dx + dy * dy).squareRoot()
+            let cameraSpeed = cameraDist / dt
             let panRamp = MouseTrajectory.smoothstep(
                 Self.panBlurThresholdSpeed,
-                Self.panBlurSaturationSpeed,
+                Self.panBlurFullSpeed,
                 cameraSpeed
             )
-            // Pan blur weighted by the keyframe's eased strength so it
-            // ramps with the keyframe's authority — no hard-cut blur pop
-            // at t = keyframe.start.
-            let panSigma = panRamp * winner.strength * Self.screenPanBlurPeakSigmaPx
-            layout.screenZoomBlurSigmaPx = Float(max(transitionSigma, panSigma))
+            let panHalfExtentUV = min(
+                Self.panBlurMaxUV,
+                cameraSpeed * Self.panBlurShutterSeconds
+                    * panRamp
+                    * winner.strength
+                    * winner.kf.zoomFollowMotionBlur
+            )
+            if cameraDist > 1e-9, panHalfExtentUV > 1e-5 {
+                layout.screenMotionBlurUV = SIMD2(
+                    Float(dx / cameraDist * panHalfExtentUV),
+                    Float(dy / cameraDist * panHalfExtentUV)
+                )
+            }
+            layout.screenZoomBlurSigmaPx = Float(transitionSigma)
         }
 
         for kf in keyframes where kf.kind == .talkingHeadSwap {

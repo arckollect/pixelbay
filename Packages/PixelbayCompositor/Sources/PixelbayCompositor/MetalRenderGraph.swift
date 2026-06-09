@@ -241,6 +241,16 @@ public final class MetalRenderGraph: @unchecked Sendable {
         guard let screen = sources[.screen] else {
             throw RenderError.missingScreenLayer
         }
+        // Per-frame cache flush — load-bearing for memory. Each
+        // CVMetalTextureCacheCreateTextureFromImage entry retains its source
+        // CVPixelBuffer; without a periodic flush those entries pin the
+        // VideoToolbox decoder's output surfaces indefinitely, the decoder
+        // pool can never recycle, and VTDecoderXPCService balloons by
+        // gigabytes over a session (observed: 14 GB). Flushing here is safe
+        // under the async-commit design: the in-flight frame's refs are
+        // strongly held by its completion closure (`SendableTextureRefs`),
+        // so the flush only releases entries whose GPU work already finished.
+        CVMetalTextureCacheFlush(textureCache, 0)
         guard let destinationPair = makeBGRATexture(from: destination, usage: .renderTarget) else {
             throw RenderError.textureCreationFailed("destination BGRA")
         }
@@ -291,6 +301,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
             isCircle: false,
             opacity: 1.0,
             screenBlurSigmaPx: layout.screenZoomBlurSigmaPx,
+            screenMotionBlurUV: layout.screenMotionBlurUV,
             cvTextureRefs: &cvTextureRefs
         )
 
@@ -478,13 +489,14 @@ public final class MetalRenderGraph: @unchecked Sendable {
         var isCircle: Float
         var opacity: Float
         var screenBlurSigmaPx: Float = 0
-        // 8-byte tail padding so this struct matches the Metal-side layout
-        // (Metal aligns to 16 bytes; without this the next struct field
-        // would land in the wrong slot when the buffer is reused).
+        // Directional motion-blur half-extent in layer UV. Zero collapses
+        // the directional kernel and falls back to the Gaussian path.
+        // SIMD2<Float> is 8-aligned, so it lands at offset 32 — matching
+        // the Metal-side float2 slot.
+        var motionBlurUV: SIMD2<Float> = .zero
+        // Tail padding so the struct matches the Metal-side 48-byte layout.
         var pad0: Float = 0
         var pad1: Float = 0
-        var pad2: Float = 0
-        var pad3: Float = 0
     }
 
     /// Cursor-specific uniforms. Adds a velocity offset (in cursor-UV space)
@@ -508,6 +520,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
         isCircle: Bool,
         opacity: Float,
         screenBlurSigmaPx: Float = 0,
+        screenMotionBlurUV: SIMD2<Float> = .zero,
         cvTextureRefs: inout [CVMetalTexture]
     ) throws {
         let vertices = makeQuadVertices(rect: destinationRect, outputSize: outputSize)
@@ -519,7 +532,8 @@ public final class MetalRenderGraph: @unchecked Sendable {
             cornerRadiusPx: Float(cornerRadiusPx),
             isCircle: isCircle ? 1 : 0,
             opacity: max(0, min(1, opacity)),
-            screenBlurSigmaPx: max(0, screenBlurSigmaPx)
+            screenBlurSigmaPx: max(0, screenBlurSigmaPx),
+            motionBlurUV: screenMotionBlurUV
         )
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerUniforms>.stride, index: 0)
 
@@ -599,11 +613,6 @@ public final class MetalRenderGraph: @unchecked Sendable {
         let originX = cursorX - hotSpotFractionX * widthPx
         let originY = cursorY - hotSpotFractionY * heightPx
 
-        let rect = LayerRect(
-            origin: CGPoint(x: originX, y: originY),
-            size: CGSize(width: widthPx, height: heightPx)
-        )
-
         // Upload sprite to GPU on first sight (or when identity changes).
         // CGImage is a CF type — `ObjectIdentifier` of the bridged class
         // gives a stable identity for the lifetime of the CGImage.
@@ -627,27 +636,61 @@ public final class MetalRenderGraph: @unchecked Sendable {
         }
         guard let texture = cursorSpriteTexture else { return }
 
-        let vertices = makeQuadVertices(rect: rect, outputSize: outputSize)
-        encoder.setVertexBytes(vertices, length: MemoryLayout<Vertex>.stride * vertices.count, index: 0)
-
         // Convert cursor velocity (screen-content fraction per second) into
         // a blur offset in cursor-UV space. The chain:
         //   velocity * shutterTime          → fraction of screen-content traversed during the shutter
         //   * screen.size.width / widthPx   → fraction of the cursor sprite width that maps to
         //
-        // `shutterTime` is the synthetic motion-blur exposure window. 1/120 s
-        // is a half-frame at 60 fps, so the trail length is a hint of
-        // sub-frame motion rather than a full inter-frame streak. Was 1/30 s
-        // originally, then 1/60 s, now 1/120 s after user feedback that fast
-        // sweeps still read as a "blur smear moving across the screen"
-        // rather than a recognizable cursor with a small motion trail. The
-        // kernel is also clamped tighter (±0.15 UV, down from ±0.3) so even
-        // at saturation the cursor sprite stays clearly identifiable.
-        let shutterTime: CGFloat = 1.0 / 120.0
-        let traversedXContent = CGFloat(state.velocityXFractionPerSecond) * shutterTime * screen.size.width
-        let traversedYContent = CGFloat(state.velocityYFractionPerSecond) * shutterTime * screen.size.height
+        // `shutterTime` is the synthetic motion-blur exposure window, and
+        // it scales WITH cursor speed (Screen Studio look): a slow precise
+        // move keeps a short 1/110 s shutter (barely-there trail), while a
+        // fast flick opens up to 1/34 s so the streak grows superlinearly
+        // with speed — big readable motion blur exactly when the raw motion
+        // would otherwise strobe. The shader's kernel keeps a bright
+        // Gaussian-weighted core at the cursor position, so even a
+        // saturated streak reads as "legible cursor + long trail" rather
+        // than a uniform smear (the failure mode that forced the old
+        // fixed-shutter design down to ±0.15 UV).
+        let speedNorm = Double(
+            (state.velocityXFractionPerSecond * state.velocityXFractionPerSecond
+                + state.velocityYFractionPerSecond * state.velocityYFractionPerSecond)
+                .squareRoot()
+        )
+        let shutterBlend = smoothstep(Self.cursorBlurSpeedLow, Self.cursorBlurSpeedHigh, speedNorm)
+        let shutterTime = CGFloat(
+            Self.cursorBlurShutterMin
+                + (Self.cursorBlurShutterMax - Self.cursorBlurShutterMin) * shutterBlend
+        )
+        // Zoom-follow-only gate: outside a cursor-follow zoom the streak
+        // length collapses to 0 (single-sample escape hatch, no quad
+        // padding) so a fast cursor at 1× stays perfectly crisp. Scaling
+        // the traversal (not the shutter) keeps the fade linear in streak
+        // length as the keyframe eases in/out.
+        let blurGate = CGFloat(max(0.0, min(1.0, state.motionBlurStrength)))
+        let traversedXContent = CGFloat(state.velocityXFractionPerSecond) * shutterTime * screen.size.width * blurGate
+        let traversedYContent = CGFloat(state.velocityYFractionPerSecond) * shutterTime * screen.size.height * blurGate
         let blurOffsetUVX = clampUV(Float(traversedXContent / widthPx))
         let blurOffsetUVY = clampUV(Float(traversedYContent / heightPx))
+
+        // The streak extends up to a full sprite-length past the sprite on
+        // both sides (symmetric kernel), so the quad must grow with the
+        // blur extent or the trail clips hard at the quad edge. TexCoords
+        // extend past [0, 1] by the same fraction; the cursor shader's
+        // clamp_to_zero sampler returns transparent for out-of-sprite taps,
+        // so the padding renders only the trail, never edge smear.
+        let padXPx = CGFloat(abs(blurOffsetUVX)) * widthPx
+        let padYPx = CGFloat(abs(blurOffsetUVY)) * heightPx
+        let rect = LayerRect(
+            origin: CGPoint(x: originX - padXPx, y: originY - padYPx),
+            size: CGSize(width: widthPx + 2 * padXPx, height: heightPx + 2 * padYPx)
+        )
+        let vertices = makeQuadVertices(
+            rect: rect,
+            outputSize: outputSize,
+            texCoordMin: SIMD2(-abs(blurOffsetUVX), -abs(blurOffsetUVY)),
+            texCoordMax: SIMD2(1 + abs(blurOffsetUVX), 1 + abs(blurOffsetUVY))
+        )
+        encoder.setVertexBytes(vertices, length: MemoryLayout<Vertex>.stride * vertices.count, index: 0)
 
         var uniforms = CursorUniforms(
             outputSizePx: SIMD2(Float(outputSize.width), Float(outputSize.height)),
@@ -661,21 +704,47 @@ public final class MetalRenderGraph: @unchecked Sendable {
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
+    /// Velocity-adaptive cursor shutter. Speeds in norm-units/s (fraction
+    /// of screen content); the window deliberately starts above
+    /// casual-motion speed so deliberate pointing stays crisp, then ramps
+    /// the shutter open across the flick regime.
+    private static let cursorBlurSpeedLow: Double = 0.35
+    private static let cursorBlurSpeedHigh: Double = 2.40
+    private static let cursorBlurShutterMin: Double = 1.0 / 110.0
+    private static let cursorBlurShutterMax: Double = 1.0 / 34.0
+
+    private func smoothstep(_ edge0: Double, _ edge1: Double, _ x: Double) -> Double {
+        guard edge1 > edge0 else { return x < edge0 ? 0 : 1 }
+        let t = min(1.0, max(0.0, (x - edge0) / (edge1 - edge0)))
+        return t * t * (3.0 - 2.0 * t)
+    }
+
     private func clampUV(_ v: Float) -> Float {
-        // ±0.15 of the cursor sprite UV — caps the kernel-tap spread so the
-        // sprite shape stays readable on saturation. Was ±0.5 originally,
-        // then ±0.3; tightened further after user feedback that fast sweeps
-        // still read as a smear, with the goal of "legible cursor + small
-        // trail" rather than a moving blob. The taps still stay inside
-        // `address::clamp_to_edge` territory, so no wrap-side garbage leaks.
-        max(-0.15, min(0.15, v))
+        // ±1.0 of the cursor sprite UV — the streak can span a full
+        // sprite-length each side of the cursor at saturation. The old
+        // ±0.15 cap existed because the flat triangular kernel turned any
+        // longer trail into an illegible smear; the Gaussian-core kernel
+        // keeps the cursor head bright and identifiable, so the trail can
+        // be dramatic without costing legibility. The quad is expanded by
+        // the same extent so nothing clips.
+        max(-1.0, min(1.0, v))
     }
 
     // Triangle-strip quad covering destinationRect in clip space (-1..+1).
     // Vertex order: top-left, top-right, bottom-left, bottom-right.
     // Texture coords use top-left origin to match CVPixelBuffer / Metal
     // conventions.
-    private func makeQuadVertices(rect: LayerRect, outputSize: CGSize) -> [Vertex] {
+    //
+    // `texCoordMin` / `texCoordMax` default to the standard 0…1 fill. The
+    // cursor pass passes extents beyond [0, 1] so its motion-blur trail can
+    // render inside a quad padded past the sprite bounds (the cursor
+    // shader's clamp_to_zero sampler keeps out-of-sprite taps transparent).
+    private func makeQuadVertices(
+        rect: LayerRect,
+        outputSize: CGSize,
+        texCoordMin: SIMD2<Float> = SIMD2(0, 0),
+        texCoordMax: SIMD2<Float> = SIMD2(1, 1)
+    ) -> [Vertex] {
         // Clip-space mapping: x = 2*nx - 1, y = 1 - 2*ny  (Y flipped because
         // CVPixelBuffer is top-left origin but Metal clip space is +Y up).
         let nMinX = Float(rect.minX / outputSize.width)
@@ -687,10 +756,10 @@ public final class MetalRenderGraph: @unchecked Sendable {
         let clipMaxY = 1 - nMinY * 2     // top
         let clipMinY = 1 - nMaxY * 2     // bottom
         return [
-            Vertex(position: SIMD2(clipMinX, clipMaxY), texCoord: SIMD2(0, 0)), // top-left
-            Vertex(position: SIMD2(clipMaxX, clipMaxY), texCoord: SIMD2(1, 0)), // top-right
-            Vertex(position: SIMD2(clipMinX, clipMinY), texCoord: SIMD2(0, 1)), // bottom-left
-            Vertex(position: SIMD2(clipMaxX, clipMinY), texCoord: SIMD2(1, 1))  // bottom-right
+            Vertex(position: SIMD2(clipMinX, clipMaxY), texCoord: SIMD2(texCoordMin.x, texCoordMin.y)), // top-left
+            Vertex(position: SIMD2(clipMaxX, clipMaxY), texCoord: SIMD2(texCoordMax.x, texCoordMin.y)), // top-right
+            Vertex(position: SIMD2(clipMinX, clipMinY), texCoord: SIMD2(texCoordMin.x, texCoordMax.y)), // bottom-left
+            Vertex(position: SIMD2(clipMaxX, clipMinY), texCoord: SIMD2(texCoordMax.x, texCoordMax.y))  // bottom-right
         ]
     }
 
@@ -803,10 +872,9 @@ public final class MetalRenderGraph: @unchecked Sendable {
         float isCircle;
         float opacity;
         float screenBlurSigmaPx;
+        float2 motionBlurUV;
         float _pad0;
         float _pad1;
-        float _pad2;
-        float _pad3;
     };
 
     // Phase 3d screen blur. Approximate Gaussian as a 9-tap cross
@@ -831,20 +899,84 @@ public final class MetalRenderGraph: @unchecked Sendable {
             sigmaPx / max(1.0, layerSizePx.x),
             sigmaPx / max(1.0, layerSizePx.y)
         );
-        // Gaussian weights at distances 0, 1σ, 2σ.
+        // Gaussian weights at distances 0, 1σ (axes + diagonals), 2σ.
+        // The diagonal ring is what keeps the kernel rotationally round —
+        // an axis-only cross reads as a faint star/streak artifact on
+        // high-contrast edges instead of a soft veil.
         const float w0 = 1.0;
         const float w1 = 0.6065;  // exp(-0.5)
+        const float wd = 0.3679;  // exp(-1.0) — diagonals at distance σ√2
         const float w2 = 0.1353;  // exp(-2.0)
-        const float wSum = w0 + 4.0 * w1 + 4.0 * w2;
+        const float wSum = w0 + 4.0 * w1 + 4.0 * wd + 4.0 * w2;
         float4 acc = tex.sample(s, uv) * w0;
         acc += tex.sample(s, uv + float2( sigmaUV.x, 0.0)) * w1;
         acc += tex.sample(s, uv + float2(-sigmaUV.x, 0.0)) * w1;
         acc += tex.sample(s, uv + float2(0.0,  sigmaUV.y)) * w1;
         acc += tex.sample(s, uv + float2(0.0, -sigmaUV.y)) * w1;
+        acc += tex.sample(s, uv + float2( sigmaUV.x,  sigmaUV.y)) * wd;
+        acc += tex.sample(s, uv + float2(-sigmaUV.x,  sigmaUV.y)) * wd;
+        acc += tex.sample(s, uv + float2( sigmaUV.x, -sigmaUV.y)) * wd;
+        acc += tex.sample(s, uv + float2(-sigmaUV.x, -sigmaUV.y)) * wd;
         acc += tex.sample(s, uv + float2( 2.0 * sigmaUV.x, 0.0)) * w2;
         acc += tex.sample(s, uv + float2(-2.0 * sigmaUV.x, 0.0)) * w2;
         acc += tex.sample(s, uv + float2(0.0,  2.0 * sigmaUV.y)) * w2;
         acc += tex.sample(s, uv + float2(0.0, -2.0 * sigmaUV.y)) * w2;
+        return acc / wSum;
+    }
+
+    // Interleaved gradient noise (Jimenez 2014). Per-pixel phase in [0,1)
+    // used to dither blur tap positions — a fixed kernel over a long
+    // streak produces N discrete ghost copies of every edge (reads as
+    // harsh/"static-ey"); shifting each pixel's taps by a different
+    // sub-spacing phase converts that banding into fine noise the eye
+    // integrates as one continuous soft smear.
+    static inline float gradientNoise(float2 px) {
+        return fract(52.9829189 * fract(0.06711056 * px.x + 0.00583715 * px.y));
+    }
+
+    // Directional camera-pan motion blur, film-style:
+    //   • Adaptive tap count (~1 tap per 1.5 px of streak, 9–49) so long
+    //     streaks get enough samples to stay smooth.
+    //   • Per-pixel dithered tap phase (gradient noise) — kills ghost
+    //     banding entirely.
+    //   • A ±0.75 px per-tap perpendicular jitter gives the streak a soft
+    //     Gaussian cross-section instead of a razor-thin hard line.
+    //   • Trapezoid weights (flat core, taper over the outer quarter)
+    //     match a real shutter's uniform exposure with soft ends.
+    // `blurUV` is the kernel half-extent in layer UV. Collapses to the
+    // Gaussian path (and from there to a single sample) when the extent
+    // is under a pixel, so static frames stay bit-identical to no blur.
+    static inline float4 screenMotionBlurSample(
+        texture2d<float, access::sample> tex,
+        sampler s,
+        float2 uv,
+        float2 layerSizePx,
+        float2 blurUV,
+        float sigmaPx,
+        float2 fragPx
+    ) {
+        float extentPx = length(blurUV * layerSizePx);
+        if (extentPx < 0.75) {
+            return screenBlurSample(tex, s, uv, layerSizePx, sigmaPx);
+        }
+        // ~1 tap per 2.5 px of streak: with the dithered phase the wider
+        // spacing is invisible (noise, not ghosts), and the lower cap keeps
+        // a worst-case full-frame 4-tap-direction blur comfortably inside a
+        // 60 fps GPU budget — a backed-up compositor reads as "laggy
+        // follow" long before it reads as "lower blur quality".
+        int taps = clamp(int(extentPx / 2.5), 9, 31);
+        float noise = gradientNoise(fragPx);
+        float2 dirPx = normalize(blurUV * layerSizePx);
+        float2 perpUV = float2(-dirPx.y, dirPx.x) * 0.75 / layerSizePx;
+        float4 acc = float4(0.0);
+        float wSum = 0.0;
+        for (int i = 0; i < taps; ++i) {
+            float t = ((float(i) + noise) / float(taps)) * 2.0 - 1.0;
+            float w = saturate((1.0 - abs(t)) * 4.0);
+            float pj = fract(noise + float(i) * 0.61803398875) * 2.0 - 1.0;
+            acc += tex.sample(s, uv + blurUV * t + perpUV * pj) * w;
+            wSum += w;
+        }
         return acc / wSum;
     }
 
@@ -919,7 +1051,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
         constant LayerUniforms &u [[buffer(0)]]
     ) {
         constexpr sampler s(address::clamp_to_edge, filter::linear);
-        float4 c = screenBlurSample(tex, s, in.texCoord, u.layerSizePx, u.screenBlurSigmaPx);
+        float4 c = screenMotionBlurSample(tex, s, in.texCoord, u.layerSizePx, u.motionBlurUV, u.screenBlurSigmaPx, in.position.xy);
         c.a *= layerAlphaMask(in, u) * u.opacity;
         return c;
     }
@@ -935,15 +1067,23 @@ public final class MetalRenderGraph: @unchecked Sendable {
     // Cursor pass. Multi-tap motion blur aligned to the velocity vector:
     // a stationary cursor (blurOffsetUV == 0) reduces to a single sample,
     // which is bit-identical to the old bgraFragment-on-cursor path. A
-    // fast-moving cursor reads as a soft streak along the motion vector.
-    // 9 taps with triangular weighting — cheap (one sprite is tiny) and
-    // enough to avoid step-banding at moderate kernel sizes.
+    // fast-moving cursor reads as a long streak along the motion vector
+    // with a bright Gaussian-weighted core — the cursor head stays
+    // legible inside the trail no matter how long the streak gets, which
+    // is what lets the kernel extent run to ±1 sprite-UV without turning
+    // into a uniform smear. Adaptive dithered taps avoid step-banding at
+    // the larger extents. clamp_to_zero (not clamp_to_edge): the quad is padded past
+    // the sprite bounds so the trail has room to render, and out-of-sprite
+    // taps must come back transparent rather than smearing edge texels.
+    // Symmetric around the cursor position so the rendered cursor stays
+    // anchored to its reported (x,y) rather than drifting in the motion
+    // direction.
     fragment float4 cursorFragment(
         VertexOut in [[stage_in]],
         texture2d<float, access::sample> tex [[texture(0)]],
         constant CursorUniforms &u [[buffer(0)]]
     ) {
-        constexpr sampler s(address::clamp_to_edge, filter::linear);
+        constexpr sampler s(address::clamp_to_zero, filter::linear);
         float2 offset = u.blurOffsetUV;
         // Cheap escape hatch: if velocity is small enough that the kernel
         // collapses below a third of a texel, skip the taps entirely.
@@ -953,20 +1093,32 @@ public final class MetalRenderGraph: @unchecked Sendable {
             c.a *= u.opacity;
             return c;
         }
-        // 9 symmetric taps at i ∈ {-4..+4}/4, triangular weights 1,2,3,4,5,4,3,2,1.
-        // Symmetric around the cursor position so the rendered cursor stays
-        // anchored to its reported (x,y) rather than drifting in the motion
-        // direction.
-        const int N = 9;
-        const float weights[9] = {1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0};
-        float weightSum = 25.0; // 1+2+3+4+5+4+3+2+1
+        // Adaptive tap count (~1 tap per px of streak, 13–61 — the sprite
+        // quad is tiny, so even the dense end is cheap) with per-pixel
+        // dithered tap phase: a fixed kernel paints N discrete ghost
+        // cursors along the streak (harsh/"static-ey"); dithering melts
+        // them into one continuous soft smear. Gaussian weights
+        // exp(-2.0·t²) keep a bright legible core at the cursor's true
+        // position with a creamy fading tail.
+        float extentPx = length(offset * u.layerSizePx);
+        int taps = clamp(int(extentPx), 13, 61);
+        float noise = fract(52.9829189 * fract(0.06711056 * in.position.x + 0.00583715 * in.position.y));
         float4 acc = float4(0.0);
-        for (int i = 0; i < N; ++i) {
-            float u_i = (float(i) - 4.0) / 4.0; // [-1, 1]
-            float2 uv = in.texCoord + offset * u_i;
-            acc += tex.sample(s, uv) * weights[i];
+        float wSum = 0.0;
+        for (int i = 0; i < taps; ++i) {
+            float t = ((float(i) + noise) / float(taps)) * 2.0 - 1.0;
+            float w = exp(-2.0 * t * t);
+            float2 uv = in.texCoord + offset * t;
+            acc += tex.sample(s, uv) * w;
+            wSum += w;
         }
-        acc /= weightSum;
+        acc /= wSum;
+        // Sharp-head guarantee: blend a crisp sample back over the streak,
+        // weighted by its own alpha. No matter how long the trail gets, the
+        // cursor at its true position renders ≥60% solid — the trail smears,
+        // the pointer itself never disappears.
+        float4 head = tex.sample(s, in.texCoord);
+        acc = mix(acc, head, head.a * 0.6);
         acc.a *= u.opacity;
         return acc;
     }
@@ -984,8 +1136,8 @@ public final class MetalRenderGraph: @unchecked Sendable {
         // would amplify quantisation error around chroma boundaries;
         // averaging in YCbCr space is exactly the right place since both
         // planes share the same UV.
-        float4 yAcc = screenBlurSample(yPlane, s, in.texCoord, u.layerSizePx, u.screenBlurSigmaPx);
-        float4 cbcrAcc = screenBlurSample(cbcrPlane, s, in.texCoord, u.layerSizePx, u.screenBlurSigmaPx);
+        float4 yAcc = screenMotionBlurSample(yPlane, s, in.texCoord, u.layerSizePx, u.motionBlurUV, u.screenBlurSigmaPx, in.position.xy);
+        float4 cbcrAcc = screenMotionBlurSample(cbcrPlane, s, in.texCoord, u.layerSizePx, u.motionBlurUV, u.screenBlurSigmaPx, in.position.xy);
         float y = yAcc.r;
         float2 cbcr = cbcrAcc.rg;
 

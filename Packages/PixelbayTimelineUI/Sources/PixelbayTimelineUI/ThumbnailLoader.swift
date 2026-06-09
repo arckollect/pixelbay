@@ -2,6 +2,7 @@
 import AVFoundation
 import AppKit
 import CoreGraphics
+import ImageIO
 import Foundation
 import OSLog
 
@@ -102,8 +103,11 @@ public actor ThumbnailLoader {
             )
         }
         if let diskKey, let data = diskCache.read(key: diskKey) {
-            store(key, data)
-            return data
+            if Self.isDecodableImageData(data) {
+                store(key, data)
+                return data
+            }
+            log.notice("thumbnail disk cache returned undecodable PNG for \(url.lastPathComponent, privacy: .public); regenerating")
         }
 
         let asset = AVURLAsset(url: url)
@@ -166,6 +170,11 @@ public actor ThumbnailLoader {
     private static func pngData(from cgImage: CGImage) -> Data? {
         let rep = NSBitmapImageRep(cgImage: cgImage)
         return rep.representation(using: .png, properties: [:])
+    }
+
+    static func isDecodableImageData(_ data: Data) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return false }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil) != nil
     }
 }
 #endif

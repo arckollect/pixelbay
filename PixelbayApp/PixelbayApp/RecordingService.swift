@@ -235,7 +235,16 @@ final class RecordingService {
         } catch {
             log.error("start() failed: \(String(describing: error), privacy: .public)")
             phase = .failed(message: humanReadable(error))
+            let failedBundleURL = ownsBundle ? bundle?.url : nil
             tearDown()
+            if let failedBundleURL {
+                do {
+                    try FileManager.default.removeItem(at: failedBundleURL)
+                    log.info("removed failed startup bundle url=\(failedBundleURL.path, privacy: .public)")
+                } catch {
+                    log.error("failed startup bundle delete failed url=\(failedBundleURL.path, privacy: .public): \(String(describing: error), privacy: .public)")
+                }
+            }
         }
     }
 
@@ -381,14 +390,22 @@ final class RecordingService {
         // mid-flight (which the capture API doesn't expose). The summary is
         // discarded.
         if let session {
-            _ = try? await session.stop()
+            do {
+                _ = try await session.stop()
+            } catch {
+                log.error("discard/restart session stop failed: \(String(describing: error), privacy: .public)")
+            }
         }
         if let logger = clickLogger {
             _ = await logger.stop()
         }
         tearDown()
         if let bundleURL {
-            try? FileManager.default.removeItem(at: bundleURL)
+            do {
+                try FileManager.default.removeItem(at: bundleURL)
+            } catch {
+                log.error("discard/restart bundle delete failed url=\(bundleURL.path, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
         }
     }
 
@@ -403,10 +420,21 @@ final class RecordingService {
         ).appendingPathComponent("Pixelbay/Recordings", isDirectory: true)
         try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
         let stamp = RecordingService.filenameTimestamp.string(from: Date())
-        let bundleURL = appSupport.appendingPathComponent("rec-\(stamp).pixelbay")
         let store = ProjectBundleStore()
         let project = Project(name: "Recording \(stamp)")
-        return try store.createBundle(at: bundleURL, project: project)
+        var suffix = 0
+        while true {
+            let name = suffix == 0
+                ? "rec-\(stamp).pixelbay"
+                : "rec-\(stamp)-\(suffix).pixelbay"
+            let bundleURL = appSupport.appendingPathComponent(name)
+            do {
+                return try store.createBundle(at: bundleURL, project: project)
+            } catch ProjectBundleError.bundleAlreadyExists {
+                suffix += 1
+                continue
+            }
+        }
     }
 
     private func writeProjectAndReport(
@@ -443,7 +471,7 @@ final class RecordingService {
 
         var screenAsset = MediaAsset(
             kind: .display,
-            relativePath: relativePath(of: summary.outputs.screenURL, in: bundle),
+            relativePath: try relativePath(of: summary.outputs.screenURL, in: bundle),
             captureStart: summary.captureStart,
             nativeDuration: summary.screenDuration ?? .zero
         )
@@ -465,7 +493,7 @@ final class RecordingService {
         if let camURL = summary.outputs.camURL {
             let camAsset = MediaAsset(
                 kind: .webcam,
-                relativePath: relativePath(of: camURL, in: bundle),
+                relativePath: try relativePath(of: camURL, in: bundle),
                 captureStart: summary.captureStart,
                 nativeDuration: summary.camDuration ?? .zero
             )
@@ -488,7 +516,7 @@ final class RecordingService {
            micDuration.seconds > 0 {
             let micAsset = MediaAsset(
                 kind: .microphone,
-                relativePath: relativePath(of: micURL, in: bundle),
+                relativePath: try relativePath(of: micURL, in: bundle),
                 captureStart: summary.captureStart,
                 nativeDuration: micDuration
             )
@@ -503,7 +531,7 @@ final class RecordingService {
         if let sysURL = summary.outputs.sysAudioURL {
             let sysAsset = MediaAsset(
                 kind: .systemAudio,
-                relativePath: relativePath(of: sysURL, in: bundle),
+                relativePath: try relativePath(of: sysURL, in: bundle),
                 captureStart: summary.captureStart,
                 nativeDuration: summary.sysAudioDuration ?? .zero
             )
@@ -617,13 +645,15 @@ final class RecordingService {
         return .zero
     }
 
-    private func relativePath(of url: URL, in bundle: ProjectBundle) -> String {
+    private func relativePath(of url: URL, in bundle: ProjectBundle) throws -> String {
         let bundlePath = bundle.url.standardizedFileURL.path
         let abs = url.standardizedFileURL.path
         if abs.hasPrefix(bundlePath + "/") {
             return String(abs.dropFirst(bundlePath.count + 1))
         }
-        return abs
+        throw CaptureError.bundleUnavailable(
+            message: "recording output was written outside the project bundle: \(abs)"
+        )
     }
 
     private func tearDown() {

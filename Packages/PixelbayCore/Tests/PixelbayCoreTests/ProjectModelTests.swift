@@ -48,6 +48,99 @@ final class ProjectModelTests: XCTestCase {
         XCTAssertEqual(decoded.sourceSegments.count, 1)
     }
 
+    func test_decodeLegacyProject_missingDefaultedFields_usesModelDefaults() throws {
+        let json = """
+        {
+          "schemaVersion": 5,
+          "id": "project-legacy",
+          "name": "Legacy",
+          "createdAt": "2026-05-01T00:00:00Z",
+          "modifiedAt": "2026-05-01T00:00:00Z",
+          "assets": [
+            {
+              "id": "asset-screen",
+              "kind": "display",
+              "relativePath": "media/screen.mov",
+              "nativeDuration": { "value": 6000, "timescale": 600 }
+            }
+          ],
+          "tracks": [
+            {
+              "id": "track-screen",
+              "kind": "screen",
+              "name": "Screen",
+              "clips": [
+                {
+                  "id": "clip-screen",
+                  "assetID": "asset-screen",
+                  "sourceRange": {
+                    "start": { "value": 0, "timescale": 600 },
+                    "duration": { "value": 6000, "timescale": 600 }
+                  },
+                  "timelineRange": {
+                    "start": { "value": 0, "timescale": 600 },
+                    "duration": { "value": 6000, "timescale": 600 }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let project = try decoder.decode(Project.self, from: json)
+
+        XCTAssertEqual(project.bundleVersion, currentBundleVersion)
+        XCTAssertTrue(project.sourceSegments.isEmpty)
+        XCTAssertEqual(project.layout, .phase1Default)
+        XCTAssertTrue(project.effects.isEmpty)
+        XCTAssertEqual(project.cursorSettings, .default)
+        XCTAssertNil(project.scenesSession)
+        XCTAssertEqual(project.extras, [:])
+        XCTAssertEqual(project.assets.first?.extras, [:])
+        XCTAssertFalse(project.tracks[0].muted)
+        XCTAssertFalse(project.tracks[0].hidden)
+        XCTAssertEqual(project.tracks[0].extras, [:])
+        let clip = project.tracks[0].clips[0]
+        XCTAssertEqual(clip.volume, 1)
+        XCTAssertEqual(clip.speed, 1)
+        XCTAssertTrue(clip.enabled)
+        XCTAssertEqual(clip.extras, [:])
+    }
+
+    func test_decodeLegacySourceSegment_missingExtras_usesEmptyExtras() throws {
+        let json = """
+        {
+          "assetID": "asset-screen",
+          "timelineRange": {
+            "start": { "value": 0, "timescale": 600 },
+            "duration": { "value": 6000, "timescale": 600 }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let segment = try JSONDecoder().decode(SourceSegment.self, from: json)
+
+        XCTAssertEqual(segment.assetID.rawValue, "asset-screen")
+        XCTAssertEqual(segment.extras, [:])
+    }
+
+    func test_decodeLegacyCursorSettings_missingDefaultedFields_usesDefaults() throws {
+        let json = """
+        {
+          "isEnabled": false
+        }
+        """.data(using: .utf8)!
+
+        let settings = try JSONDecoder().decode(CursorSettings.self, from: json)
+
+        XCTAssertFalse(settings.isEnabled)
+        XCTAssertEqual(settings.scale, 3.25)
+        XCTAssertEqual(settings.extras, [:])
+    }
+
     // MARK: - Migrator chain
 
     func test_migratorChain_advancesV1ToCurrent_withoutDataLoss() throws {

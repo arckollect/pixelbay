@@ -19,8 +19,8 @@ private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "Previ
 // track. Per-clip volume becomes setVolumeRamp segments on an
 // AVMutableAudioMix bound to the matching track.
 //
-// Output size is taken from the screen video's natural size, capped at
-// 1920×1080 — matches what LiveCaptureBackend records (HANDOFF §6.5).
+// Output size is taken from the screen video's natural size, capped at the
+// current high-quality export target.
 
 public struct PreviewComposition: @unchecked Sendable {
     public var composition: AVComposition
@@ -69,8 +69,39 @@ public enum PreviewCompositionError: Error, LocalizedError {
 }
 
 public enum PreviewCompositionBuilder {
-    // Default Phase 1 output size; capped at 1920×1080 per HANDOFF §6.5.
-    public static let defaultOutputSize = CGSize(width: 1920, height: 1080)
+    // Default high-quality output size. 1080p was visibly soft for Retina
+    // screen recordings after the synthetic cursor/compositor pass, so the
+    // edit/export path now keeps up to UHD detail when the source has it.
+    public static let defaultOutputSize = CGSize(width: 3840, height: 2160)
+
+    // Cap for the LIVE PREVIEW composition (export keeps `defaultOutputSize`).
+    // The preview pane is ~1300 pt; compositing every frame at full UHD made
+    // the GPU pay 4K-blur cost for pixels nobody sees (dropped frames during
+    // fast cursor-follow pans read as "the follow is laggy") and quadrupled
+    // the in-process destination-buffer pool. 1620p stays Retina-sharp at
+    // editor pane sizes while cutting per-frame pixel cost ~44 %.
+    public static let previewMaxOutputSize = CGSize(width: 2880, height: 1620)
+
+    // Follow-cursor zoom framing. Keep the visible cursor on the raw capture
+    // path, but let the zoom camera glide behind fast moves so cross-screen
+    // pans are readable instead of instantly chasing the pointer.
+    static let zoomFollowSafeZoneFraction: Double = EffectKeyframe.defaultZoomFollowSafeZoneFraction
+    // Tight spring — the smoothness lives in the ANTICIPATED TARGET PATH
+    // (window-averaged, below), not in the spring. The old soft taus
+    // (0.16/0.12) were tuned when the spring chased the raw cursor and had
+    // to do the smoothing itself; chasing the already-smooth anticipated
+    // path through a soft spring double-smooths and reads as "the camera is
+    // slow / dragging behind". Tight taus make the camera hug the smooth
+    // path with near-zero added lag.
+    static let zoomFollowTauRelaxed: Double = 0.07
+    static let zoomFollowTauTight: Double = 0.04
+    static let zoomFollowMaxAnchorSpeed: Double = EffectKeyframe.defaultZoomFollowMaxAnchorSpeed
+    /// Half-width of the anticipated-target triangular window. Rendering is
+    /// offline, so the camera target at time t averages the cursor's REAL
+    /// path over [t − 0.25 s, t + 0.25 s] (plus the keyframe's anticipation
+    /// lead) — the camera eases toward a sweep's destination before the
+    /// cursor covers the distance instead of being dragged behind it.
+    static let zoomFollowAnticipationHalfWindow: Double = 0.25
 
     /// Builds a PreviewComposition from a Project. `bundleURL` is the
     /// `.pixelbay` bundle's directory — `MediaAsset.relativePath`
@@ -93,7 +124,8 @@ public enum PreviewCompositionBuilder {
         wallpaperSource: WallpaperSource? = nil,
         wallpaperImageProvider: WallpaperImageProvider? = nil,
         cursorTrajectory: [MouseTrajectorySample]? = nil,
-        cursorSprite: CursorSpriteData? = nil
+        cursorSprite: CursorSpriteData? = nil,
+        maxOutputSize: CGSize = PreviewCompositionBuilder.defaultOutputSize
     ) async throws -> PreviewComposition {
         let composition = AVMutableComposition()
 
@@ -160,7 +192,7 @@ public enum PreviewCompositionBuilder {
         guard screenAdded else { throw PreviewCompositionError.noScreenAsset }
 
         let duration = maxTimelineEnd
-        let outputSize = computeOutputSize(from: screenSize)
+        let outputSize = computeOutputSize(from: screenSize, cappedTo: maxOutputSize)
         let videoComposition = await buildVideoComposition(
             project: project,
             outputSize: outputSize,
@@ -220,18 +252,19 @@ public enum PreviewCompositionBuilder {
         } else {
             backgroundImage = nil
         }
-        // Phase 3d iteration 2 — sprite and anchor share the SAME upstream
-        // smoothing (`spriteSmoothed`, τ≈0.02 EMA), so the only cursor-vs-camera
-        // lag is `anchorFollow`'s spring (τRelaxed=0.05 / safeZone=0.30).
-        let spriteMaster: [MouseTrajectorySample]
+        // Raw cursor samples remain the source of truth for timing, hover
+        // states, and click positions. The rendered synthetic cursor gets a
+        // zero-phase polish later, so fast sweeps read smoothly without a
+        // temporal catch-up delay.
+        let cursorMaster: [MouseTrajectorySample]
         if let master = cursorTrajectory, !master.isEmpty {
-            spriteMaster = MouseTrajectory.spriteSmoothed(master)
+            cursorMaster = master
         } else {
-            spriteMaster = []
+            cursorMaster = []
         }
         let effects = applyCursorTrajectory(
             to: project.effects,
-            cursorTrajectory: spriteMaster.isEmpty ? nil : spriteMaster
+            cursorTrajectory: cursorMaster.isEmpty ? nil : cursorMaster
         )
         // Phase 3c — only enable the synthetic cursor pass when the screen
         // asset was captured with `showsCursor = false`. Legacy recordings
@@ -240,7 +273,7 @@ public enum PreviewCompositionBuilder {
             asset.kind == .display && asset.cursorRenderedSynthetically
         }
         let cursorTrajectoryForRender: [MouseTrajectorySample] =
-            cursorSyntheticallyRendered ? spriteMaster : []
+            cursorSyntheticallyRendered ? MouseTrajectory.spritePolished(cursorMaster) : []
         return makeVideoComposition(
             duration: duration,
             outputSize: outputSize,
@@ -387,7 +420,17 @@ public enum PreviewCompositionBuilder {
                 duration: cmTime(clip.sourceRange.duration)
             )
             let timelineStart = cmTime(clip.timelineRange.start)
+            let timelineDuration = cmTime(clip.timelineRange.duration)
             try mutableTrack.insertTimeRange(sourceRange, of: sourceTrack, at: timelineStart)
+            if timelineDuration > .zero
+                && CMTimeCompare(sourceRange.duration, timelineDuration) != 0
+                && clip.speed != 1.0
+            {
+                mutableTrack.scaleTimeRange(
+                    CMTimeRange(start: timelineStart, duration: sourceRange.duration),
+                    toDuration: timelineDuration
+                )
+            }
             inserted = true
             // A muted track plays silent regardless of per-clip volume — a
             // single flat 0 volume is applied below (after the loop), so we
@@ -402,7 +445,7 @@ public enum PreviewCompositionBuilder {
             // full audio mix for that track.
             var rampRange = CMTimeRange(
                 start: timelineStart,
-                duration: cmTime(clip.timelineRange.duration)
+                duration: timelineDuration
             )
             if let prevEnd = previousRampEnd, CMTimeCompare(rampRange.start, prevEnd) < 0 {
                 let clampedStart = prevEnd
@@ -447,23 +490,20 @@ public enum PreviewCompositionBuilder {
     /// range, so without re-slicing the evaluator clamps to the last
     /// stored sample for the extended portion.
     ///
-    /// **Input is assumed pre-smoothed by the caller.** `build()` runs
-    /// `MouseTrajectory.spriteSmoothed` (τ≈0.02 EMA) once for both the
-    /// cursor-sprite render path AND the anchor path. This helper only
-    /// touches the anchor path — it receives the spriteSmoothed output as
-    /// `cursorTrajectory` and produces per-keyframe trajectory slices for
-    /// `EffectEvaluator.zoomCenter` to consume.
+    /// `build()` passes the raw cursor sidecar path here. This helper only
+    /// touches the zoom-anchor path; rendered cursor polish is applied
+    /// separately and never feeds back into camera targeting.
     ///
-    /// **Anchor follows via continuous soft spring (Phase 3d iter 2).** After
-    /// windowing each cursor-follow keyframe's slice, the slice is routed
-    /// through `MouseTrajectory.anchorFollow` with NO deadzone, 30 % safe
-    /// zone, and NO lookahead. Spring τ ramps from `tauRelaxed = 0.05 s`
-    /// near viewport centre to `tauTight = 0.04 s` near the safe-zone wall.
-    /// Sharing `spriteSmoothed` between sprite and anchor (instead of the
-    /// earlier `cameraDamped`/`spriteSmoothed` split) means the only
-    /// cursor-to-camera lag is the spring itself — at v=0.2 norm/s the
-    /// steady-state lag is ≈ 0.02 norm-units, well inside the 0.075 safe-
-    /// zone half-width, so the hard clamp almost never bites.
+    /// **Anchor follows an anticipated path via continuous soft spring.**
+    /// After windowing each cursor-follow keyframe's slice, an anticipated
+    /// target path is computed (`MouseTrajectory.anticipatedTargets` — a
+    /// forward-biased triangular window over the cursor's known future) and
+    /// the slice is routed through `MouseTrajectory.anchorFollow` with NO
+    /// deadzone and a default 48 % safe zone, springing toward those
+    /// targets. Spring τ ramps from `tauRelaxed = 0.16 s` near viewport
+    /// centre to `tauTight = 0.12 s` near the safe-zone wall. The visible
+    /// cursor is not smoothed here; only the camera anchor glides, and its
+    /// lag is bounded by the safe-zone barrier against the real cursor.
     ///
     /// Pinned (gesture) keyframes still short-circuit before this stage —
     /// they want a locked anchor, not a deadzone follow.
@@ -506,17 +546,32 @@ public enum PreviewCompositionBuilder {
                 next.trajectory = nil
                 return next
             }
-            // Phase 3d — anchor follows via the tightened continuous soft
-            // spring with NO lookahead. The 3c per-sample decel confidence
-            // is no longer plumbed because the lookahead it gated is gone;
-            // the spring's tight tauRelaxed (0.08 s) catches up on its own
-            // and predicting forward was making cursor lead worse, not
-            // better.
+            // The zoom camera uses a configurable safe zone and slower spring than
+            // the cursor sprite path. Fast cursor moves can cross the frame
+            // naturally while the zoom window glides after them.
+            //
+            // The spring's target is the offline ANTICIPATED path — a
+            // forward-biased window average of the cursor's real future
+            // (rendering is post-hoc, so the future is known). This replaced
+            // the old velocity-extrapolated, decel-gated lookahead: the
+            // window average leads sweeps, corner-cuts direction changes,
+            // and converges onto landing points by construction, while the
+            // hard safe-zone barrier inside anchorFollow still keys off the
+            // real cursor so anticipation can never push it out of frame.
+            let targets = MouseTrajectory.anticipatedTargets(
+                windowed,
+                halfWindowSeconds: zoomFollowAnticipationHalfWindow,
+                leadSeconds: kf.zoomFollowLookaheadSeconds
+            )
             let followed = MouseTrajectory.anchorFollow(
                 windowed,
                 zoomFactor: kf.zoomFactor,
                 deadzoneFraction: 0.0,
-                lookaheadSeconds: 0.0
+                safeZoneFraction: kf.zoomFollowSafeZoneFraction,
+                tauRelaxed: zoomFollowTauRelaxed,
+                tauTight: zoomFollowTauTight,
+                maxAnchorSpeed: kf.zoomFollowMaxAnchorSpeed,
+                anticipatedTargets: targets
             )
             var next = kf
             next.trajectory = followed
@@ -524,11 +579,14 @@ public enum PreviewCompositionBuilder {
         }
     }
 
-    private static func computeOutputSize(from screenSize: CGSize) -> CGSize {
-        let maxWidth = defaultOutputSize.width
-        let maxHeight = defaultOutputSize.height
+    private static func computeOutputSize(
+        from screenSize: CGSize,
+        cappedTo maxSize: CGSize = PreviewCompositionBuilder.defaultOutputSize
+    ) -> CGSize {
+        let maxWidth = maxSize.width
+        let maxHeight = maxSize.height
         guard screenSize.width > 0, screenSize.height > 0 else {
-            return defaultOutputSize
+            return maxSize
         }
         let widthScale = maxWidth / screenSize.width
         let heightScale = maxHeight / screenSize.height

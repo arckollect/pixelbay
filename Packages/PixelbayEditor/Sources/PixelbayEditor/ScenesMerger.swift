@@ -68,7 +68,8 @@ public enum ScenesMerger {
         // Asset lookup table — Project.locateClip-style helper, but for assets
         // by ID. Built once up front because every take iteration walks it.
         let assetByID: [MediaAssetID: MediaAsset] = Dictionary(
-            uniqueKeysWithValues: project.assets.map { ($0.id, $0) }
+            project.assets.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
         )
 
         for scene in session.scenes {
@@ -147,17 +148,18 @@ public enum ScenesMerger {
                 let clampedSeconds = min(assetSeconds, sceneDurationSeconds)
                 let sourceStartSeconds = max(0, assetSeconds - clampedSeconds)
                 let sourceStart = RationalTime.seconds(sourceStartSeconds)
-                let clipDuration = RationalTime.seconds(clampedSeconds)
+                let sourceDuration = RationalTime.seconds(clampedSeconds)
+                let timelineDuration = RationalTime.seconds(sceneDurationSeconds)
 
                 let clip = Clip(
                     assetID: asset.id,
                     sourceRange: TimeRange(
                         start: sourceStart,
-                        duration: clipDuration
+                        duration: sourceDuration
                     ),
                     timelineRange: TimeRange(
                         start: timelineStart,
-                        duration: clipDuration
+                        duration: timelineDuration
                     ),
                     extras: clipExtras
                 )

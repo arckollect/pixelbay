@@ -15,8 +15,8 @@ import Foundation
 //     fills the output (the screen is hidden, or shrunk to the cam slot).
 //
 // During the ease-in / ease-out windows the effect strength interpolates
-// from 0 → 1 (cubic-ease for smoothness). Outside the keyframe's window
-// the effect contributes 0 and is skipped.
+// from 0 → 1 (quintic smoothstep for smoothness). Outside the keyframe's
+// window the effect contributes 0 and is skipped.
 
 public struct EffectKeyframeID: Hashable, Codable, Sendable, RawRepresentable {
     public let rawValue: String
@@ -88,9 +88,10 @@ public struct ZoomTrajectorySample: Codable, Sendable, Equatable {
 ///
 /// `easeIn` + `easeOut` are durations *inside* `timelineRange` — i.e. the
 /// effect ramps from 0 → 1 over the first `easeIn`, holds at 1 for the
-/// middle, then ramps 1 → 0 over the final `easeOut`. Both default to
-/// 200ms (a snappy but not jarring snap). Total `timelineRange.duration`
-/// must be ≥ `easeIn + easeOut`.
+/// middle, then ramps 1 → 0 over the final `easeOut`. Zoom creation uses
+/// `EffectKeyframe.defaultZoomEaseIn` / `defaultZoomEaseOut` so manual,
+/// click-generated, and gesture-generated zooms share the same feel.
+/// Total `timelineRange.duration` must be ≥ `easeIn + easeOut`.
 ///
 /// For `.zoom`: `zoomFactor` ≥ 1; `centerX` / `centerY` ∈ [0, 1] in the
 /// screen layer's local space (0,0 = top-left, 1,1 = bottom-right).
@@ -99,6 +100,18 @@ public struct ZoomTrajectorySample: Codable, Sendable, Equatable {
 /// the webcam fills the screen slot and (depending on `swapStyle`) either
 /// hides the original screen or shrinks it to the webcam slot.
 public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
+    public static let defaultZoomEaseIn: RationalTime = .seconds(0.55)
+    public static let defaultZoomEaseOut: RationalTime = .seconds(0.55)
+    public static let defaultZoomFollowSafeZoneFraction: Double = 0.48
+    public static let defaultZoomFollowMotionBlur: Double = 1.0
+    // 2.20 (was 0.90): the speed cap zeroes the spring's velocity every
+    // sample it bites, so a low cap turns fast sweeps into a mechanical
+    // clamp-drag-clamp stutter that reads as "the follow is delayed". With
+    // the anticipated-path spring the camera's speed profile is already
+    // smooth; the cap is now just a teleport guard.
+    public static let defaultZoomFollowMaxAnchorSpeed: Double = 2.20
+    public static let defaultZoomFollowLookaheadSeconds: Double = 0.07
+
     public let id: EffectKeyframeID
     public var kind: EffectKind
     public var timelineRange: TimeRange
@@ -138,8 +151,8 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
         zoomFactor: Double = 1.5,
         centerX: Double = 0.5,
         centerY: Double = 0.5,
-        easeIn: RationalTime = .seconds(0.2),
-        easeOut: RationalTime = .seconds(0.2),
+        easeIn: RationalTime = EffectKeyframe.defaultZoomEaseIn,
+        easeOut: RationalTime = EffectKeyframe.defaultZoomEaseOut,
         trajectory: [ZoomTrajectorySample]? = nil,
         origin: ZoomOrigin = .auto,
         anchorMode: ZoomAnchorMode = .followCursor,
@@ -236,6 +249,101 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
         self.origin = try c.decodeIfPresent(ZoomOrigin.self, forKey: .origin) ?? .auto
         self.anchorMode = try c.decodeIfPresent(ZoomAnchorMode.self, forKey: .anchorMode) ?? .followCursor
         self.followLeadSeconds = try c.decodeIfPresent(Double.self, forKey: .followLeadSeconds) ?? 0
-        self.extras = try c.decode([String: JSONValue].self, forKey: .extras)
+        self.extras = try c.decodeIfPresent([String: JSONValue].self, forKey: .extras) ?? [:]
+    }
+}
+
+public extension EffectKeyframe {
+    static let zoomFollowSafeZoneRange: ClosedRange<Double> = 0.28...0.80
+    static let zoomFollowMotionBlurRange: ClosedRange<Double> = 0.0...2.5
+    static let zoomFollowMaxAnchorSpeedRange: ClosedRange<Double> = 0.35...3.00
+    static let zoomFollowLookaheadSecondsRange: ClosedRange<Double> = 0.0...0.20
+
+    /// Central region, as a fraction of the visible zoomed viewport, where the
+    /// cursor can move before the follow camera is forced to catch up. Smaller
+    /// values feel tighter; larger values allow more Screen Studio-style drift.
+    var zoomFollowSafeZoneFraction: Double {
+        get {
+            guard case .double(let value)? = extras["zoomFollowSafeZoneFraction"] else {
+                return Self.defaultZoomFollowSafeZoneFraction
+            }
+            return value.clamped(to: Self.zoomFollowSafeZoneRange)
+        }
+        set {
+            let clamped = newValue.clamped(to: Self.zoomFollowSafeZoneRange)
+            if abs(clamped - Self.defaultZoomFollowSafeZoneFraction) < 0.000_001 {
+                extras["zoomFollowSafeZoneFraction"] = nil
+            } else {
+                extras["zoomFollowSafeZoneFraction"] = .double(clamped)
+            }
+        }
+    }
+
+    /// Multiplier for zoom-follow pan blur. `0` disables follow blur;
+    /// `1` uses the tuned default; values above 1 add more softness on fast
+    /// zoom camera motion while stationary held zooms remain crisp.
+    var zoomFollowMotionBlur: Double {
+        get {
+            guard case .double(let value)? = extras["zoomFollowMotionBlur"] else {
+                return Self.defaultZoomFollowMotionBlur
+            }
+            return value.clamped(to: Self.zoomFollowMotionBlurRange)
+        }
+        set {
+            let clamped = newValue.clamped(to: Self.zoomFollowMotionBlurRange)
+            if abs(clamped - Self.defaultZoomFollowMotionBlur) < 0.000_001 {
+                extras["zoomFollowMotionBlur"] = nil
+            } else {
+                extras["zoomFollowMotionBlur"] = .double(clamped)
+            }
+        }
+    }
+
+    /// Maximum zoom-camera pan speed in normalized screen-units per second.
+    /// Lower values glide more and can trail farther during fast cursor sweeps;
+    /// higher values catch up more aggressively.
+    var zoomFollowMaxAnchorSpeed: Double {
+        get {
+            guard case .double(let value)? = extras["zoomFollowMaxAnchorSpeed"] else {
+                return Self.defaultZoomFollowMaxAnchorSpeed
+            }
+            return value.clamped(to: Self.zoomFollowMaxAnchorSpeedRange)
+        }
+        set {
+            let clamped = newValue.clamped(to: Self.zoomFollowMaxAnchorSpeedRange)
+            if abs(clamped - Self.defaultZoomFollowMaxAnchorSpeed) < 0.000_001 {
+                extras["zoomFollowMaxAnchorSpeed"] = nil
+            } else {
+                extras["zoomFollowMaxAnchorSpeed"] = .double(clamped)
+            }
+        }
+    }
+
+    /// Anticipation lead, in seconds. Biases the camera's anticipated-target
+    /// window (`MouseTrajectory.anticipatedTargets`) into the cursor's future
+    /// path, so the camera starts moving toward a sweep's destination before
+    /// the cursor arrives. 0 gives pure zero-phase smoothing; higher values
+    /// make the camera visibly lead fast motion.
+    var zoomFollowLookaheadSeconds: Double {
+        get {
+            guard case .double(let value)? = extras["zoomFollowLookaheadSeconds"] else {
+                return Self.defaultZoomFollowLookaheadSeconds
+            }
+            return value.clamped(to: Self.zoomFollowLookaheadSecondsRange)
+        }
+        set {
+            let clamped = newValue.clamped(to: Self.zoomFollowLookaheadSecondsRange)
+            if abs(clamped - Self.defaultZoomFollowLookaheadSeconds) < 0.000_001 {
+                extras["zoomFollowLookaheadSeconds"] = nil
+            } else {
+                extras["zoomFollowLookaheadSeconds"] = .double(clamped)
+            }
+        }
+    }
+}
+
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
     }
 }

@@ -73,6 +73,29 @@ final class LayoutPresetTests: XCTestCase {
         )))
     }
 
+    func test_decodeLegacyLayout_missingDefaultedFields_usesLayoutDefaults() throws {
+        let json = """
+        {
+          "mode": {
+            "kind": "pip",
+            "position": "bottomRight",
+            "size": "medium"
+          },
+          "background": { "kind": "none" }
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(LayoutPreset.self, from: json)
+
+        XCTAssertEqual(decoded.mode, .pip(position: .bottomRight, size: .medium))
+        XCTAssertEqual(decoded.camShape, .rectangle)
+        XCTAssertEqual(decoded.camCornerRadius, 12)
+        XCTAssertEqual(decoded.background, .none)
+        XCTAssertEqual(decoded.padding, 0)
+        XCTAssertEqual(decoded.screenCornerRadius, 0)
+        XCTAssertEqual(decoded.extras, [:])
+    }
+
     // MARK: - Migrator v1 → v2
 
     func test_migrator_addsLayoutPresetToV1Document() throws {
@@ -173,14 +196,14 @@ final class LayoutPresetTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func roundTripMode(_ mode: LayoutMode, file: StaticString = #file, line: UInt = #line) throws {
+    private func roundTripMode(_ mode: LayoutMode, file: StaticString = #filePath, line: UInt = #line) throws {
         let preset = LayoutPreset(mode: mode)
         let data = try JSONEncoder().encode(preset)
         let decoded = try JSONDecoder().decode(LayoutPreset.self, from: data)
         XCTAssertEqual(decoded, preset, file: file, line: line)
     }
 
-    private func roundTripBackground(_ background: Background, file: StaticString = #file, line: UInt = #line) throws {
+    private func roundTripBackground(_ background: Background, file: StaticString = #filePath, line: UInt = #line) throws {
         let preset = LayoutPreset(background: background)
         let data = try JSONEncoder().encode(preset)
         let decoded = try JSONDecoder().decode(LayoutPreset.self, from: data)

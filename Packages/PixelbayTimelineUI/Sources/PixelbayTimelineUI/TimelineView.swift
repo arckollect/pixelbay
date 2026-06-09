@@ -414,7 +414,10 @@ public final class TimelineNSView: NSView {
         // PiP/audio badges (`layout.groupedOverlapBadges`) are painted
         // in a separate pass below so the badge always lands on top of
         // the primary clip.
-        let tracksByID = Dictionary(uniqueKeysWithValues: layout.tracks.map { ($0.id, $0) })
+        let tracksByID = Dictionary(
+            layout.tracks.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         for row in layout.displayRows {
             switch row.kind {
             case .effectsLane:
@@ -1132,11 +1135,11 @@ public final class TimelineNSView: NSView {
             dragSession = DragSession(kind: .trimEffectOut, clipID: nil, effectKeyframeID: kfID, startPoint: point, currentDeltaPixels: 0)
         case .emptyEffectsLane:
             onSelect?(nil)
-            // ⌥-click adds a new zoom keyframe at the click point. Default
-            // duration is 1.5s (0.2s ease-in + 1.1s hold + 0.2s ease-out)
-            // matching `EffectKeyframe`'s init defaults; subsequent drag
-            // edits resize it. Without the option modifier, treat as
-            // deselect — consistent with the empty-track-lane behaviour.
+            // ⌥-click adds a new zoom keyframe at the click point. The
+            // keyframe uses `EffectKeyframe`'s shared zoom easing defaults;
+            // subsequent drag edits resize it. Without the option modifier,
+            // treat as deselect — consistent with the empty-track-lane
+            // behaviour.
             if optionHeld {
                 postAddKeyframe(at: point)
             } else {
@@ -1296,8 +1299,8 @@ public final class TimelineNSView: NSView {
             case .moveEffect:
                 newStartSec = max(0, oldStart + deltaSeconds)
             case .trimEffectIn:
-                let clamped = min(deltaSeconds, oldDuration - minDuration)
-                newStartSec = max(0, oldStart + clamped)
+                let clamped = min(max(deltaSeconds, -oldStart), oldDuration - minDuration)
+                newStartSec = oldStart + clamped
                 newDurationSec = oldDuration - clamped
             case .trimEffectOut:
                 newDurationSec = max(minDuration, oldDuration + deltaSeconds)
@@ -1305,19 +1308,10 @@ public final class TimelineNSView: NSView {
                 break
             }
             guard newStartSec != oldStart || newDurationSec != oldDuration else { return }
-            let updated = EffectKeyframe(
-                id: original.id,
-                kind: original.kind,
-                timelineRange: TimeRange(
-                    start: .seconds(newStartSec),
-                    duration: .seconds(newDurationSec)
-                ),
-                zoomFactor: original.zoomFactor,
-                centerX: original.centerX,
-                centerY: original.centerY,
-                easeIn: original.easeIn,
-                easeOut: original.easeOut,
-                extras: original.extras
+            var updated = original
+            updated.timelineRange = TimeRange(
+                start: .seconds(newStartSec),
+                duration: .seconds(newDurationSec)
             )
             onApplyCommand?(UpdateEffectKeyframeCommand(keyframeID: kfID, newValue: updated))
         case .scrub:

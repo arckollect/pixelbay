@@ -17,17 +17,10 @@ final class ClickLoggerTests: XCTestCase {
         try await Task.sleep(nanoseconds: 50_000_000)
 
         let recording = await logger.stop()
-        // Sort by timestamp before asserting — the fake source delivers via
-        // unstructured `Task { ... }` callbacks which Swift may reorder
-        // relative to spawn order. The logger preserves the order moves
-        // arrive in, so for a deterministic spec we re-key on the
-        // monotonically-increasing host-clock timestamp the test fixture
-        // assigns.
-        let sortedClicks = recording.clicks.sorted { $0.timestamp < $1.timestamp }
-        XCTAssertEqual(sortedClicks.count, 3)
-        XCTAssertEqual(sortedClicks[0].button, .left)
-        XCTAssertEqual(sortedClicks[1].button, .right)
-        XCTAssertEqual(sortedClicks[2].x, 200)
+        XCTAssertEqual(recording.clicks.count, 3)
+        XCTAssertEqual(recording.clicks[0].button, .left)
+        XCTAssertEqual(recording.clicks[1].button, .right)
+        XCTAssertEqual(recording.clicks[2].x, 200)
         XCTAssertTrue(recording.moves.isEmpty)
     }
 
@@ -327,17 +320,13 @@ final class ClickLoggerTests: XCTestCase {
         try await Task.sleep(nanoseconds: 50_000_000)
 
         let recording = await logger.stop()
-        // Sort by timestamp — fakeSource fires via Task { ... } so the order
-        // events land in the actor isn't guaranteed (same race the
-        // collectsEvents test works around).
-        let sorted = recording.clicks.sorted { $0.timestamp < $1.timestamp }
-        XCTAssertEqual(sorted.count, 3)
-        XCTAssertEqual(sorted[0].x, 0.5, accuracy: 0.0001)
-        XCTAssertEqual(sorted[0].y, 0.5, accuracy: 0.0001)
-        XCTAssertEqual(sorted[1].x, 1.0, accuracy: 0.0001)
-        XCTAssertEqual(sorted[1].y, 1.0, accuracy: 0.0001)
-        XCTAssertEqual(sorted[2].x, 0.0, accuracy: 0.0001)
-        XCTAssertEqual(sorted[2].y, 0.0, accuracy: 0.0001)
+        XCTAssertEqual(recording.clicks.count, 3)
+        XCTAssertEqual(recording.clicks[0].x, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(recording.clicks[0].y, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(recording.clicks[1].x, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(recording.clicks[1].y, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(recording.clicks[2].x, 0.0, accuracy: 0.0001)
+        XCTAssertEqual(recording.clicks[2].y, 0.0, accuracy: 0.0001)
     }
 
     func test_logger_normalisesAgainstDisplayOrigin_forSecondaryDisplay() async throws {

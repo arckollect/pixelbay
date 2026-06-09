@@ -73,11 +73,20 @@ public struct ProjectBundleStore: Sendable {
         if fileManager.fileExists(url.path) {
             throw ProjectBundleError.bundleAlreadyExists(url)
         }
-        try fileManager.createDirectory(at: bundle.url, withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: bundle.mediaDirectoryURL, withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: bundle.thumbnailsDirectoryURL, withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: bundle.voiceoversDirectoryURL, withIntermediateDirectories: true)
-        try writeProject(project, to: bundle)
+        var createdBundleRoot = false
+        do {
+            try fileManager.createDirectory(at: bundle.url, withIntermediateDirectories: true)
+            createdBundleRoot = true
+            try fileManager.createDirectory(at: bundle.mediaDirectoryURL, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: bundle.thumbnailsDirectoryURL, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: bundle.voiceoversDirectoryURL, withIntermediateDirectories: true)
+            try writeProject(project, to: bundle)
+        } catch {
+            if createdBundleRoot {
+                try? fileManager.removeItem(at: bundle.url)
+            }
+            throw error
+        }
         return bundle
     }
 
@@ -93,11 +102,16 @@ public struct ProjectBundleStore: Sendable {
         let tempURL = bundle.url
             .appendingPathComponent(".project.json.tmp-\(UUID().uuidString)")
         try data.write(to: tempURL, options: .atomic)
-        // _ = is sufficient on macOS; replaceItem swaps atomically.
-        _ = try fileManager.replaceItem(
-            at: bundle.projectFileURL,
-            withItemAt: tempURL
-        )
+        do {
+            // _ = is sufficient on macOS; replaceItem swaps atomically.
+            _ = try fileManager.replaceItem(
+                at: bundle.projectFileURL,
+                withItemAt: tempURL
+            )
+        } catch {
+            try? fileManager.removeItem(at: tempURL)
+            throw error
+        }
     }
 
     // Reads project.json, runs migrators if the schemaVersion is older than
@@ -175,17 +189,20 @@ public struct FileManagerWrapper: Sendable {
     public var createDirectory: @Sendable (_ at: URL, _ withIntermediateDirectories: Bool) throws -> Void
     public var contentsOfDirectory: @Sendable (_ at: URL) throws -> [URL]
     public var replaceItem: @Sendable (_ at: URL, _ withItemAt: URL) throws -> URL?
+    public var removeItem: @Sendable (_ at: URL) throws -> Void
 
     public init(
         fileExists: @escaping @Sendable (String) -> Bool,
         createDirectory: @escaping @Sendable (URL, Bool) throws -> Void,
         contentsOfDirectory: @escaping @Sendable (URL) throws -> [URL],
-        replaceItem: @escaping @Sendable (URL, URL) throws -> URL?
+        replaceItem: @escaping @Sendable (URL, URL) throws -> URL?,
+        removeItem: @escaping @Sendable (URL) throws -> Void
     ) {
         self.fileExists = fileExists
         self.createDirectory = createDirectory
         self.contentsOfDirectory = contentsOfDirectory
         self.replaceItem = replaceItem
+        self.removeItem = removeItem
     }
 
     public func createDirectory(at url: URL, withIntermediateDirectories: Bool) throws {
@@ -198,6 +215,10 @@ public struct FileManagerWrapper: Sendable {
 
     public func replaceItem(at url: URL, withItemAt temp: URL) throws -> URL? {
         try replaceItem(url, temp)
+    }
+
+    public func removeItem(at url: URL) throws {
+        try removeItem(url)
     }
 
     public static let `default` = FileManagerWrapper(
@@ -216,6 +237,9 @@ public struct FileManagerWrapper: Sendable {
         },
         replaceItem: { destination, temp in
             try FileManager.default.replaceItemAt(destination, withItemAt: temp)
+        },
+        removeItem: { url in
+            try FileManager.default.removeItem(at: url)
         }
     )
 }

@@ -71,6 +71,15 @@ public struct ResolvedLayout: Sendable, Equatable {
     /// normalises against the layer rect's size to produce symmetric soft
     /// veil on non-square viewports.
     public var screenZoomBlurSigmaPx: Float
+    /// Directional motion-blur vector for the screen layer, in the layer's
+    /// UV space (texCoord units). Points along the zoom camera's velocity;
+    /// magnitude is the blur kernel's half-extent. EffectEvaluator drives
+    /// this from the per-frame zoom-centre velocity so fast cursor-follow
+    /// pans pick up a velocity-proportional streak along the motion
+    /// direction (Screen Studio look) instead of the old isotropic Gaussian
+    /// softening. Zero (the default) keeps the frame bit-identical to a
+    /// no-blur pass.
+    public var screenMotionBlurUV: SIMD2<Float>
 
     public init(
         outputSize: CGSize,
@@ -81,7 +90,8 @@ public struct ResolvedLayout: Sendable, Equatable {
         webcamShape: CamShape,
         webcamCornerRadius: CGFloat,
         webcamOpacity: Float = 1.0,
-        screenZoomBlurSigmaPx: Float = 0
+        screenZoomBlurSigmaPx: Float = 0,
+        screenMotionBlurUV: SIMD2<Float> = .zero
     ) {
         self.outputSize = outputSize
         self.background = background
@@ -92,6 +102,7 @@ public struct ResolvedLayout: Sendable, Equatable {
         self.webcamCornerRadius = webcamCornerRadius
         self.webcamOpacity = webcamOpacity
         self.screenZoomBlurSigmaPx = screenZoomBlurSigmaPx
+        self.screenMotionBlurUV = screenMotionBlurUV
     }
 }
 

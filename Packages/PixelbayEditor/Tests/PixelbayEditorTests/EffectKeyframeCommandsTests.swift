@@ -178,9 +178,11 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         XCTAssertEqual(kf.anchorMode, .followCursor)
         XCTAssertEqual(kf.centerX, 0.4, accuracy: 0.001)
         XCTAssertEqual(kf.centerY, 0.6, accuracy: 0.001)
-        // Snappy envelope: 0.3 in + 0.6 hold + 0.5 out = 1.4s total.
+        // Shared zoom envelope: default ease-in + 0.6 hold + default ease-out.
         XCTAssertEqual(kf.timelineRange.start.seconds, 2.0, accuracy: 0.001)
-        XCTAssertEqual(kf.timelineRange.duration.seconds, 1.4, accuracy: 0.001)
+        XCTAssertEqual(kf.easeIn, EffectKeyframe.defaultZoomEaseIn)
+        XCTAssertEqual(kf.easeOut, EffectKeyframe.defaultZoomEaseOut)
+        XCTAssertEqual(kf.timelineRange.duration.seconds, 1.7, accuracy: 0.001)
     }
 
     func test_addZoomAtPlayhead_clampsAnchorToUnitSquare() throws {
@@ -277,7 +279,7 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         _ = try AddEffectKeyframeCommand(keyframe: manual).apply(to: &project)
 
         // 6s gap so the two clicks land in separate clusters under the
-        // default merge window (lookahead 0.45 + hold 1.8 + easeOut 0.45).
+        // default merge window.
         let clicks = [AutoZoomClick(timelineTime: 4.0), AutoZoomClick(timelineTime: 10.0)]
         let inverse = try GenerateAutoZoomFromClicksCommand(clicks: clicks).apply(to: &project)
         XCTAssertEqual(project.effects.count, 3)
@@ -290,11 +292,10 @@ final class EffectKeyframeCommandsTests: XCTestCase {
 
     func test_autoZoom_twoClicksInsideMergeWindow_collapseToOneKeyframe() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
-        // Defaults: lookahead 0.45, hold 1.8, easeOut 0.45 → merge window 2.7s.
+        // Defaults: shared ease-in, hold 1.8, shared ease-out.
         // Two clicks 0.5s apart land well inside that window. The merged
         // keyframe should: (a) span from the first click's zoom-in start
-        // (4.0 - 0.45 = 3.55) to the second click's ease-out end
-        // (4.5 + 1.8 + 0.45 = 6.75), and (b) carry the *latest* click's focal
+        // to the second click's ease-out end, and (b) carry the *latest* click's focal
         // point so the framing follows the user's attention. The clicks are
         // spatially distant (0.2 vs 0.8) to verify the focal-point follow,
         // so we pass `spatialResetThreshold: 1.0` to disable the spatial
@@ -309,8 +310,8 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1)
         let kf = project.effects[0]
-        XCTAssertEqual(kf.timelineRange.start.seconds, 3.55, accuracy: 1e-6)
-        XCTAssertEqual(kf.timelineRange.duration.seconds, 3.2, accuracy: 1e-6)
+        XCTAssertEqual(kf.timelineRange.start.seconds, 3.45, accuracy: 1e-6)
+        XCTAssertEqual(kf.timelineRange.duration.seconds, 3.4, accuracy: 1e-6)
         XCTAssertEqual(kf.centerX, 0.8, accuracy: 1e-9,
                        "merged cluster anchors at the latest click's focal point")
         XCTAssertEqual(kf.centerY, 0.8, accuracy: 1e-9)
@@ -332,15 +333,15 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1)
         let kf = project.effects[0]
-        XCTAssertEqual(kf.timelineRange.start.seconds, 3.55, accuracy: 1e-6)
-        // Final cluster end follows the last click: 5.2 + 1.8 + 0.45 = 7.45.
-        XCTAssertEqual(kf.timelineRange.duration.seconds, 3.9, accuracy: 1e-6)
+        XCTAssertEqual(kf.timelineRange.start.seconds, 3.45, accuracy: 1e-6)
+        // Final cluster end follows the last click.
+        XCTAssertEqual(kf.timelineRange.duration.seconds, 4.1, accuracy: 1e-6)
         XCTAssertEqual(kf.centerX, 0.9, accuracy: 1e-9)
     }
 
     func test_autoZoom_twoClicksOutsideMergeWindow_stayAsTwoKeyframes() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
-        // Gap of 4s exceeds the 2.7s merge window — the clicks must stay in
+        // Gap of 4s exceeds the merge window — the clicks must stay in
         // separate clusters. Regression: don't over-merge unrelated clicks.
         let clicks = [
             AutoZoomClick(timelineTime: 4.0, centerX: 0.3, centerY: 0.3),
@@ -362,8 +363,7 @@ final class EffectKeyframeCommandsTests: XCTestCase {
                 centerY: 0.0
             )
         }
-        // Three clicks inside the merge window; expected merged keyframe
-        // range: start = 4.0 - 0.45 = 3.55, end = 5.2 + 1.8 + 0.45 = 7.45.
+        // Three clicks inside the merge window.
         let clicks = [
             AutoZoomClick(timelineTime: 4.0),
             AutoZoomClick(timelineTime: 4.6),
@@ -376,15 +376,15 @@ final class EffectKeyframeCommandsTests: XCTestCase {
 
         XCTAssertEqual(project.effects.count, 1)
         let traj = try XCTUnwrap(project.effects[0].trajectory)
-        // Master samples at t = 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0 fall
-        // inside the merged keyframe's [3.55, 7.45] range (rebased to
-        // keyframe-local 0.45 … 3.45). That's 7 samples — more than the
+        // Master samples at t = 3.5 ... 7.5 fall inside the merged
+        // keyframe's range (rebased to keyframe-local 0.05 … 4.05).
+        // That's 9 samples — more than the
         // 3-sample slices the unmerged path would have attached to each
         // standalone keyframe; the merged-trajectory window keeps
         // cursor-follow continuous across the cluster.
-        XCTAssertEqual(traj.count, 7)
-        XCTAssertEqual(traj.first?.t ?? -1, 0.45, accuracy: 1e-6)
-        XCTAssertEqual(traj.last?.t ?? -1, 3.45, accuracy: 1e-6)
+        XCTAssertEqual(traj.count, 9)
+        XCTAssertEqual(traj.first?.t ?? -1, 0.05, accuracy: 1e-6)
+        XCTAssertEqual(traj.last?.t ?? -1, 4.05, accuracy: 1e-6)
     }
 
     func test_autoZoom_mergedCluster_undoRemovesExactlyOneKeyframe() throws {
@@ -591,6 +591,30 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         XCTAssertEqual(project.effects.first?.origin, .manualHotkey)
     }
 
+    func test_zoomCreationCommands_shareDefaultEaseDurations() throws {
+        var (autoProject, _) = EditorFixture.minimalSingleClip()
+        _ = try GenerateAutoZoomFromClicksCommand(
+            clicks: [AutoZoomClick(timelineTime: 4.0)]
+        ).apply(to: &autoProject)
+
+        var (manualProject, _) = EditorFixture.minimalSingleClip()
+        _ = try GenerateManualZoomsCommand(
+            marks: [AutoZoomClick(timelineTime: 4.0)]
+        ).apply(to: &manualProject)
+
+        var (playheadProject, _) = EditorFixture.minimalSingleClip()
+        _ = try AddZoomAtPlayheadCommand(timelineTime: 4.0).apply(to: &playheadProject)
+
+        for keyframe in [
+            autoProject.effects[0],
+            manualProject.effects[0],
+            playheadProject.effects[0]
+        ] {
+            XCTAssertEqual(keyframe.easeIn, EffectKeyframe.defaultZoomEaseIn)
+            XCTAssertEqual(keyframe.easeOut, EffectKeyframe.defaultZoomEaseOut)
+        }
+    }
+
     func test_generateManualZooms_inverseRemovesOnlyManualKeyframes() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
         // Add an auto-zoom keyframe first.
@@ -613,15 +637,15 @@ final class EffectKeyframeCommandsTests: XCTestCase {
     func test_generateManualZooms_skipsMarksThatDontFitTimeline() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
         // Manual marks start AT mark.timelineTime. Default range duration =
-        // easeIn 0.3 + hold 0.6 + easeOut 0.5 = 1.4s. With timelineDuration
-        // 2.0, a mark at t=1.5 (range [1.5, 2.9)) overshoots; a mark at
-        // t=0.5 (range [0.5, 1.9)) fits.
+        // easeIn 0.55 + hold 0.6 + easeOut 0.55 = 1.7s. With timelineDuration
+        // 2.0, a mark at t=1.5 (range [1.5, 3.2)) overshoots; a mark at
+        // t=0.2 (range [0.2, 1.9)) fits.
         _ = try GenerateManualZoomsCommand(
-            marks: [AutoZoomClick(timelineTime: 0.5), AutoZoomClick(timelineTime: 1.5)],
+            marks: [AutoZoomClick(timelineTime: 0.2), AutoZoomClick(timelineTime: 1.5)],
             timelineDuration: 2.0
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1, "overshoot-end marks are skipped")
-        XCTAssertEqual(project.effects[0].timelineRange.start.seconds, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(project.effects[0].timelineRange.start.seconds, 0.2, accuracy: 1e-9)
     }
 
     func test_generateManualZooms_shakeGestureMark_emitsFollowCursorNoLookahead() throws {
@@ -701,16 +725,17 @@ final class EffectKeyframeCommandsTests: XCTestCase {
         var (project, _) = EditorFixture.minimalSingleClip()
         // Timing contract for gesture-emitted marks: detector emits the
         // gesture-START timestamp (window[0]), so range.start = gesture
-        // start. Zoom ramps in across the gesture motion (~0.3s easeIn),
-        // brief hold (0.6s), ease-out (0.5s) — total 1.4s response.
+        // start. Zoom uses the same shared ease-in/ease-out as click and
+        // playhead zooms, with a brief manual hold in the middle.
         _ = try GenerateManualZoomsCommand(
             marks: [AutoZoomClick(timelineTime: 4.0)]
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1)
         XCTAssertEqual(project.effects[0].timelineRange.start.seconds, 4.0, accuracy: 1e-9,
                        "manual zoom starts at the mark (= gesture start)")
-        // Range end = 4.0 + 0.3 (easeIn) + 0.6 (hold) + 0.5 (easeOut) = 5.4.
-        XCTAssertEqual(project.effects[0].timelineRange.end.seconds, 5.4, accuracy: 1e-9)
+        XCTAssertEqual(project.effects[0].easeIn, EffectKeyframe.defaultZoomEaseIn)
+        XCTAssertEqual(project.effects[0].easeOut, EffectKeyframe.defaultZoomEaseOut)
+        XCTAssertEqual(project.effects[0].timelineRange.end.seconds, 5.7, accuracy: 1e-9)
     }
 
     func test_generateManualZooms_gestureMark_preservesRawAnchorCoordinates() throws {
@@ -766,8 +791,8 @@ final class EffectKeyframeCommandsTests: XCTestCase {
     func test_autoZoom_forcedSplit_truncatesPreviousClusterToAvoidOverlap() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
         // Two clicks 1.5s apart with a spatial jump: the spatial gate forces
-        // a split, but click2's zoom-in start (5.5-0.45=5.05) lands inside
-        // the first cluster's tail (4.0+1.8+0.45=6.25). L2 must truncate
+        // a split, but click2's zoom-in start lands inside
+        // the first cluster's tail. L2 must truncate
         // the first cluster's end to exactly click2's start so the two
         // emitted ranges are disjoint (half-open).
         let clicks = [
@@ -788,7 +813,7 @@ final class EffectKeyframeCommandsTests: XCTestCase {
     func test_autoZoom_forcedSplit_dropsPreviousClusterWhenTooShort() throws {
         var (project, _) = EditorFixture.minimalSingleClip()
         // Two clicks only 0.4s apart with a spatial jump. Truncation pulls
-        // the first cluster's end down to 0.4s, well below the 1.25s
+        // the first cluster's end down to 0.4s, well below the visible
         // minVisibleDuration floor (just an ease-in ramp with no hold) — so
         // it gets dropped entirely rather than render as a flash.
         let clicks = [
@@ -903,13 +928,11 @@ final class EffectKeyframeCommandsTests: XCTestCase {
             clicks: [AutoZoomClick(timelineTime: 3.0, centerX: 0.5, centerY: 0.5)]
         ).apply(to: &project)
         XCTAssertEqual(project.effects.count, 1)
-        let autoRange = project.effects[0].timelineRange  // [2.3, 5.3)
+        let autoRange = project.effects[0].timelineRange
 
         // A mark inside the auto range gets skipped; a mark outside survives.
-        // Auto range duration = 0.7 + 1.8 + 0.5 = 3.0; mark at t=4.0 → range
-        // [3.3, 6.3) overlaps. Mark at t=7.0 → range [6.3, 9.3) is adjacent
-        // OR disjoint depending on auto endpoint — pick 7.5 to be safe (range
-        // [6.8, 9.8)).
+        // Mark at t=4.0 overlaps the seeded auto range. Mark at t=7.5 is
+        // safely disjoint.
         _ = try GenerateManualZoomsCommand(
             marks: [
                 AutoZoomClick(timelineTime: 4.0, centerX: 0.1, centerY: 0.1),

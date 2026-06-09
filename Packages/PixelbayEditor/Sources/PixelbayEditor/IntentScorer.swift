@@ -66,7 +66,7 @@ public enum IntentScorer {
     public static let fireThreshold: Double = 0.55
     /// Minimum gap between consecutive auto-zoom fires. Bumped from 1.8 s
     /// to 2.5 s during the Phase 3c framing revamp: combined with the
-    /// new 450 ms ease-in / 450 ms ease-out defaults on each cluster
+    /// shared zoom ease-in / ease-out defaults on each cluster
     /// keyframe, this keeps the overall zoom cadence at one transition
     /// every ~3.5 s — the "calm but attentive" pacing the user asked for
     /// on the Screen-Studio question.

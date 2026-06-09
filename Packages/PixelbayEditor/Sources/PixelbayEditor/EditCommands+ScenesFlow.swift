@@ -165,7 +165,7 @@ public struct MoveClipsByGroupCommand: EditCommand {
         )
         for trackIdx in touchedTrackIndices {
             project.tracks[trackIdx].clips.sort {
-                $0.timelineRange.start.value < $1.timelineRange.start.value
+                $0.timelineRange.start.seconds < $1.timelineRange.start.seconds
             }
         }
 
@@ -247,10 +247,11 @@ public struct _AppendAssetsCommand: EditCommand {
     @discardableResult
     public func apply(to project: inout Project) throws -> any EditCommand {
         var added: [MediaAssetID] = []
-        let existing = Set(project.assets.map(\.id))
+        var existing = Set(project.assets.map(\.id))
         for asset in assets where !existing.contains(asset.id) {
             project.assets.append(asset)
             added.append(asset.id)
+            existing.insert(asset.id)
         }
         return _DetachAssetsCommand(assetIDs: added)
     }
@@ -328,7 +329,8 @@ extension ScenesMerger {
         }
 
         let assetByID: [MediaAssetID: MediaAsset] = Dictionary(
-            uniqueKeysWithValues: project.assets.map { ($0.id, $0) }
+            project.assets.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
         )
 
         for scene in session.scenes {
@@ -382,17 +384,18 @@ extension ScenesMerger {
                 let clampedSeconds = min(assetSeconds, sceneDurationSeconds)
                 let sourceStartSeconds = max(0, assetSeconds - clampedSeconds)
                 let sourceStart = RationalTime.seconds(sourceStartSeconds)
-                let clipDuration = RationalTime.seconds(clampedSeconds)
+                let sourceDuration = RationalTime.seconds(clampedSeconds)
+                let timelineDuration = RationalTime.seconds(sceneDurationSeconds)
 
                 let clip = Clip(
                     assetID: asset.id,
                     sourceRange: TimeRange(
                         start: sourceStart,
-                        duration: clipDuration
+                        duration: sourceDuration
                     ),
                     timelineRange: TimeRange(
                         start: timelineStart,
-                        duration: clipDuration
+                        duration: timelineDuration
                     ),
                     extras: clipExtras
                 )

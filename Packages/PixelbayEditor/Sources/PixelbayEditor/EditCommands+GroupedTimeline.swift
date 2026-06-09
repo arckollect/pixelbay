@@ -298,21 +298,16 @@ public struct MoveClipsGroupCommand: EditCommand {
             throw EditError.clipNotFound(leadClipID)
         }
         let leadOriginalStart = leadClip.timelineRange.start
-        // Compute delta in the lead clip's timescale; all clips on the
-        // same project share timescale 600 in v0.1, so this lines up
-        // for the per-clip arithmetic in `MoveClipCommand`.
-        let delta = RationalTime(
-            value: newTimelineStart.value - leadOriginalStart.value,
-            timescale: leadOriginalStart.timescale
-        )
+        let deltaSeconds = newTimelineStart.seconds - leadOriginalStart.seconds
         let snapshot = project
         do {
             for clipID in clipIDs {
                 guard let clip = project.clip(clipID) else {
                     throw EditError.clipNotFound(clipID)
                 }
+                let newStartSeconds = clip.timelineRange.start.seconds + deltaSeconds
                 let newStart = RationalTime(
-                    value: clip.timelineRange.start.value + delta.value,
+                    value: Int64((newStartSeconds * Double(clip.timelineRange.start.timescale)).rounded()),
                     timescale: clip.timelineRange.start.timescale
                 )
                 _ = try MoveClipCommand(

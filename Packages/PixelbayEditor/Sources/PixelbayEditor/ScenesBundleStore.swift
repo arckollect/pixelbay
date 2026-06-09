@@ -274,7 +274,8 @@ public enum ScenesBundleStore {
     public static func cleanupUnusedTakes(
         in project: inout Project,
         bundleURL: URL,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        deleteFilesImmediately: Bool = true
     ) throws -> CleanupReport {
         var session: ScenesSession? = project.scenesSession
 
@@ -303,7 +304,10 @@ public enum ScenesBundleStore {
         var removedFilePaths: [String] = []
         // Need to map MediaAssetID → MediaAsset for the file URL lookup
         // before mutating project.assets.
-        let assetByID = Dictionary(uniqueKeysWithValues: project.assets.map { ($0.id, $0) })
+        let assetByID = Dictionary(
+            project.assets.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
 
         // Step 2 — walk each scene's takes; drop inactive ones; capture
         // their assets for removal. Only runs when scenesSession is set;
@@ -331,7 +335,7 @@ public enum ScenesBundleStore {
             session = live
         }
 
-        // Step 3 — delete the orphan files (media + matching sidecars by
+        // Step 3 — collect orphan files (media + matching sidecars by
         // sessionID prefix) and remove the assets from project.assets.
         let bundle = ProjectBundle(url: bundleURL)
         var distinctRemovedIDs = Set(removedAssetIDs)
@@ -346,7 +350,6 @@ public enum ScenesBundleStore {
             guard let asset = assetByID[id] else { continue }
             let mediaURL = bundle.url.appendingPathComponent(asset.relativePath)
             if fileManager.fileExists(atPath: mediaURL.path) {
-                try fileManager.removeItem(at: mediaURL)
                 removedFilePaths.append(asset.relativePath)
             }
             // Best-effort sidecar cleanup: anything in media/ matching the
@@ -366,7 +369,11 @@ public enum ScenesBundleStore {
                     // file just because the prefix substring happens to
                     // appear in its name.
                     if sibling.lastPathComponent.range(of: sessionPrefix) != nil {
-                        try? fileManager.removeItem(at: sibling)
+                        let bundlePath = bundle.url.standardizedFileURL.path + "/"
+                        let siblingPath = sibling.standardizedFileURL.path
+                        if siblingPath.hasPrefix(bundlePath) {
+                            removedFilePaths.append(String(siblingPath.dropFirst(bundlePath.count)))
+                        }
                     }
                 }
             }
@@ -378,10 +385,31 @@ public enum ScenesBundleStore {
             project.scenesSession = session
         }
 
-        return CleanupReport(
+        let report = CleanupReport(
             removedAssetIDs: Array(distinctRemovedIDs),
             removedFilePaths: removedFilePaths
         )
+        if deleteFilesImmediately {
+            try deleteCleanupFiles(report, bundleURL: bundleURL, fileManager: fileManager)
+        }
+        return report
+    }
+
+    /// Deletes files listed by a `cleanupUnusedTakes` report. Kept separate
+    /// so app code can first persist the pruned `project.json`, then commit
+    /// disk cleanup without risking a project that still references media
+    /// files already removed from disk.
+    public static func deleteCleanupFiles(
+        _ report: CleanupReport,
+        bundleURL: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        for relativePath in report.removedFilePaths {
+            let url = bundleURL.appendingPathComponent(relativePath)
+            if fileManager.fileExists(atPath: url.path) {
+                try fileManager.removeItem(at: url)
+            }
+        }
     }
 
     /// Pulls the `{sessionID}` slug out of a filename like

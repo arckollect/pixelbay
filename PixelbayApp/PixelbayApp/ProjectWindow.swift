@@ -61,8 +61,10 @@ struct ProjectWindow: View {
         loadError = nil
         do {
             let doc = try await ProjectDocument.open(bundleURL: bundleID.bundleURL)
+            guard !Task.isCancelled, self.bundleID == bundleID else { return }
             document = doc
         } catch {
+            guard !Task.isCancelled, self.bundleID == bundleID else { return }
             log.error("openProject failed: \(String(describing: error), privacy: .public)")
             loadError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -143,12 +145,17 @@ final class ProjectCloseInterceptor: NSObject, NSWindowDelegate {
 
     let document: ProjectDocument
     private var promptInFlight = false
+    private var allowConfirmedClose = false
 
     init(document: ProjectDocument) {
         self.document = document
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if allowConfirmedClose {
+            allowConfirmedClose = false
+            return true
+        }
         guard !promptInFlight else { return false }
         guard document.isDirty else { return true }
 
@@ -169,9 +176,11 @@ final class ProjectCloseInterceptor: NSObject, NSWindowDelegate {
                 Task { @MainActor in
                     await self.document.save()
                     if case .failed = self.document.status { return }
+                    self.allowConfirmedClose = true
                     sender?.close()
                 }
             case .alertSecondButtonReturn:
+                self.allowConfirmedClose = true
                 sender?.close()
             default:
                 break // Cancel — leave the window open.

@@ -28,6 +28,7 @@ struct SceneTileView: View {
     @State private var confirmReshootPresented: Bool = false
     @State private var previewPresented: Bool = false
     @State private var showSourcesPopover: Bool = false
+    @FocusState private var isEditingDescription: Bool
 
     private var scene: PixelbayCore.Scene {
         guard model.session.scenes.indices.contains(sceneIndex) else { return PixelbayCore.Scene() }
@@ -91,7 +92,9 @@ struct SceneTileView: View {
             .animation(.easeInOut(duration: 0.12), value: isHovering)
             .onAppear { draftDescription = scene.description }
             .onChange(of: scene.description) { _, newValue in
-                if newValue != draftDescription { draftDescription = newValue }
+                if !isEditingDescription, newValue != draftDescription {
+                    draftDescription = newValue
+                }
             }
             .alert("Delete this scene?", isPresented: $confirmDeletePresented) {
                 Button("Delete", role: .destructive) { model.deleteScene(at: sceneIndex) }
@@ -324,6 +327,7 @@ struct SceneTileView: View {
                 .lineLimit(1...2)
                 .font(Theme.Font.body)
                 .foregroundStyle(Theme.Color.textPrimary)
+                .focused($isEditingDescription)
                 .onSubmit { model.updateDescription(sceneID: scene.id, to: draftDescription) }
                 .onChange(of: draftDescription) { _, newValue in
                     model.updateDescription(sceneID: scene.id, to: newValue)

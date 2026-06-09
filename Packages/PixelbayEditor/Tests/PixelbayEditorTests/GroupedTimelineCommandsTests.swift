@@ -195,6 +195,28 @@ final class GroupedTimelineCommandsTests: XCTestCase {
                        camBefore.seconds, accuracy: 1e-9)
     }
 
+    func test_moveClipsGroup_acceptsTargetStartWithDifferentTimescale() throws {
+        let (originalProject, screenID, camID, _, _) = makeVideoAudioProject(collapsed: true)
+        var project = originalProject
+        let screenBefore = project.clip(screenID)!.timelineRange.start
+        let camBefore = project.clip(camID)!.timelineRange.start
+        let newTimelineStart = RationalTime(
+            value: Int64((screenBefore.seconds + 2.0) * 1_000),
+            timescale: 1_000
+        )
+
+        _ = try MoveClipsGroupCommand(
+            clipIDs: [screenID, camID],
+            leadClipID: screenID,
+            newTimelineStart: newTimelineStart
+        ).apply(to: &project)
+
+        XCTAssertEqual(project.clip(screenID)!.timelineRange.start.seconds,
+                       screenBefore.seconds + 2.0, accuracy: 1e-9)
+        XCTAssertEqual(project.clip(camID)!.timelineRange.start.seconds,
+                       camBefore.seconds + 2.0, accuracy: 1e-9)
+    }
+
     func test_removeClipsGroup_removesAll_andInverseRestores() throws {
         let (originalProject, screenID, camID, _, _) = makeVideoAudioProject(collapsed: true)
         var project = originalProject

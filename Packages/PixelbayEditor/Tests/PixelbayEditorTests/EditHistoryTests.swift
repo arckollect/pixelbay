@@ -29,7 +29,8 @@ final class EditHistoryTests: XCTestCase {
         let (project, clipID) = EditorFixture.minimalSingleClip()
         let history = EditHistory(project: project)
         try await history.apply(SetClipVolumeCommand(clipID: clipID, newVolume: 0.3))
-        try await history.undo()
+        let didUndo = try await history.undo()
+        XCTAssertTrue(didUndo)
         let undone = await history.project
         XCTAssertEqual(undone.clip(clipID)?.volume, 0.8)
         let canRedo = await history.canRedo
@@ -41,7 +42,8 @@ final class EditHistoryTests: XCTestCase {
         let history = EditHistory(project: project)
         try await history.apply(SetClipVolumeCommand(clipID: clipID, newVolume: 0.3))
         try await history.undo()
-        try await history.redo()
+        let didRedo = try await history.redo()
+        XCTAssertTrue(didRedo)
         let redone = await history.project
         XCTAssertEqual(redone.clip(clipID)?.volume, 0.3)
     }
@@ -100,8 +102,10 @@ final class EditHistoryTests: XCTestCase {
     func test_undo_redo_areNoOps_whenStacksEmpty() async throws {
         let (project, _) = EditorFixture.minimalSingleClip()
         let history = EditHistory(project: project)
-        try await history.undo() // no-op
-        try await history.redo() // no-op
+        let didUndo = try await history.undo() // no-op
+        let didRedo = try await history.redo() // no-op
+        XCTAssertFalse(didUndo)
+        XCTAssertFalse(didRedo)
         let canUndo = await history.canUndo
         XCTAssertFalse(canUndo)
     }

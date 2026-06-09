@@ -37,11 +37,18 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
 
     // MARK: AVVideoCompositing
 
+    // NV12 listed FIRST — the format array is ordered by preference, and
+    // H.264 sources decode to NV12 natively. Preferring BGRA (the old order)
+    // made VideoToolbox convert every decoded frame to BGRA inside
+    // VTDecoderXPCService: 2× the bytes per frame (a 5K BGRA frame is
+    // ~59 MB vs ~22 MB NV12) plus a conversion pass, multiplying the
+    // decoder service's working set for zero visual benefit — the render
+    // graph has a native NV12 pipeline.
     public let sourcePixelBufferAttributes: [String: any Sendable]? = [
         kCVPixelBufferPixelFormatTypeKey as String: [
-            kCVPixelFormatType_32BGRA,
             kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelFormatType_32BGRA
         ] as [UInt32],
         kCVPixelBufferMetalCompatibilityKey as String: true
     ]
@@ -92,12 +99,13 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
     private static let cursorVelocityHalfWindow: Double = 1.0 / 120.0
 
     /// Cursor sprite enlarges by `(zoomFactor - 1) · this` while a zoom is
-    /// engaged. 0.5 yields ~1.30× cursor at a 1.6× zoom (the default
-    /// auto-zoom), matching what users perceive as "the cursor grew
-    /// along with the zoomed UI." Multiplied into `CursorSettings.scale`
-    /// per frame so the boost rides the ease curve naturally (no boost
-    /// when zoom is idle, peak at hold).
-    private static let cursorScaleBoostPerZoomUnit: Double = 0.5
+    /// engaged. 0.75 yields ~1.45× cursor at a 1.6× zoom (the default
+    /// auto-zoom) — deliberately ahead of the UI's own scale-up so the
+    /// cursor pops while zoomed in and stays easy to locate (raised from
+    /// 0.5 on user feedback that the zoomed cursor was hard to spot).
+    /// Multiplied into `CursorSettings.scale` per frame so the boost rides
+    /// the ease curve naturally (no boost when zoom is idle, peak at hold).
+    private static let cursorScaleBoostPerZoomUnit: Double = 0.75
 
     /// Velocity-driven cursor sprite boost (Phase 3c). Reads the
     /// sprite's instantaneous norm-units/s speed (already computed via
@@ -188,9 +196,9 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
             // keyframe geometry and naturally tracks the ease in/out
             // (factor=1.0 at idle → no boost, ramps up mid-ease, peaks at
             // hold, then ramps back down). The coefficient is tuned so a
-            // 1.6× zoom (the default auto-zoom) yields ~1.30× cursor —
-            // matches the screen scale-up the user perceives as "the UI
-            // got bigger so the cursor should too".
+            // 1.6× zoom (the default auto-zoom) yields ~1.45× cursor —
+            // deliberately ahead of the UI's own scale-up so the cursor
+            // stays easy to locate while zoomed in.
             let zoomFactor = baseLayout.screen.size.width > 0
                 ? layout.screen.size.width / baseLayout.screen.size.width
                 : 1.0
@@ -207,12 +215,24 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
                     Self.velocityScaleHigh,
                     cursorSpeed
                 )
+            // Motion blur is a zoom-follow-only effect (user feedback:
+            // outside a follow the cursor must stay crisp regardless of
+            // speed). Gate = max eased strength across active cursor-follow
+            // zoom keyframes, so the streak fades in/out with the zoom
+            // rather than popping at the keyframe boundary.
+            let followGate = instruction.effects.reduce(0.0) { gate, kf in
+                guard kf.kind == .zoom,
+                      kf.anchorMode != .pinned,
+                      kf.trajectory?.isEmpty == false else { return gate }
+                return max(gate, kf.strength(at: t))
+            }
             cursorState = CursorRenderState(
                 xFractionInScreen: position.x,
                 yFractionInScreen: position.y,
                 scale: cursorSettings.scale * zoomCursorBoost * velocityBoost,
                 velocityXFractionPerSecond: vx,
-                velocityYFractionPerSecond: vy
+                velocityYFractionPerSecond: vy,
+                motionBlurStrength: followGate
             )
             _ = sprite // keep clarity; sprite is forwarded below
         } else {

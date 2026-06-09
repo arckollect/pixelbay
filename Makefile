@@ -24,7 +24,15 @@ help:
 test:
 	@for pkg in $(PACKAGES); do \
 		echo "=== $$pkg ==="; \
-		(cd Packages/$$pkg && $(SWIFT_TEST) 2>&1 | grep -E "Executed [0-9]+ tests" | tail -1) || exit 1; \
+		out=$$(mktemp); \
+		if (cd Packages/$$pkg && $(SWIFT_TEST)) > "$$out" 2>&1; then \
+			awk '/Executed [0-9]+ tests/ { line = $$0 } /Test run with [0-9]+ tests/ { fallback = $$0 } END { if (line) print line; else if (fallback) print fallback; else exit 1 }' "$$out" || tail -20 "$$out"; \
+		else \
+			cat "$$out"; \
+			rm -f "$$out"; \
+			exit 1; \
+		fi; \
+		rm -f "$$out"; \
 	done
 
 # `make test-PixelbayCapture` — single package
@@ -33,7 +41,15 @@ test-%:
 	@cd Packages/$* && $(SWIFT_TEST)
 
 build:
-	@$(XCODEBUILD) -workspace Pixelbay.xcworkspace -scheme PixelbayApp -configuration Debug -destination 'platform=macOS' build 2>&1 | grep -E "error:|warning:|BUILD " | grep -v "AppIntents" || true
+	@out=$$(mktemp); \
+	if $(XCODEBUILD) -workspace Pixelbay.xcworkspace -scheme PixelbayApp -configuration Debug -destination 'platform=macOS' build > "$$out" 2>&1; then \
+		grep -E "error:|warning:|BUILD " "$$out" | grep -v "AppIntents" || true; \
+	else \
+		grep -E "error:|warning:|BUILD " "$$out" | grep -v "AppIntents" || cat "$$out"; \
+		rm -f "$$out"; \
+		exit 1; \
+	fi; \
+	rm -f "$$out"
 
 ci: test build
 

@@ -181,9 +181,10 @@ struct ZoomActionsBar: View {
     /// and the multi-asset generate paths.
     private var availableAutoZoomPairs: [AutoZoomPair] {
         let screenAssetsByID: [MediaAssetID: MediaAsset] = Dictionary(
-            uniqueKeysWithValues: project.assets
+            project.assets
                 .filter { $0.kind == .display }
-                .map { ($0.id, $0) }
+                .map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
         )
         var clipsByAsset: [MediaAssetID: [Clip]] = [:]
         for track in project.tracks where track.kind == .screen {
@@ -416,17 +417,18 @@ struct ZoomActionsBar: View {
     }
 
     /// Remap an `AutoZoomClick`'s recording-relative `timelineTime` onto the
-    /// project timeline by accounting for the clip's `sourceRange` and
-    /// `timelineRange`. Lower-bound filter keeps clicks before a user-trimmed
-    /// in-point out; no upper-bound filter (preserves single-shot parity with
-    /// main — see the original EffectsInspector note).
+    /// project timeline by mapping progress through the clip's `sourceRange`
+    /// into its actual `timelineRange` (including speed changes). Lower-bound
+    /// filter keeps clicks before a user-trimmed in-point out; no upper-bound
+    /// filter (preserves single-shot parity with main — see the original
+    /// EffectsInspector note).
     private func shiftClicks(_ clicks: [AutoZoomClick], into clip: Clip) -> [AutoZoomClick] {
-        let sourceStart = clip.sourceRange.start.seconds
-        let timelineStart = clip.timelineRange.start.seconds
         return clicks.compactMap { click in
-            guard click.timelineTime >= sourceStart else { return nil }
+            guard let timelineTime = timelineTime(forSourceTime: click.timelineTime, in: clip) else {
+                return nil
+            }
             return AutoZoomClick(
-                timelineTime: timelineStart + (click.timelineTime - sourceStart),
+                timelineTime: timelineTime,
                 centerX: click.centerX,
                 centerY: click.centerY,
                 source: click.source
@@ -438,16 +440,26 @@ struct ZoomActionsBar: View {
         _ samples: [MouseTrajectorySample],
         into clip: Clip
     ) -> [MouseTrajectorySample] {
-        let sourceStart = clip.sourceRange.start.seconds
-        let timelineStart = clip.timelineRange.start.seconds
         return samples.compactMap { sample in
-            guard sample.timelineTime >= sourceStart else { return nil }
+            guard let timelineTime = timelineTime(forSourceTime: sample.timelineTime, in: clip) else {
+                return nil
+            }
             return MouseTrajectorySample(
-                timelineTime: timelineStart + (sample.timelineTime - sourceStart),
+                timelineTime: timelineTime,
                 centerX: sample.centerX,
                 centerY: sample.centerY
             )
         }
+    }
+
+    private func timelineTime(forSourceTime sourceTime: Double, in clip: Clip) -> Double? {
+        let sourceStart = clip.sourceRange.start.seconds
+        guard sourceTime >= sourceStart else { return nil }
+        let sourceDuration = clip.sourceRange.duration.seconds
+        let timelineDuration = clip.timelineRange.duration.seconds
+        guard sourceDuration > 0, timelineDuration > 0 else { return nil }
+        let sourceProgress = (sourceTime - sourceStart) / sourceDuration
+        return clip.timelineRange.start.seconds + sourceProgress * timelineDuration
     }
 
     private func loadSidecarAndSize(

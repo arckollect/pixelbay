@@ -420,12 +420,14 @@ struct ScenesWindowView: View {
         // lands long before any future window-open could re-read the target.
         let targetURL = scenesAppendTarget.bundleURL
         await Task.yield()
+        guard !Task.isCancelled else { return }
         scenesAppendTarget.set(nil)
         modelState = .loading
         do {
             let model: ScenesSessionModel
             if let targetURL {
                 let document = try await ProjectDocument.open(bundleURL: targetURL)
+                guard !Task.isCancelled else { return }
                 model = try await ScenesSessionModel.openForAppendingTo(
                     document: document,
                     recording: recording
@@ -433,8 +435,10 @@ struct ScenesWindowView: View {
             } else {
                 model = try await ScenesSessionModel.openOrCreatePersistent(recording: recording)
             }
+            guard !Task.isCancelled else { return }
             modelState = .ready(model)
         } catch {
+            guard !Task.isCancelled else { return }
             log.error("openOrCreatePersistent failed: \(String(describing: error), privacy: .public)")
             modelState = .failed(error.localizedDescription)
         }
@@ -667,5 +671,4 @@ final class ScenesCloseInterceptor: NSObject, NSWindowDelegate {
         return false
     }
 }
-
 

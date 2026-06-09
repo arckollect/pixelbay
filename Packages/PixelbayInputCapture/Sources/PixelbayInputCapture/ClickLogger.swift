@@ -34,7 +34,13 @@ public actor ClickLogger {
         case stopped
     }
 
+    private enum PendingEvent: Sendable {
+        case click(ClickEvent)
+        case move(MouseMove)
+    }
+
     private let source: ClickEventSource
+    private let pendingEvents = PendingEventBuffer<PendingEvent>()
     /// Minimum host-clock seconds between consecutive emitted moves.
     /// Default 1/120 s — slightly above the 60 fps preview / export
     /// frame rate so every rendered frame has at least one fresh sample
@@ -94,14 +100,19 @@ public actor ClickLogger {
         guard phase == .idle else {
             throw LoggerError.invalidState("ClickLogger is single-use; start() called twice")
         }
+        let pendingEvents = self.pendingEvents
         try source.start(
             { [weak self] click in
                 guard let self else { return }
-                Task { await self.recordClick(click) }
+                if pendingEvents.append(.click(click)) {
+                    Task { await self.drainPendingEvents() }
+                }
             },
             { [weak self] move in
                 guard let self else { return }
-                Task { await self.recordMove(move) }
+                if pendingEvents.append(.move(move)) {
+                    Task { await self.drainPendingEvents() }
+                }
             }
         )
         phase = .running
@@ -113,6 +124,7 @@ public actor ClickLogger {
             return Recording(clicks: clicks, moves: moves, marks: marks)
         }
         source.stop()
+        drainPendingEvents()
         phase = .stopped
         log.info("ClickLogger stopped — clicks=\(self.clicks.count) moves=\(self.moves.count) marks=\(self.marks.count)")
         return Recording(clicks: clicks, moves: moves, marks: marks)
@@ -135,6 +147,20 @@ public actor ClickLogger {
     private func recordClick(_ event: ClickEvent) {
         guard phase == .running else { return }
         clicks.append(normalize(event))
+    }
+
+    private func drainPendingEvents() {
+        while let event = pendingEvents.pop() {
+            switch event {
+            case .click(let click):
+                recordClick(click)
+            case .move(let move):
+                recordMove(move)
+            }
+        }
+        if pendingEvents.finishDraining() {
+            drainPendingEvents()
+        }
     }
 
     private func recordMove(_ move: MouseMove) {
@@ -237,6 +263,53 @@ public actor ClickLogger {
             y: clamp01((mark.y - Double(bounds.origin.y)) / Double(bounds.size.height)),
             source: mark.source
         )
+    }
+}
+
+private final class PendingEventBuffer<Event: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [Event] = []
+    private var head = 0
+    private var isDraining = false
+
+    /// Appends in callback order. Returns true when the caller should schedule
+    /// a drain task; false means a drain is already active and will pick this
+    /// event up.
+    func append(_ event: Event) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        events.append(event)
+        guard !isDraining else { return false }
+        isDraining = true
+        return true
+    }
+
+    func pop() -> Event? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard head < events.count else { return nil }
+        let event = events[head]
+        head += 1
+        if head > 256, head * 2 > events.count {
+            events.removeFirst(head)
+            head = 0
+        }
+        return event
+    }
+
+    /// Marks the current drain pass complete. Returns true if more events were
+    /// appended between the final pop and this call, so the actor should keep
+    /// draining without waiting for another callback to schedule it.
+    func finishDraining() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if head >= events.count {
+            events.removeAll(keepingCapacity: true)
+            head = 0
+            isDraining = false
+            return false
+        }
+        return true
     }
 }
 

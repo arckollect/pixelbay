@@ -32,6 +32,7 @@ public final class PreviewPlayer {
 
     public private(set) var status: Status = .idle
     public private(set) var duration: CMTime = .zero
+    public private(set) var outputSize: CGSize = .zero
     public private(set) var currentTime: CMTime = .zero
     public private(set) var isPlaying: Bool = false
 
@@ -83,6 +84,7 @@ public final class PreviewPlayer {
         rateObservation = nil
         player.replaceCurrentItem(with: nil)
         lastBuilt = nil
+        outputSize = .zero
     }
 
     public var underlyingPlayer: AVPlayer { player }
@@ -116,6 +118,7 @@ public final class PreviewPlayer {
                 wallpaperSource: wallpaperSource,
                 wallpaperImageProvider: wallpaperImageProvider
             )
+            guard !Task.isCancelled else { return }
             item.videoComposition = videoComposition
             lastBuilt?.project = project
             // A paused item won't re-render on its own when the
@@ -143,8 +146,14 @@ public final class PreviewPlayer {
                 wallpaperSource: wallpaperSource,
                 wallpaperImageProvider: wallpaperImageProvider,
                 cursorTrajectory: cursorTrajectory,
-                cursorSprite: cursorSprite
+                cursorSprite: cursorSprite,
+                // Live preview composites at a capped size — full UHD is
+                // export-only (ExportSheet builds its own composition).
+                // Keeps the GPU comfortably at 60 fps during heavy
+                // motion-blur pans and shrinks the buffer pools.
+                maxOutputSize: PreviewCompositionBuilder.previewMaxOutputSize
             )
+            guard !Task.isCancelled else { return }
             install(preview: preview)
             lastBuilt = BuiltContext(
                 project: project,
@@ -294,6 +303,7 @@ public final class PreviewPlayer {
         }
         player.replaceCurrentItem(with: item)
         duration = preview.duration
+        outputSize = preview.outputSize
         currentTime = .zero
 
         let interval = CMTime(value: 1, timescale: 30)

@@ -61,22 +61,37 @@ final class ProjectDocument {
     /// callers are expected to surface them in UI.
     func apply(_ command: any EditCommand) async {
         do {
+            try await applyOrThrow(command)
+        } catch {
+            // `applyOrThrow` already records the failure in `status`; the
+            // non-throwing UI entry point intentionally swallows it.
+        }
+    }
+
+    /// Throwing variant for multi-command flows. Callers that need
+    /// all-or-nothing sequencing can stop immediately when one command
+    /// fails instead of continuing after `status = .failed`.
+    func applyOrThrow(_ command: any EditCommand) async throws {
+        do {
             try await history.apply(command)
             await refreshFromHistory()
             isDirty = true
             revision &+= 1
+            status = .ready
         } catch {
             log.error("apply \(command.displayName, privacy: .public) failed: \(String(describing: error), privacy: .public)")
             status = .failed(message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+            throw error
         }
     }
 
     func undo() async {
         do {
-            try await history.undo()
+            guard try await history.undo() else { return }
             await refreshFromHistory()
             isDirty = true
             revision &+= 1
+            status = .ready
         } catch {
             log.error("undo failed: \(String(describing: error), privacy: .public)")
             status = .failed(message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
@@ -85,10 +100,11 @@ final class ProjectDocument {
 
     func redo() async {
         do {
-            try await history.redo()
+            guard try await history.redo() else { return }
             await refreshFromHistory()
             isDirty = true
             revision &+= 1
+            status = .ready
         } catch {
             log.error("redo failed: \(String(describing: error), privacy: .public)")
             status = .failed(message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
@@ -120,6 +136,10 @@ final class ProjectDocument {
         if case .failed = status {
             status = .ready
         }
+    }
+
+    func reportError(_ message: String) {
+        status = .failed(message: message)
     }
 
     // MARK: - Slice A.3 — append a single-shot recording to the timeline tail
@@ -159,83 +179,88 @@ final class ProjectDocument {
         let appendedAssets = diskProject.assets.filter { asset in
             result.assetIDs.contains(asset.id) && !project.assets.contains(where: { $0.id == asset.id })
         }
-        if !appendedAssets.isEmpty {
-            await apply(_AppendAssetsCommand(assets: appendedAssets))
-        }
-
-        // Compute timeline tail across non-effects/non-overlay tracks.
-        var tailSeconds: Double = 0
-        for track in project.tracks {
-            switch track.kind {
-            case .effects, .overlay: continue
-            default: break
+        do {
+            if !appendedAssets.isEmpty {
+                try await applyOrThrow(_AppendAssetsCommand(assets: appendedAssets))
             }
-            for clip in track.clips {
-                let endSec = clip.timelineRange.start.seconds + clip.timelineRange.duration.seconds
-                if endSec > tailSeconds { tailSeconds = endSec }
+
+            // Compute timeline tail across non-effects/non-overlay tracks.
+            var tailSeconds: Double = 0
+            for track in project.tracks {
+                switch track.kind {
+                case .effects, .overlay: continue
+                default: break
+                }
+                for clip in track.clips {
+                    let endSec = clip.timelineRange.start.seconds + clip.timelineRange.duration.seconds
+                    if endSec > tailSeconds { tailSeconds = endSec }
+                }
             }
-        }
 
-        // Determine the canonical recording length for this append. Use the
-        // screen asset's nativeDuration when present (the user-visible
-        // length of the recording); fall back to the longest assertion in
-        // the assets list (rare — audio-only or test fixtures).
-        let assetsForThisRecording = appendedAssets
-        let screenAsset = assetsForThisRecording.first {
-            ScenesMerger.trackKind(for: $0.kind) == .screen
-        }
-        let canonicalSeconds = screenAsset?.nativeDuration.seconds
-            ?? assetsForThisRecording.map { $0.nativeDuration.seconds }.max()
-            ?? 0
-        guard canonicalSeconds > 0 else {
-            log.info("appendRecording: zero canonical duration; nothing to insert")
-            return
-        }
+            // Determine the canonical recording length for this append. Use the
+            // screen asset's nativeDuration when present (the user-visible
+            // length of the recording); fall back to the longest assertion in
+            // the assets list (rare — audio-only or test fixtures).
+            let assetsForThisRecording = appendedAssets
+            let screenAsset = assetsForThisRecording.first {
+                ScenesMerger.trackKind(for: $0.kind) == .screen
+            }
+            let canonicalSeconds = screenAsset?.nativeDuration.seconds
+                ?? assetsForThisRecording.map { $0.nativeDuration.seconds }.max()
+                ?? 0
+            guard canonicalSeconds > 0 else {
+                log.info("appendRecording: zero canonical duration; nothing to insert")
+                return
+            }
 
-        let timelineStart = RationalTime.seconds(tailSeconds)
+            let timelineStart = RationalTime.seconds(tailSeconds)
 
-        // Index existing tracks by kind so we reuse the user's existing
-        // screen / cam / mic / sysAudio lanes instead of duplicating.
-        var trackByKind: [TrackKind: TrackID] = [:]
-        for track in project.tracks where trackByKind[track.kind] == nil {
-            trackByKind[track.kind] = track.id
-        }
+            // Index existing tracks by kind so we reuse the user's existing
+            // screen / cam / mic / sysAudio lanes instead of duplicating.
+            var trackByKind: [TrackKind: TrackID] = [:]
+            for track in project.tracks where trackByKind[track.kind] == nil {
+                trackByKind[track.kind] = track.id
+            }
 
-        for asset in assetsForThisRecording {
-            guard let kind = ScenesMerger.trackKind(for: asset.kind) else { continue }
-            // Resolve / create the destination track.
-            let trackID: TrackID
-            if let existing = trackByKind[kind] {
-                trackID = existing
-            } else {
-                let newTrack = Track(
-                    kind: kind,
-                    name: ScenesMerger.defaultTrackName(for: kind)
+            for asset in assetsForThisRecording {
+                guard let kind = ScenesMerger.trackKind(for: asset.kind) else { continue }
+                // Resolve / create the destination track.
+                let trackID: TrackID
+                if let existing = trackByKind[kind] {
+                    trackID = existing
+                } else {
+                    let newTrack = Track(
+                        kind: kind,
+                        name: ScenesMerger.defaultTrackName(for: kind)
+                    )
+                    trackID = newTrack.id
+                    trackByKind[kind] = trackID
+                    try await applyOrThrow(AddTrackCommand(track: newTrack))
+                }
+
+                // Clamp the source to canonical seconds (mirrors
+                // `ScenesMerger.merge` — cam / mic / sysAudio can exceed the
+                // screen's duration; take the tail). The timeline range still
+                // spans the whole recording so shorter sources are padded by
+                // PreviewComposition instead of appearing as short nubs.
+                let assetSeconds = asset.nativeDuration.seconds
+                let clampedSeconds = min(assetSeconds, canonicalSeconds)
+                let sourceStartSeconds = max(0, assetSeconds - clampedSeconds)
+                let clip = Clip(
+                    assetID: asset.id,
+                    sourceRange: TimeRange(
+                        start: RationalTime.seconds(sourceStartSeconds),
+                        duration: RationalTime.seconds(clampedSeconds)
+                    ),
+                    timelineRange: TimeRange(
+                        start: timelineStart,
+                        duration: RationalTime.seconds(canonicalSeconds)
+                    )
                 )
-                trackID = newTrack.id
-                trackByKind[kind] = trackID
-                await apply(AddTrackCommand(track: newTrack))
+                try await applyOrThrow(InsertClipCommand(trackID: trackID, clip: clip))
             }
-
-            // Clamp to canonical seconds (mirrors `ScenesMerger.merge` — cam /
-            // mic / sysAudio start before SCStream so their natural duration
-            // can exceed the screen's; take the tail). For sources shorter
-            // than canonical, use the whole thing.
-            let assetSeconds = asset.nativeDuration.seconds
-            let clampedSeconds = min(assetSeconds, canonicalSeconds)
-            let sourceStartSeconds = max(0, assetSeconds - clampedSeconds)
-            let clip = Clip(
-                assetID: asset.id,
-                sourceRange: TimeRange(
-                    start: RationalTime.seconds(sourceStartSeconds),
-                    duration: RationalTime.seconds(clampedSeconds)
-                ),
-                timelineRange: TimeRange(
-                    start: timelineStart,
-                    duration: RationalTime.seconds(clampedSeconds)
-                )
-            )
-            await apply(InsertClipCommand(trackID: trackID, clip: clip))
+        } catch {
+            log.error("appendRecording: command sequence failed: \(String(describing: error), privacy: .public)")
         }
     }
 
@@ -288,7 +313,8 @@ final class ProjectDocument {
         do {
             let report = try ScenesBundleStore.cleanupUnusedTakes(
                 in: &snapshot,
-                bundleURL: bundleURL
+                bundleURL: bundleURL,
+                deleteFilesImmediately: false
             )
             guard !report.removedAssetIDs.isEmpty || !report.removedFilePaths.isEmpty else {
                 return report
@@ -300,6 +326,12 @@ final class ProjectDocument {
             await refreshFromHistory()
             revision &+= 1
             isDirty = false
+            do {
+                try ScenesBundleStore.deleteCleanupFiles(report, bundleURL: bundleURL)
+            } catch {
+                log.error("cleanup file deletion failed after project write: \(String(describing: error), privacy: .public)")
+                status = .failed(message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+            }
             log.info("cleanup removed assetCount=\(report.removedAssetIDs.count) fileCount=\(report.removedFilePaths.count)")
             return report
         } catch {

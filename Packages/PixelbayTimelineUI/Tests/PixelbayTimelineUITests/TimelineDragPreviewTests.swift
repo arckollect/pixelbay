@@ -187,6 +187,23 @@ final class TimelineDragPreviewTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(dragged.effectsLane.keyframes[0].frame.size.width, 1)
     }
 
+    func test_trimEffectKeyframeIn_clampsAtTimelineStart_preservingRightEdge() {
+        let project = makeProjectWithKeyframe(start: 1, duration: 3)
+        let kfID = project.effects[0].id
+        let viewport = TimelineViewport(size: CGSize(width: 1000, height: 240), pixelsPerSecond: 100)
+        let baseline = TimelineLayoutCalculator.layout(project: project, viewport: viewport)
+        let baselineFrame = baseline.effectsLane.keyframes[0].frame
+
+        let dragged = TimelineLayoutCalculator.layout(
+            project: project,
+            viewport: viewport,
+            dragPreview: .trimEffectKeyframeIn(kfID, deltaPixels: -500)
+        )
+        let post = dragged.effectsLane.keyframes[0].frame
+        XCTAssertEqual(post.origin.x, TimelineLayoutCalculator.trackHeaderWidth, accuracy: 0.001)
+        XCTAssertEqual(post.maxX, baselineFrame.maxX, accuracy: 0.001)
+    }
+
     func test_trimEffectKeyframeOut_extendsWidth() {
         let project = makeProjectWithKeyframe(start: 1, duration: 2)
         let kfID = project.effects[0].id

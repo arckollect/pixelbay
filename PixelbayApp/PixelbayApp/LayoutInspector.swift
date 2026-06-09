@@ -4,23 +4,28 @@ import PixelbayDesignSystem
 import SwiftUI
 import UniformTypeIdentifiers
 
-// Phase 3a Inspector section: cam-position grid, cam shape, background.
-// Edits funnel back through a single `onChange` closure that dispatches a
+// Phase 3a Inspector sections for scene composition, split across two right-
+// rail tabs:
+//   • CameraInspector     — webcam composition: PiP / side-by-side mode,
+//     position, size, shape ("Camera" tab).
+//   • BackgroundInspector — the backdrop gallery + frame padding
+//     ("Background & Scene" tab).
+// Both funnel edits through a single `onChange` closure that dispatches a
 // `SetLayoutPresetCommand` — coalescing logic (debouncing slider drags,
-// dropping no-op edits) lives in the caller's Task so the view stays a
-// dumb form. Background-color edits commit on focus loss / Enter via
-// SwiftUI's ColorPicker which already coalesces continuous picker drags.
+// dropping no-op edits) lives in the caller's Task so the views stay dumb
+// forms. Background-color edits commit on focus loss / Enter via SwiftUI's
+// ColorPicker which already coalesces continuous picker drags.
 
-struct LayoutInspector: View {
+/// Webcam composition controls: PiP vs side-by-side mode, and — depending on
+/// the mode — the PiP position grid + cam size, or the split screen-side +
+/// share slider. Cam shape (rectangle / circle) applies to both modes.
+struct CameraInspector: View {
     let layout: LayoutPreset
-    /// Project bundle root — image-wallpaper uploads are copied in here so the
-    /// project stays self-contained.
-    let bundleURL: URL
     let onChange: (LayoutPreset) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            PBSectionHeader("Layout")
+            PBSectionHeader("Camera")
 
             modeRow
             if case .pip = layout.mode {
@@ -31,13 +36,6 @@ struct LayoutInspector: View {
             }
 
             camShapeRow
-
-            PBDivider()
-            backgroundSection
-
-            if layout.padding > 0 || hasBackground {
-                paddingRow
-            }
         }
     }
 
@@ -263,6 +261,27 @@ struct LayoutInspector: View {
                 onChange(next)
             }
         )
+    }
+}
+
+/// The backdrop gallery (image wallpapers, gradient meshes, solid color /
+/// desktop) plus the frame padding — the "Background & Scene" tab.
+struct BackgroundInspector: View {
+    let layout: LayoutPreset
+    /// Project bundle root — image-wallpaper uploads are copied in here so the
+    /// project stays self-contained.
+    let bundleURL: URL
+    let onChange: (LayoutPreset) -> Void
+    let onError: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            backgroundSection
+
+            if layout.padding > 0 || hasBackground {
+                paddingRow
+            }
+        }
     }
 
     // MARK: - Background
@@ -593,7 +612,7 @@ struct LayoutInspector: View {
             )
             try FileManager.default.copyItem(at: src, to: dest)
         } catch {
-            NSLog("Wallpaper upload copy failed: \(error.localizedDescription)")
+            onError("Wallpaper upload failed: \(error.localizedDescription)")
             return
         }
         let name = src.deletingPathExtension().lastPathComponent
@@ -715,7 +734,7 @@ private func meshBlob(
     )
 }
 
-extension LayoutInspector {
+extension BackgroundInspector {
     /// Curated "wallpaper" mesh gradients — the Screen Studio / Loom look,
     /// rendered procedurally (no bundled images). Cool-leaning to match the
     /// app's premium palette, with a few warm and light options for variety.

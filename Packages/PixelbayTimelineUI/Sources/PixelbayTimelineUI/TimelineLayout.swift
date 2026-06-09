@@ -538,7 +538,8 @@ public enum TimelineLayoutCalculator {
                 let minDelta = -CGFloat(startSec) * pps
                 xAbs += max(delta, minDelta)
             case .trimEffectKeyframeIn(let id, let delta) where id == kf.id:
-                let clamped = min(delta, width - 1)
+                let minDelta = -CGFloat(startSec) * pps
+                let clamped = min(max(delta, minDelta), width - 1)
                 xAbs += clamped
                 width -= clamped
             case .trimEffectKeyframeOut(let id, let delta) where id == kf.id:
@@ -613,7 +614,10 @@ public enum TimelineLayoutCalculator {
         // overlaps any secondary track's clip in a collapsed grouped
         // row. Pure-function so tests can drive it directly without
         // touching the NSView.
-        let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        let tracksByID = Dictionary(
+            tracks.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         var badges: [GroupedLaneBadge] = []
         for row in displayRows {
             guard row.isCollapsed else { continue }
@@ -744,7 +748,10 @@ public enum TimelineLayoutCalculator {
         let candidates: [Double] = [
             0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600
         ]
-        let major = candidates.first(where: { Double(pps) * $0 >= Double(minMajorPx) }) ?? candidates.last!
+        guard let largestCandidate = candidates.last else {
+            return (1, 1)
+        }
+        let major = candidates.first(where: { Double(pps) * $0 >= Double(minMajorPx) }) ?? largestCandidate
         // Find the largest candidate strictly less than `major` whose pixel
         // width is still readable (≥ minMinorPx). If none qualifies, the
         // ruler renders only major ticks.

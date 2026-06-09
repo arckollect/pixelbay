@@ -350,6 +350,97 @@ final class EffectEvaluatorTests: XCTestCase {
         XCTAssertEqual(cy, 0.5, accuracy: 0.001)
     }
 
+    private func motionBlurLength(_ layout: ResolvedLayout) -> Float {
+        let v = layout.screenMotionBlurUV
+        return (v.x * v.x + v.y * v.y).squareRoot()
+    }
+
+    func test_apply_zoomWithTrajectory_fastPanAddsDirectionalBlurAlongMotion() {
+        let base = baseLayout()
+        let kf = trajectoryZoomKeyframe(
+            timelineStart: 0,
+            duration: 2,
+            trajectory: [
+                ZoomTrajectorySample(t: 0, x: 0.30, y: 0.50),
+                ZoomTrajectorySample(t: 1, x: 0.70, y: 0.50)
+            ]
+        )
+        let result = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.5)
+        XCTAssertGreaterThan(motionBlurLength(result), 1e-4,
+                             "fast follow pans should get velocity-proportional motion blur")
+        XCTAssertLessThanOrEqual(motionBlurLength(result), Float(EffectEvaluator.panBlurMaxUV) + 1e-6)
+        // The pan is purely horizontal, so the blur vector must point along x.
+        XCTAssertGreaterThan(abs(result.screenMotionBlurUV.x), 1e-4)
+        XCTAssertEqual(result.screenMotionBlurUV.y, 0, accuracy: 1e-5,
+                       "blur must align with the camera's motion direction")
+        // Hold portion (zero ease) → no transition bell.
+        XCTAssertEqual(result.screenZoomBlurSigmaPx, 0, accuracy: 1e-6)
+    }
+
+    func test_apply_zoomWithTrajectory_fasterPanGetsLongerBlur() {
+        let base = baseLayout()
+        let slow = trajectoryZoomKeyframe(
+            timelineStart: 0,
+            duration: 2,
+            trajectory: [
+                ZoomTrajectorySample(t: 0, x: 0.40, y: 0.50),
+                ZoomTrajectorySample(t: 1, x: 0.60, y: 0.50)
+            ]
+        )
+        let fast = trajectoryZoomKeyframe(
+            timelineStart: 0,
+            duration: 2,
+            trajectory: [
+                ZoomTrajectorySample(t: 0, x: 0.30, y: 0.50),
+                ZoomTrajectorySample(t: 1, x: 0.70, y: 0.50)
+            ]
+        )
+        let slowResult = EffectEvaluator.apply(keyframes: [slow], baseLayout: base, atTime: 0.5)
+        let fastResult = EffectEvaluator.apply(keyframes: [fast], baseLayout: base, atTime: 0.5)
+        XCTAssertGreaterThan(motionBlurLength(fastResult), motionBlurLength(slowResult),
+                             "blur length must grow with camera speed")
+    }
+
+    func test_apply_zoomWithTrajectory_followMotionBlurSliderScalesPanBlur() {
+        let base = baseLayout()
+        let normal = trajectoryZoomKeyframe(
+            timelineStart: 0,
+            duration: 2,
+            trajectory: [
+                ZoomTrajectorySample(t: 0, x: 0.30, y: 0.50),
+                ZoomTrajectorySample(t: 1, x: 0.70, y: 0.50)
+            ]
+        )
+        var disabled = normal
+        disabled.zoomFollowMotionBlur = 0
+        var doubled = normal
+        doubled.zoomFollowMotionBlur = 2
+
+        let noBlur = EffectEvaluator.apply(keyframes: [disabled], baseLayout: base, atTime: 0.5)
+        let defaultBlur = EffectEvaluator.apply(keyframes: [normal], baseLayout: base, atTime: 0.5)
+        let moreBlur = EffectEvaluator.apply(keyframes: [doubled], baseLayout: base, atTime: 0.5)
+        XCTAssertEqual(motionBlurLength(noBlur), 0, accuracy: 1e-6)
+        XCTAssertGreaterThan(motionBlurLength(moreBlur), motionBlurLength(defaultBlur) * 1.9,
+                             "follow motion blur slider values above 1 should increase pan blur")
+    }
+
+    func test_apply_zoomWithStationaryTrajectory_keepsScreenCrisp() {
+        let base = baseLayout()
+        let kf = trajectoryZoomKeyframe(
+            timelineStart: 0,
+            duration: 2,
+            trajectory: [
+                ZoomTrajectorySample(t: 0, x: 0.50, y: 0.50),
+                ZoomTrajectorySample(t: 1, x: 0.50, y: 0.50)
+            ]
+        )
+        let result = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.5)
+        XCTAssertEqual(result.screenZoomBlurSigmaPx, 0, accuracy: 1e-6,
+                       "stationary held zooms must remain sharp")
+        XCTAssertEqual(motionBlurLength(result), 0, accuracy: 1e-6,
+                       "stationary held zooms must carry no motion-blur vector")
+    }
+
     func test_apply_zoomWithTrajectory_catmullRomMidpoint_differsFromLinearMidpointWhenNeighborsDiffer() {
         let base = baseLayout()
         // Four samples chosen so the Catmull-Rom midpoint of the middle
