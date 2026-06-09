@@ -459,10 +459,11 @@ final class EffectEvaluatorTests: XCTestCase {
         let locked = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.54)
         XCTAssertEqual(motionBlurLength(locked), 0, accuracy: 1e-6,
                        "no pan blur while the zoom centre is ease-locked")
-        // Just after the lock releases: blur must be bounded by the local
-        // segment speed (0.4 norm/s → ≤ speed × shutter), nowhere near the
-        // old spike that pinned the kernel at panBlurMaxUV.
-        let released = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.56)
+        // Once the short post-lock handoff is underway: blur must be
+        // bounded by the local segment speed (0.4 norm/s → ≤ speed ×
+        // shutter), nowhere near the old spike that pinned the kernel at
+        // panBlurMaxUV.
+        let released = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.65)
         let localSpeedBound = Float(0.4 * EffectEvaluator.panBlurShutterSeconds)
         XCTAssertGreaterThan(motionBlurLength(released), 1e-5,
                              "real pan motion right after the lock should still blur")
@@ -577,6 +578,51 @@ final class EffectEvaluatorTests: XCTestCase {
         let rightVx = (postCX - atCX) / eps
         XCTAssertEqual(leftVx, rightVx, accuracy: 0.05,
                        "velocity continuous across the interior sample boundary")
+    }
+
+    func test_apply_zoomWithTrajectory_easeInReleaseDoesNotSnapPlacement() {
+        let base = baseLayout()
+        let kf = EffectKeyframe(
+            kind: .zoom,
+            timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2)),
+            zoomFactor: 2.0,
+            easeIn: .seconds(0.55),
+            easeOut: .seconds(0.55),
+            trajectory: [
+                ZoomTrajectorySample(t: 0.0, x: 0.30, y: 0.50),
+                ZoomTrajectorySample(t: 0.55, x: 0.58, y: 0.50),
+                ZoomTrajectorySample(t: 1.0, x: 0.62, y: 0.50),
+                ZoomTrajectorySample(t: 2.0, x: 0.62, y: 0.50)
+            ]
+        )
+        let atRelease = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.55)
+        let nextFrame = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.55 + 1.0 / 60.0)
+        let dx = abs(nextFrame.screen.origin.x - atRelease.screen.origin.x)
+        XCTAssertLessThan(dx, 40,
+                          "center handoff after ease-in should not snap the fully-zoomed frame into place")
+    }
+
+    func test_apply_zoomWithTrajectory_easeOutStartDoesNotSnapToFinalSample() {
+        let base = baseLayout()
+        let kf = EffectKeyframe(
+            kind: .zoom,
+            timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2)),
+            zoomFactor: 2.0,
+            easeIn: .seconds(0.55),
+            easeOut: .seconds(0.55),
+            trajectory: [
+                ZoomTrajectorySample(t: 0.0, x: 0.35, y: 0.50),
+                ZoomTrajectorySample(t: 1.0, x: 0.42, y: 0.50),
+                ZoomTrajectorySample(t: 1.45, x: 0.45, y: 0.50),
+                ZoomTrajectorySample(t: 2.0, x: 0.70, y: 0.50)
+            ]
+        )
+        let eps = 1.0 / 60.0
+        let beforeEaseOut = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 1.45 - eps)
+        let atEaseOut = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 1.45)
+        let dx = abs(atEaseOut.screen.origin.x - beforeEaseOut.screen.origin.x)
+        XCTAssertLessThan(dx, 40,
+                          "ease-out should freeze at the current center, not jump to the trajectory's final sample")
     }
 
     func test_apply_zoomWithTrajectory_catmullRom_firstSegmentMirrorsBoundary() {

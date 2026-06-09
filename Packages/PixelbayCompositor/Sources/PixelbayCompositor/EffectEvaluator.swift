@@ -155,6 +155,12 @@ public enum EffectEvaluator {
     private static let edgeBlendStrength: Double = 0.6
     private static let cornerCutoff: Double = 0.08
     private static let cornerFactorScale: Double = 0.7
+    /// Short centre handoff after ease-in. The zoom scale reaches 100% at the
+    /// end of the ease window; if the follow trajectory moved while the centre
+    /// was locked, jumping to that trajectory on the next frame reads as a
+    /// last-second placement snap. Blend the focal point onto the live path
+    /// over a handful of frames instead.
+    private static let zoomCenterHandoffSeconds: Double = 0.18
 
     private static func applyZoom(
         _ kf: EffectKeyframe,
@@ -282,17 +288,17 @@ public enum EffectEvaluator {
 
     /// Per-frame zoom centre.
     ///
-    /// Phase 3d: the centre is **locked** during the ease-in and ease-out
+    /// Phase 3d+: the centre is stable during the ease-in and ease-out
     /// windows. The ease windows now drive a deliberate rect-growth-in-
     /// place feel (paired with the screen-position lerp in `applyZoom`):
     ///   - Ease-in: hold at `trajectory[0]` (cursor-at-trigger). The
     ///     viewer sees the framing rect grow around the click point.
-    ///   - Hold (middle): non-uniform Catmull-Rom along trajectory — the
-    ///     camera follows live cursor motion via the post-anchorFollow
-    ///     anchor positions.
-    ///   - Ease-out: hold at `trajectory[last]` (cursor at the moment
-    ///     ease-out begins, give or take a few ms). The framing rect
-    ///     shrinks back to 1× without the centre drifting.
+    ///   - Handoff/hold (middle): blend onto a non-uniform Catmull-Rom
+    ///     trajectory, then follow live cursor motion via the post-
+    ///     anchorFollow anchor positions.
+    ///   - Ease-out: freeze at the centre where the shrink begins. The
+    ///     framing rect shrinks back to 1× without the centre drifting or
+    ///     jumping to the trajectory's final sample.
     ///
     /// The earlier always-Catmull-Rom behaviour caused the focal point to
     /// wobble while the rect was still small (low zoom factor), which
@@ -335,19 +341,39 @@ public enum EffectEvaluator {
         let firstSample = trajectory[0]
         let lastSample = trajectory[trajectory.count - 1]
 
-        // Phase 3d centre-lock during the ease windows. The keyframe's
-        // ease-in / ease-out durations are inside the keyframe's range, so
-        // localT < easeIn  → still ramping up      → lock to first sample.
-        // localT > range − easeOut → ramping back down → lock to last sample.
-        // Hold (middle) → sample the trajectory normally below.
+        // Centre-lock during the ease windows. Keep the focal point stable
+        // while the rect grows/shrinks, but make both handoffs continuous:
+        //   - after ease-in, blend from first sample to the live trajectory;
+        //   - during ease-out, freeze at the centre where shrink begins.
         let (inEnd, outStart) = easeLockBounds(for: kf)
-        if localT <= max(firstSample.t, inEnd) {
+        let inLockEnd = max(firstSample.t, inEnd)
+        let outLockStart = min(lastSample.t, outStart)
+        if localT <= inLockEnd {
             return (firstSample.x, firstSample.y)
         }
-        if localT >= min(lastSample.t, outStart) {
-            return (lastSample.x, lastSample.y)
+        if localT >= outLockStart {
+            return sampledZoomCenter(in: trajectory, at: outLockStart)
         }
+        let sampled = sampledZoomCenter(in: trajectory, at: localT)
+        let handoffEnd = min(outLockStart, inLockEnd + Self.zoomCenterHandoffSeconds)
+        if localT < handoffEnd, handoffEnd > inLockEnd {
+            let alpha = quinticSmoothstep((localT - inLockEnd) / (handoffEnd - inLockEnd))
+            return (
+                firstSample.x + (sampled.x - firstSample.x) * alpha,
+                firstSample.y + (sampled.y - firstSample.y) * alpha
+            )
+        }
+        return sampled
+    }
 
+    private static func sampledZoomCenter(
+        in trajectory: [ZoomTrajectorySample],
+        at localT: Double
+    ) -> (x: Double, y: Double) {
+        guard let first = trajectory.first else { return (0.5, 0.5) }
+        guard let last = trajectory.last else { return (first.x, first.y) }
+        if localT <= first.t { return (first.x, first.y) }
+        if localT >= last.t { return (last.x, last.y) }
         // Hold portion — non-uniform Catmull-Rom along trajectory. Linear
         // scan is fine: auto-zoom segments are short (≤ a few seconds at
         // 120 Hz → hundreds of samples max). Switch to binary search if
@@ -373,7 +399,7 @@ public enum EffectEvaluator {
                 )
             }
         }
-        return (lastSample.x, lastSample.y)
+        return (last.x, last.y)
     }
 
     /// Effective ease-window bounds in keyframe-local seconds, shared by
@@ -430,6 +456,8 @@ public enum EffectEvaluator {
         let (inEnd, outStart) = easeLockBounds(for: kf)
         if localT <= max(firstSample.t, inEnd) { return (0, 0) }
         if localT >= min(lastSample.t, outStart) { return (0, 0) }
+        let inLockEnd = max(firstSample.t, inEnd)
+        let outLockStart = min(lastSample.t, outStart)
         // Bracketing segment: segment i spans [t_i, t_{i+1}].
         var bracket = trajectory.count - 2
         for i in 1..<trajectory.count where localT <= trajectory[i].t {
@@ -451,7 +479,19 @@ public enum EffectEvaluator {
             count += 1
         }
         guard count > 0 else { return (0, 0) }
-        return (sumVx / Double(count), sumVy / Double(count))
+        let handoffEnd = min(outLockStart, inLockEnd + Self.zoomCenterHandoffSeconds)
+        let scale: Double
+        if localT < handoffEnd, handoffEnd > inLockEnd {
+            scale = quinticSmoothstep((localT - inLockEnd) / (handoffEnd - inLockEnd))
+        } else {
+            scale = 1
+        }
+        return (sumVx / Double(count) * scale, sumVy / Double(count) * scale)
+    }
+
+    private static func quinticSmoothstep(_ x: Double) -> Double {
+        let c = max(0, min(1, x))
+        return c * c * c * (c * (c * 6 - 15) + 10)
     }
 
     private static func applyTalkingHead(
