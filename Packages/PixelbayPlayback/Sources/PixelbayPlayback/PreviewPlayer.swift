@@ -60,6 +60,7 @@ public final class PreviewPlayer {
         self.player = AVPlayer()
         self.player.allowsExternalPlayback = false
         self.player.actionAtItemEnd = .pause
+        self.player.automaticallyWaitsToMinimizeStalling = false
     }
 
     // Explicit teardown for the periodic time observer + KVO + notification
@@ -169,25 +170,6 @@ public final class PreviewPlayer {
                 let clamped = CMTimeMinimum(savedTime, duration)
                 if clamped > .zero {
                     seek(to: clamped)
-                } else if !wasPlaying {
-                    // Fresh load, paused at t=0. AVPlayer's initial pre-roll
-                    // frame is composited before the webcam track's decoder is
-                    // primed, so the camera PiP is missing until playback
-                    // starts (the "first frame has no webcam" report). Nudge a
-                    // seek to zero with a small toleranceAfter: AVFoundation
-                    // settles every decoder, then re-pulls a frame through the
-                    // compositor with all layers present. A few frames of
-                    // tolerance is imperceptible but reliably dodges the
-                    // camera's black warm-up frame too.
-                    // Trailing completion closure selects the synchronous
-                    // seek overload (the bare call resolves to the `async`
-                    // variant in this async context and would need `await`).
-                    player.seek(
-                        to: .zero,
-                        toleranceBefore: .zero,
-                        toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600),
-                        completionHandler: { _ in }
-                    )
                 }
             }
             if wasPlaying {
@@ -295,6 +277,12 @@ public final class PreviewPlayer {
         rateObservation?.invalidate()
 
         let item = AVPlayerItem(asset: preview.composition)
+        // Keep cold-launch preview cheap. The editor is usually paused when a
+        // project opens; letting AVPlayer build a forward decode buffer there
+        // can wake VTDecoderXPCService aggressively before the user presses
+        // play. Exact seeks/playback still decode on demand.
+        item.preferredForwardBufferDuration = 0
+        item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
         if let videoComposition = preview.videoComposition {
             item.videoComposition = videoComposition
         }

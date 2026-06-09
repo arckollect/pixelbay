@@ -424,6 +424,52 @@ final class EffectEvaluatorTests: XCTestCase {
                              "follow motion blur slider values above 1 should increase pan blur")
     }
 
+    func test_apply_zoomEaseLockBoundary_noBlurSpike() {
+        // Regression: camera speed used to be a 1/60 s finite difference of
+        // zoomCenter. The centre is LOCKED to trajectory[0] during ease-in,
+        // so the first frame after the lock released measured the entire
+        // ease window's accumulated anchor displacement in one frame — a
+        // huge fake speed → max-strength blur burst right as the zoom
+        // settled ("blur before the movement even starts"). The velocity
+        // now comes from the trajectory's own waypoints and is gated to the
+        // hold window, so blur at the boundary must be proportional to the
+        // LOCAL segment speed, and exactly zero inside the lock.
+        let base = baseLayout()
+        // Anchor sweeps 0.30 → 0.70 over the first second (0.4 norm/s),
+        // moving heavily during the 0.55 s ease-in window, then holds.
+        var trajectory: [ZoomTrajectorySample] = []
+        var ts = 0.0
+        while ts <= 2.0 {
+            let x = ts < 1.0 ? 0.30 + 0.40 * ts : 0.70
+            trajectory.append(ZoomTrajectorySample(t: ts, x: x, y: 0.50))
+            ts += 0.1
+        }
+        let kf = EffectKeyframe(
+            kind: .zoom,
+            timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2)),
+            zoomFactor: 2.0,
+            centerX: 0.5,
+            centerY: 0.5,
+            easeIn: .seconds(0.55),
+            easeOut: .seconds(0),
+            trajectory: trajectory
+        )
+        // Inside the ease-in lock: displayed centre is pinned → no pan blur,
+        // no matter how much the anchor moved underneath.
+        let locked = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.54)
+        XCTAssertEqual(motionBlurLength(locked), 0, accuracy: 1e-6,
+                       "no pan blur while the zoom centre is ease-locked")
+        // Just after the lock releases: blur must be bounded by the local
+        // segment speed (0.4 norm/s → ≤ speed × shutter), nowhere near the
+        // old spike that pinned the kernel at panBlurMaxUV.
+        let released = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.56)
+        let localSpeedBound = Float(0.4 * EffectEvaluator.panBlurShutterSeconds)
+        XCTAssertGreaterThan(motionBlurLength(released), 1e-5,
+                             "real pan motion right after the lock should still blur")
+        XCTAssertLessThanOrEqual(motionBlurLength(released), localSpeedBound + 1e-6,
+                                 "boundary blur must be proportional to the local pan speed, not a lock-release spike")
+    }
+
     func test_apply_zoomWithStationaryTrajectory_keepsScreenCrisp() {
         let base = baseLayout()
         let kf = trajectoryZoomKeyframe(

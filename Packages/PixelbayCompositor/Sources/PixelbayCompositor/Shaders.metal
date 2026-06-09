@@ -228,9 +228,11 @@ struct CursorUniforms {
     float _pad0;
 };
 
-// Cursor pass. Velocity-aligned motion blur with a bright Gaussian core so
-// the cursor head stays legible inside a long streak. clamp_to_zero because
-// the quad is padded past the sprite bounds to give the trail room.
+// Cursor pass. Velocity-aligned trailing shutter blur with a bright crisp
+// head. `blurOffsetUV` is the distance the cursor travelled during the
+// synthetic exposure; sampling uv + offset * phase integrates previous cursor
+// positions behind the current pointer. clamp_to_zero because the quad is
+// padded past the sprite bounds to give the trail room.
 fragment float4 cursorFragment(
     VertexOut in [[stage_in]],
     texture2d<float, access::sample> tex [[texture(0)]],
@@ -247,19 +249,22 @@ fragment float4 cursorFragment(
     float extentPx = length(offset * u.layerSizePx);
     int taps = clamp(int(extentPx), 13, 61);
     float noise = gradientNoise(in.position.xy);
+    float2 dirPx = normalize(offset * u.layerSizePx);
+    float2 perpUV = float2(-dirPx.y, dirPx.x) * 0.25 / u.layerSizePx;
     float4 acc = float4(0.0);
     float wSum = 0.0;
     for (int i = 0; i < taps; ++i) {
-        float t = ((float(i) + noise) / float(taps)) * 2.0 - 1.0;
-        float w = exp(-2.0 * t * t);
-        float2 uv = in.texCoord + offset * t;
+        float phase = (float(i) + noise) / float(taps);
+        float w = exp(-3.5 * phase * phase);
+        float pj = fract(noise + float(i) * 0.61803398875) * 2.0 - 1.0;
+        float2 uv = in.texCoord + offset * phase + perpUV * pj;
         acc += tex.sample(s, uv) * w;
         wSum += w;
     }
     acc /= wSum;
-    // Sharp-head guarantee: the cursor at its true position stays ≥60% solid.
+    // Sharp-head guarantee: the cursor at its true position stays ≥75% solid.
     float4 head = tex.sample(s, in.texCoord);
-    acc = mix(acc, head, head.a * 0.6);
+    acc = mix(acc, head, head.a * 0.75);
     acc.a *= u.opacity;
     return acc;
 }

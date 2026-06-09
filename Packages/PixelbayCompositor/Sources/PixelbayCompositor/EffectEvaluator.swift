@@ -51,18 +51,14 @@ public enum EffectEvaluator {
     static let panBlurMaxUV: Double = 0.030
 
     /// Camera-speed onset ramp for the pan blur, in norm-units/sec on the
-    /// per-frame zoom centre. Below threshold the camera is treated as
-    /// still (no blur); by `panBlurFullSpeed` the blur is fully
-    /// proportional to speed.
-    static let panBlurThresholdSpeed: Double = 0.06
-    static let panBlurFullSpeed: Double = 0.30
-
-    /// Δt used to finite-difference the zoom centre when computing the
-    /// camera's instantaneous speed for the pan-blur ramp. One 60 fps
-    /// frame is short enough that the difference closely tracks the
-    /// instantaneous velocity, long enough that quantisation in the
-    /// Catmull-Rom interpolation doesn't dominate.
-    static let panBlurVelocityDt: Double = 1.0 / 60.0
+    /// camera's anchor-waypoint velocity. Below threshold the camera is
+    /// treated as still (no blur); by `panBlurFullSpeed` the blur is fully
+    /// proportional to speed. Raised from 0.06/0.30 so the slow
+    /// anticipatory pre-drift (the camera easing toward a sweep's
+    /// destination before the cursor commits) stays crisp — blur builds
+    /// only once the pan is actually fast.
+    static let panBlurThresholdSpeed: Double = 0.12
+    static let panBlurFullSpeed: Double = 0.60
 
     public static func apply(
         keyframes: [EffectKeyframe],
@@ -119,14 +115,8 @@ public enum EffectEvaluator {
             let transitionSigma = bell
                 * Self.screenZoomBlurPeakSigmaPx
                 * winner.kf.zoomFollowMotionBlur
-            let center = zoomCenter(for: winner.kf, atTime: t)
-            let prevT = max(0.0, t - Self.panBlurVelocityDt)
-            let prevCenter = zoomCenter(for: winner.kf, atTime: prevT)
-            let dx = center.x - prevCenter.x
-            let dy = center.y - prevCenter.y
-            let dt = max(1e-6, t - prevT)
-            let cameraDist = (dx * dx + dy * dy).squareRoot()
-            let cameraSpeed = cameraDist / dt
+            let (vx, vy) = zoomCameraVelocity(for: winner.kf, atTime: t)
+            let cameraSpeed = (vx * vx + vy * vy).squareRoot()
             let panRamp = MouseTrajectory.smoothstep(
                 Self.panBlurThresholdSpeed,
                 Self.panBlurFullSpeed,
@@ -139,10 +129,10 @@ public enum EffectEvaluator {
                     * winner.strength
                     * winner.kf.zoomFollowMotionBlur
             )
-            if cameraDist > 1e-9, panHalfExtentUV > 1e-5 {
+            if cameraSpeed > 1e-9, panHalfExtentUV > 1e-5 {
                 layout.screenMotionBlurUV = SIMD2(
-                    Float(dx / cameraDist * panHalfExtentUV),
-                    Float(dy / cameraDist * panHalfExtentUV)
+                    Float(vx / cameraSpeed * panHalfExtentUV),
+                    Float(vy / cameraSpeed * panHalfExtentUV)
                 )
             }
             layout.screenZoomBlurSigmaPx = Float(transitionSigma)
@@ -350,24 +340,10 @@ public enum EffectEvaluator {
         // localT < easeIn  → still ramping up      → lock to first sample.
         // localT > range − easeOut → ramping back down → lock to last sample.
         // Hold (middle) → sample the trajectory normally below.
-        let total = kf.timelineRange.end.seconds - kf.timelineRange.start.seconds
-        let easeIn = max(0.0, kf.easeIn.seconds)
-        let easeOut = max(0.0, kf.easeOut.seconds)
-        let easeBudget = easeIn + easeOut
-        let inEff: Double
-        let outEff: Double
-        if easeBudget > total, total > 0 {
-            let scale = total / easeBudget
-            inEff = easeIn * scale
-            outEff = easeOut * scale
-        } else {
-            inEff = easeIn
-            outEff = easeOut
-        }
-        if localT <= max(firstSample.t, inEff) {
+        let (inEnd, outStart) = easeLockBounds(for: kf)
+        if localT <= max(firstSample.t, inEnd) {
             return (firstSample.x, firstSample.y)
         }
-        let outStart = total - outEff
         if localT >= min(lastSample.t, outStart) {
             return (lastSample.x, lastSample.y)
         }
@@ -398,6 +374,84 @@ public enum EffectEvaluator {
             }
         }
         return (lastSample.x, lastSample.y)
+    }
+
+    /// Effective ease-window bounds in keyframe-local seconds, shared by
+    /// `zoomCenter`'s centre-lock and `zoomCameraVelocity`'s blur gating so
+    /// the two regimes can never drift apart. `inEnd` is where the ease-in
+    /// lock releases; `outStart` is where the ease-out lock engages. Ease
+    /// durations that overflow the keyframe's range are proportionally
+    /// shrunk, mirroring `EffectKeyframe.strength(at:)`.
+    private static func easeLockBounds(for kf: EffectKeyframe) -> (inEnd: Double, outStart: Double) {
+        let total = kf.timelineRange.end.seconds - kf.timelineRange.start.seconds
+        let easeIn = max(0.0, kf.easeIn.seconds)
+        let easeOut = max(0.0, kf.easeOut.seconds)
+        let easeBudget = easeIn + easeOut
+        let inEff: Double
+        let outEff: Double
+        if easeBudget > total, total > 0 {
+            let scale = total / easeBudget
+            inEff = easeIn * scale
+            outEff = easeOut * scale
+        } else {
+            inEff = easeIn
+            outEff = easeOut
+        }
+        return (inEff, total - outEff)
+    }
+
+    /// Camera velocity (norm-units/s in screen-content space) driving the
+    /// pan motion blur. Derived from the anchor trajectory's own waypoints
+    /// — a ±2-segment box average of per-segment velocities — rather than
+    /// finite-differencing the Catmull-Rom-interpolated `zoomCenter`, which
+    /// had two visible failure modes:
+    ///   • the spline's local curvature wiggles between 30 Hz waypoints, so
+    ///     a 1/60 s derivative points in noise directions during slow drift
+    ///     (the "blur direction is random" report);
+    ///   • differencing across the ease-lock boundary returned the entire
+    ///     ease window's accumulated anchor displacement in one frame — a
+    ///     massive fake speed spike right as the zoom settled (the "blur
+    ///     before the movement even starts" report).
+    /// Returns zero while the displayed centre is locked (ease windows,
+    /// same bounds as `zoomCenter` via `easeLockBounds`) and for pinned /
+    /// trajectory-less keyframes — no displayed pan, no blur, by
+    /// construction. Near-zero-Δt segments (scenes-merge boundaries place
+    /// two samples at the same timeline time) are skipped so a scene cut
+    /// can't masquerade as an infinite-speed pan.
+    private static func zoomCameraVelocity(
+        for kf: EffectKeyframe,
+        atTime t: Double
+    ) -> (vx: Double, vy: Double) {
+        if kf.anchorMode == .pinned { return (0, 0) }
+        guard let trajectory = kf.trajectory, trajectory.count >= 2 else { return (0, 0) }
+        let localT = t - kf.timelineRange.start.seconds
+        let firstSample = trajectory[0]
+        let lastSample = trajectory[trajectory.count - 1]
+        let (inEnd, outStart) = easeLockBounds(for: kf)
+        if localT <= max(firstSample.t, inEnd) { return (0, 0) }
+        if localT >= min(lastSample.t, outStart) { return (0, 0) }
+        // Bracketing segment: segment i spans [t_i, t_{i+1}].
+        var bracket = trajectory.count - 2
+        for i in 1..<trajectory.count where localT <= trajectory[i].t {
+            bracket = i - 1
+            break
+        }
+        var sumVx = 0.0
+        var sumVy = 0.0
+        var count = 0
+        let lo = max(0, bracket - 2)
+        let hi = min(trajectory.count - 2, bracket + 2)
+        for i in lo...hi {
+            let a = trajectory[i]
+            let b = trajectory[i + 1]
+            let dt = b.t - a.t
+            guard dt > 1e-4 else { continue }
+            sumVx += (b.x - a.x) / dt
+            sumVy += (b.y - a.y) / dt
+            count += 1
+        }
+        guard count > 0 else { return (0, 0) }
+        return (sumVx / Double(count), sumVy / Double(count))
     }
 
     private static func applyTalkingHead(

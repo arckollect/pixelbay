@@ -669,15 +669,27 @@ public final class MetalRenderGraph: @unchecked Sendable {
         let blurGate = CGFloat(max(0.0, min(1.0, state.motionBlurStrength)))
         let traversedXContent = CGFloat(state.velocityXFractionPerSecond) * shutterTime * screen.size.width * blurGate
         let traversedYContent = CGFloat(state.velocityYFractionPerSecond) * shutterTime * screen.size.height * blurGate
-        let blurOffsetUVX = clampUV(Float(traversedXContent / widthPx))
-        let blurOffsetUVY = clampUV(Float(traversedYContent / heightPx))
+        // Magnitude clamp at ±1.0 sprite-UV (a full sprite-length each side
+        // at saturation) — scales the VECTOR, never the axes independently.
+        // The previous per-axis clamp rotated the streak off the motion
+        // axis whenever one component saturated (a fast mostly-horizontal
+        // flick clamped x but left y untouched), which read as blur in the
+        // wrong direction.
+        var blurOffsetUVX = Float(traversedXContent / widthPx)
+        var blurOffsetUVY = Float(traversedYContent / heightPx)
+        let blurLen = (blurOffsetUVX * blurOffsetUVX + blurOffsetUVY * blurOffsetUVY).squareRoot()
+        if blurLen > Self.maxCursorBlurUV {
+            let uvScale = Self.maxCursorBlurUV / blurLen
+            blurOffsetUVX *= uvScale
+            blurOffsetUVY *= uvScale
+        }
 
-        // The streak extends up to a full sprite-length past the sprite on
-        // both sides (symmetric kernel), so the quad must grow with the
-        // blur extent or the trail clips hard at the quad edge. TexCoords
-        // extend past [0, 1] by the same fraction; the cursor shader's
-        // clamp_to_zero sampler returns transparent for out-of-sprite taps,
-        // so the padding renders only the trail, never edge smear.
+        // The trailing shutter can extend past either sprite edge depending
+        // on travel direction, so the quad grows by the absolute blur extent
+        // on both sides. TexCoords extend past [0, 1] by the same fraction;
+        // the cursor shader's clamp_to_zero sampler returns transparent for
+        // out-of-sprite taps, so the padding renders only the trail, never
+        // edge smear.
         let padXPx = CGFloat(abs(blurOffsetUVX)) * widthPx
         let padYPx = CGFloat(abs(blurOffsetUVY)) * heightPx
         let rect = LayerRect(
@@ -719,16 +731,11 @@ public final class MetalRenderGraph: @unchecked Sendable {
         return t * t * (3.0 - 2.0 * t)
     }
 
-    private func clampUV(_ v: Float) -> Float {
-        // ±1.0 of the cursor sprite UV — the streak can span a full
-        // sprite-length each side of the cursor at saturation. The old
-        // ±0.15 cap existed because the flat triangular kernel turned any
-        // longer trail into an illegible smear; the Gaussian-core kernel
-        // keeps the cursor head bright and identifiable, so the trail can
-        // be dramatic without costing legibility. The quad is expanded by
-        // the same extent so nothing clips.
-        max(-1.0, min(1.0, v))
-    }
+    /// Cursor streak magnitude cap, in sprite-UV. ±1.0 lets the trail span
+    /// a full sprite-length each side at saturation — the Gaussian-core
+    /// kernel keeps the head legible, and the quad is padded by the same
+    /// extent so nothing clips. (The original ±0.15 cap predates both.)
+    private static let maxCursorBlurUV: Float = 1.0
 
     // Triangle-strip quad covering destinationRect in clip space (-1..+1).
     // Vertex order: top-left, top-right, bottom-left, bottom-right.
@@ -1064,20 +1071,17 @@ public final class MetalRenderGraph: @unchecked Sendable {
         float _pad0;
     };
 
-    // Cursor pass. Multi-tap motion blur aligned to the velocity vector:
-    // a stationary cursor (blurOffsetUV == 0) reduces to a single sample,
-    // which is bit-identical to the old bgraFragment-on-cursor path. A
-    // fast-moving cursor reads as a long streak along the motion vector
-    // with a bright Gaussian-weighted core — the cursor head stays
-    // legible inside the trail no matter how long the streak gets, which
-    // is what lets the kernel extent run to ±1 sprite-UV without turning
-    // into a uniform smear. Adaptive dithered taps avoid step-banding at
-    // the larger extents. clamp_to_zero (not clamp_to_edge): the quad is padded past
-    // the sprite bounds so the trail has room to render, and out-of-sprite
-    // taps must come back transparent rather than smearing edge texels.
-    // Symmetric around the cursor position so the rendered cursor stays
-    // anchored to its reported (x,y) rather than drifting in the motion
-    // direction.
+    // Cursor pass. Multi-tap trailing shutter blur aligned to the velocity
+    // vector: a stationary cursor (blurOffsetUV == 0) reduces to a single
+    // sample, which is bit-identical to the old bgraFragment-on-cursor path.
+    // `blurOffsetUV` is the distance the cursor travelled during the
+    // synthetic exposure; sampling uv + offset * phase integrates previous
+    // cursor positions behind the current pointer, instead of painting a
+    // symmetric two-sided ghost. Adaptive dithered taps avoid step-banding at
+    // larger extents. clamp_to_zero (not clamp_to_edge): the quad is padded
+    // past the sprite bounds so the trail has room to render, and
+    // out-of-sprite taps must come back transparent rather than smearing edge
+    // texels.
     fragment float4 cursorFragment(
         VertexOut in [[stage_in]],
         texture2d<float, access::sample> tex [[texture(0)]],
@@ -1103,22 +1107,25 @@ public final class MetalRenderGraph: @unchecked Sendable {
         float extentPx = length(offset * u.layerSizePx);
         int taps = clamp(int(extentPx), 13, 61);
         float noise = fract(52.9829189 * fract(0.06711056 * in.position.x + 0.00583715 * in.position.y));
+        float2 dirPx = normalize(offset * u.layerSizePx);
+        float2 perpUV = float2(-dirPx.y, dirPx.x) * 0.25 / u.layerSizePx;
         float4 acc = float4(0.0);
         float wSum = 0.0;
         for (int i = 0; i < taps; ++i) {
-            float t = ((float(i) + noise) / float(taps)) * 2.0 - 1.0;
-            float w = exp(-2.0 * t * t);
-            float2 uv = in.texCoord + offset * t;
+            float phase = (float(i) + noise) / float(taps);
+            float w = exp(-3.5 * phase * phase);
+            float pj = fract(noise + float(i) * 0.61803398875) * 2.0 - 1.0;
+            float2 uv = in.texCoord + offset * phase + perpUV * pj;
             acc += tex.sample(s, uv) * w;
             wSum += w;
         }
         acc /= wSum;
         // Sharp-head guarantee: blend a crisp sample back over the streak,
         // weighted by its own alpha. No matter how long the trail gets, the
-        // cursor at its true position renders ≥60% solid — the trail smears,
+        // cursor at its true position renders ≥75% solid — the trail smears,
         // the pointer itself never disappears.
         float4 head = tex.sample(s, in.texCoord);
-        acc = mix(acc, head, head.a * 0.6);
+        acc = mix(acc, head, head.a * 0.75);
         acc.a *= u.opacity;
         return acc;
     }
