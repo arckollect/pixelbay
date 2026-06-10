@@ -656,10 +656,10 @@ public final class MetalRenderGraph: @unchecked Sendable {
                 + state.velocityYFractionPerSecond * state.velocityYFractionPerSecond)
                 .squareRoot()
         )
-        let shutterBlend = smoothstep(Self.cursorBlurSpeedLow, Self.cursorBlurSpeedHigh, speedNorm)
+        let shutterBlend = smoothstep(state.blurSpeedLow, state.blurSpeedHigh, speedNorm)
         let shutterTime = CGFloat(
-            Self.cursorBlurShutterMin
-                + (Self.cursorBlurShutterMax - Self.cursorBlurShutterMin) * shutterBlend
+            state.blurShutterMin
+                + (state.blurShutterMax - state.blurShutterMin) * shutterBlend
         )
         // Zoom-follow-only gate: outside a cursor-follow zoom the streak
         // length collapses to 0 (single-sample escape hatch, no quad
@@ -678,8 +678,9 @@ public final class MetalRenderGraph: @unchecked Sendable {
         var blurOffsetUVX = Float(traversedXContent / widthPx)
         var blurOffsetUVY = Float(traversedYContent / heightPx)
         let blurLen = (blurOffsetUVX * blurOffsetUVX + blurOffsetUVY * blurOffsetUVY).squareRoot()
-        if blurLen > Self.maxCursorBlurUV {
-            let uvScale = Self.maxCursorBlurUV / blurLen
+        let maxCursorBlurUV = Float(max(0.0, state.blurMaxUV))
+        if blurLen > maxCursorBlurUV {
+            let uvScale = maxCursorBlurUV / blurLen
             blurOffsetUVX *= uvScale
             blurOffsetUVY *= uvScale
         }
@@ -716,26 +717,11 @@ public final class MetalRenderGraph: @unchecked Sendable {
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
-    /// Velocity-adaptive cursor shutter. Speeds in norm-units/s (fraction
-    /// of screen content); the window deliberately starts above
-    /// casual-motion speed so deliberate pointing stays crisp, then ramps
-    /// the shutter open across the flick regime.
-    private static let cursorBlurSpeedLow: Double = 0.35
-    private static let cursorBlurSpeedHigh: Double = 2.40
-    private static let cursorBlurShutterMin: Double = 1.0 / 110.0
-    private static let cursorBlurShutterMax: Double = 1.0 / 34.0
-
     private func smoothstep(_ edge0: Double, _ edge1: Double, _ x: Double) -> Double {
         guard edge1 > edge0 else { return x < edge0 ? 0 : 1 }
         let t = min(1.0, max(0.0, (x - edge0) / (edge1 - edge0)))
         return t * t * (3.0 - 2.0 * t)
     }
-
-    /// Cursor streak magnitude cap, in sprite-UV. ±1.0 lets the trail span
-    /// a full sprite-length each side at saturation — the Gaussian-core
-    /// kernel keeps the head legible, and the quad is padded by the same
-    /// extent so nothing clips. (The original ±0.15 cap predates both.)
-    private static let maxCursorBlurUV: Float = 1.0
 
     // Triangle-strip quad covering destinationRect in clip space (-1..+1).
     // Vertex order: top-left, top-right, bottom-left, bottom-right.

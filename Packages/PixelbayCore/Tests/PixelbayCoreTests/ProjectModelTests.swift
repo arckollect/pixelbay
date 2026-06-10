@@ -141,6 +141,46 @@ final class ProjectModelTests: XCTestCase {
         XCTAssertEqual(settings.extras, [:])
     }
 
+    func test_cursorSettingsTuningExtras_clampPersistAndClearDefaults() {
+        var settings = CursorSettings.default
+        XCTAssertEqual(settings.zoomScaleBoostPerZoomUnit, CursorSettings.defaultZoomScaleBoostPerZoomUnit)
+        XCTAssertEqual(settings.velocityScaleBoost, CursorSettings.defaultVelocityScaleBoost)
+        XCTAssertEqual(settings.blurShutterMax, CursorSettings.defaultBlurShutterMax)
+
+        settings.zoomScaleBoostPerZoomUnit = 1.1
+        settings.velocityScaleBoost = 0.2
+        settings.velocityScaleLow = 0.3
+        settings.velocityScaleHigh = 1.6
+        settings.blurSpeedLow = 0.45
+        settings.blurSpeedHigh = 3.2
+        settings.blurShutterMin = 1.0 / 100.0
+        settings.blurShutterMax = 1.0 / 25.0
+        settings.blurMaxUV = 1.4
+        settings.pathSmoothingWindowSeconds = 0.08
+        settings.pathSmoothingSpeedLow = 0.5
+        settings.pathSmoothingSpeedHigh = 2.0
+        settings.pathSmoothingMaxDeviation = 0.03
+
+        XCTAssertEqual(settings.extras["zoomScaleBoostPerZoomUnit"], .double(1.1))
+        XCTAssertEqual(settings.extras["velocityScaleBoost"], .double(0.2))
+        XCTAssertEqual(settings.extras["velocityScaleLow"], .double(0.3))
+        XCTAssertEqual(settings.extras["velocityScaleHigh"], .double(1.6))
+        XCTAssertEqual(settings.extras["blurSpeedLow"], .double(0.45))
+        XCTAssertEqual(settings.extras["blurSpeedHigh"], .double(3.2))
+        XCTAssertEqual(settings.extras["blurShutterMin"], .double(1.0 / 100.0))
+        XCTAssertEqual(settings.extras["blurShutterMax"], .double(1.0 / 25.0))
+        XCTAssertEqual(settings.extras["blurMaxUV"], .double(1.4))
+        XCTAssertEqual(settings.extras["pathSmoothingWindowSeconds"], .double(0.08))
+        XCTAssertEqual(settings.extras["pathSmoothingSpeedLow"], .double(0.5))
+        XCTAssertEqual(settings.extras["pathSmoothingSpeedHigh"], .double(2.0))
+        XCTAssertEqual(settings.extras["pathSmoothingMaxDeviation"], .double(0.03))
+
+        settings.blurMaxUV = 99
+        XCTAssertEqual(settings.blurMaxUV, CursorSettings.blurMaxUVRange.upperBound)
+        settings.blurMaxUV = CursorSettings.defaultBlurMaxUV
+        XCTAssertNil(settings.extras["blurMaxUV"])
+    }
+
     // MARK: - Migrator chain
 
     func test_migratorChain_advancesV1ToCurrent_withoutDataLoss() throws {

@@ -357,7 +357,7 @@ final class EffectEvaluatorTests: XCTestCase {
 
     func test_apply_zoomWithTrajectory_fastPanAddsDirectionalBlurAlongMotion() {
         let base = baseLayout()
-        let kf = trajectoryZoomKeyframe(
+        var kf = trajectoryZoomKeyframe(
             timelineStart: 0,
             duration: 2,
             trajectory: [
@@ -365,6 +365,8 @@ final class EffectEvaluatorTests: XCTestCase {
                 ZoomTrajectorySample(t: 1, x: 0.70, y: 0.50)
             ]
         )
+        kf.zoomPanBlurThresholdSpeed = 0.12
+        kf.zoomPanBlurFullSpeed = 0.60
         let result = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.5)
         XCTAssertGreaterThan(motionBlurLength(result), 1e-4,
                              "fast follow pans should get velocity-proportional motion blur")
@@ -379,7 +381,7 @@ final class EffectEvaluatorTests: XCTestCase {
 
     func test_apply_zoomWithTrajectory_fasterPanGetsLongerBlur() {
         let base = baseLayout()
-        let slow = trajectoryZoomKeyframe(
+        var slow = trajectoryZoomKeyframe(
             timelineStart: 0,
             duration: 2,
             trajectory: [
@@ -387,7 +389,9 @@ final class EffectEvaluatorTests: XCTestCase {
                 ZoomTrajectorySample(t: 1, x: 0.60, y: 0.50)
             ]
         )
-        let fast = trajectoryZoomKeyframe(
+        slow.zoomPanBlurThresholdSpeed = 0.12
+        slow.zoomPanBlurFullSpeed = 0.60
+        var fast = trajectoryZoomKeyframe(
             timelineStart: 0,
             duration: 2,
             trajectory: [
@@ -395,6 +399,8 @@ final class EffectEvaluatorTests: XCTestCase {
                 ZoomTrajectorySample(t: 1, x: 0.70, y: 0.50)
             ]
         )
+        fast.zoomPanBlurThresholdSpeed = 0.12
+        fast.zoomPanBlurFullSpeed = 0.60
         let slowResult = EffectEvaluator.apply(keyframes: [slow], baseLayout: base, atTime: 0.5)
         let fastResult = EffectEvaluator.apply(keyframes: [fast], baseLayout: base, atTime: 0.5)
         XCTAssertGreaterThan(motionBlurLength(fastResult), motionBlurLength(slowResult),
@@ -403,7 +409,7 @@ final class EffectEvaluatorTests: XCTestCase {
 
     func test_apply_zoomWithTrajectory_followMotionBlurSliderScalesPanBlur() {
         let base = baseLayout()
-        let normal = trajectoryZoomKeyframe(
+        var normal = trajectoryZoomKeyframe(
             timelineStart: 0,
             duration: 2,
             trajectory: [
@@ -411,6 +417,8 @@ final class EffectEvaluatorTests: XCTestCase {
                 ZoomTrajectorySample(t: 1, x: 0.70, y: 0.50)
             ]
         )
+        normal.zoomPanBlurThresholdSpeed = 0.12
+        normal.zoomPanBlurFullSpeed = 0.60
         var disabled = normal
         disabled.zoomFollowMotionBlur = 0
         var doubled = normal
@@ -435,16 +443,16 @@ final class EffectEvaluatorTests: XCTestCase {
         // hold window, so blur at the boundary must be proportional to the
         // LOCAL segment speed, and exactly zero inside the lock.
         let base = baseLayout()
-        // Anchor sweeps 0.30 → 0.70 over the first second (0.4 norm/s),
+        // Anchor sweeps 0.20 → 1.00 over the first second (0.8 norm/s),
         // moving heavily during the 0.55 s ease-in window, then holds.
         var trajectory: [ZoomTrajectorySample] = []
         var ts = 0.0
         while ts <= 2.0 {
-            let x = ts < 1.0 ? 0.30 + 0.40 * ts : 0.70
+            let x = ts < 1.0 ? 0.20 + 0.80 * ts : 1.00
             trajectory.append(ZoomTrajectorySample(t: ts, x: x, y: 0.50))
             ts += 0.1
         }
-        let kf = EffectKeyframe(
+        var kf = EffectKeyframe(
             kind: .zoom,
             timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2)),
             zoomFactor: 2.0,
@@ -454,17 +462,19 @@ final class EffectEvaluatorTests: XCTestCase {
             easeOut: .seconds(0),
             trajectory: trajectory
         )
+        kf.zoomPanBlurThresholdSpeed = 0.12
+        kf.zoomPanBlurFullSpeed = 0.60
         // Inside the ease-in lock: displayed centre is pinned → no pan blur,
         // no matter how much the anchor moved underneath.
         let locked = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.54)
         XCTAssertEqual(motionBlurLength(locked), 0, accuracy: 1e-6,
                        "no pan blur while the zoom centre is ease-locked")
-        // Once the short post-lock handoff is underway: blur must be
-        // bounded by the local segment speed (0.4 norm/s → ≤ speed ×
+        // Once the longer post-lock handoff has cleared: blur must be
+        // bounded by the local segment speed (0.8 norm/s → ≤ speed ×
         // shutter), nowhere near the old spike that pinned the kernel at
         // panBlurMaxUV.
-        let released = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.65)
-        let localSpeedBound = Float(0.4 * EffectEvaluator.panBlurShutterSeconds)
+        let released = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.95)
+        let localSpeedBound = Float(0.8 * EffectEvaluator.panBlurShutterSeconds)
         XCTAssertGreaterThan(motionBlurLength(released), 1e-5,
                              "real pan motion right after the lock should still blur")
         XCTAssertLessThanOrEqual(motionBlurLength(released), localSpeedBound + 1e-6,
@@ -600,6 +610,29 @@ final class EffectEvaluatorTests: XCTestCase {
         let dx = abs(nextFrame.screen.origin.x - atRelease.screen.origin.x)
         XCTAssertLessThan(dx, 40,
                           "center handoff after ease-in should not snap the fully-zoomed frame into place")
+    }
+
+    func test_apply_zoomWithTrajectory_easeInUsesAnticipatedStartWhenCursorMovesImmediately() {
+        let base = baseLayout()
+        var kf = EffectKeyframe(
+            kind: .zoom,
+            timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2)),
+            zoomFactor: 2.0,
+            easeIn: .seconds(0.55),
+            easeOut: .seconds(0.55),
+            trajectory: [
+                ZoomTrajectorySample(t: 0.0, x: 0.30, y: 0.50),
+                ZoomTrajectorySample(t: 0.02, x: 0.58, y: 0.50),
+                ZoomTrajectorySample(t: 0.30, x: 0.60, y: 0.50),
+                ZoomTrajectorySample(t: 2.0, x: 0.60, y: 0.50)
+            ]
+        )
+        kf.zoomFollowLookaheadSeconds = 0.07
+
+        let result = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 0.10)
+        let (cx, _) = recoveredCenter(from: result, base: base)
+        XCTAssertGreaterThan(cx, 0.52,
+                             "ease-in should lock onto the cursor's near-future start position, not the stale frame-zero position")
     }
 
     func test_apply_zoomWithTrajectory_easeOutStartDoesNotSnapToFinalSample() {

@@ -47,8 +47,8 @@ public enum EffectEvaluator {
     /// and a fast chase visibly smear along the motion direction.
     /// `panBlurMaxUV` caps the half-extent so even a teleport-fast pan
     /// stays readable.
-    static let panBlurShutterSeconds: Double = 1.0 / 50.0
-    static let panBlurMaxUV: Double = 0.030
+    static let panBlurShutterSeconds: Double = EffectKeyframe.defaultZoomPanBlurShutterSeconds
+    static let panBlurMaxUV: Double = EffectKeyframe.defaultZoomPanBlurMaxUV
 
     /// Camera-speed onset ramp for the pan blur, in norm-units/sec on the
     /// camera's anchor-waypoint velocity. Below threshold the camera is
@@ -57,8 +57,8 @@ public enum EffectEvaluator {
     /// anticipatory pre-drift (the camera easing toward a sweep's
     /// destination before the cursor commits) stays crisp — blur builds
     /// only once the pan is actually fast.
-    static let panBlurThresholdSpeed: Double = 0.12
-    static let panBlurFullSpeed: Double = 0.60
+    static let panBlurThresholdSpeed: Double = EffectKeyframe.defaultZoomPanBlurThresholdSpeed
+    static let panBlurFullSpeed: Double = EffectKeyframe.defaultZoomPanBlurFullSpeed
 
     public static func apply(
         keyframes: [EffectKeyframe],
@@ -118,13 +118,13 @@ public enum EffectEvaluator {
             let (vx, vy) = zoomCameraVelocity(for: winner.kf, atTime: t)
             let cameraSpeed = (vx * vx + vy * vy).squareRoot()
             let panRamp = MouseTrajectory.smoothstep(
-                Self.panBlurThresholdSpeed,
-                Self.panBlurFullSpeed,
+                winner.kf.zoomPanBlurThresholdSpeed,
+                winner.kf.zoomPanBlurFullSpeed,
                 cameraSpeed
             )
             let panHalfExtentUV = min(
-                Self.panBlurMaxUV,
-                cameraSpeed * Self.panBlurShutterSeconds
+                winner.kf.zoomPanBlurMaxUV,
+                cameraSpeed * winner.kf.zoomPanBlurShutterSeconds
                     * panRamp
                     * winner.strength
                     * winner.kf.zoomFollowMotionBlur
@@ -160,7 +160,6 @@ public enum EffectEvaluator {
     /// was locked, jumping to that trajectory on the next frame reads as a
     /// last-second placement snap. Blend the focal point onto the live path
     /// over a handful of frames instead.
-    private static let zoomCenterHandoffSeconds: Double = 0.18
 
     private static func applyZoom(
         _ kf: EffectKeyframe,
@@ -348,19 +347,23 @@ public enum EffectEvaluator {
         let (inEnd, outStart) = easeLockBounds(for: kf)
         let inLockEnd = max(firstSample.t, inEnd)
         let outLockStart = min(lastSample.t, outStart)
+        let easeInAnchor = sampledZoomCenter(
+            in: trajectory,
+            at: min(outLockStart, min(inLockEnd, firstSample.t + kf.zoomFollowLookaheadSeconds))
+        )
         if localT <= inLockEnd {
-            return (firstSample.x, firstSample.y)
+            return easeInAnchor
         }
         if localT >= outLockStart {
             return sampledZoomCenter(in: trajectory, at: outLockStart)
         }
         let sampled = sampledZoomCenter(in: trajectory, at: localT)
-        let handoffEnd = min(outLockStart, inLockEnd + Self.zoomCenterHandoffSeconds)
+        let handoffEnd = min(outLockStart, inLockEnd + kf.zoomCenterHandoffSeconds)
         if localT < handoffEnd, handoffEnd > inLockEnd {
             let alpha = quinticSmoothstep((localT - inLockEnd) / (handoffEnd - inLockEnd))
             return (
-                firstSample.x + (sampled.x - firstSample.x) * alpha,
-                firstSample.y + (sampled.y - firstSample.y) * alpha
+                easeInAnchor.x + (sampled.x - easeInAnchor.x) * alpha,
+                easeInAnchor.y + (sampled.y - easeInAnchor.y) * alpha
             )
         }
         return sampled
@@ -479,7 +482,7 @@ public enum EffectEvaluator {
             count += 1
         }
         guard count > 0 else { return (0, 0) }
-        let handoffEnd = min(outLockStart, inLockEnd + Self.zoomCenterHandoffSeconds)
+        let handoffEnd = min(outLockStart, inLockEnd + kf.zoomCenterHandoffSeconds)
         let scale: Double
         if localT < handoffEnd, handoffEnd > inLockEnd {
             scale = quinticSmoothstep((localT - inLockEnd) / (handoffEnd - inLockEnd))

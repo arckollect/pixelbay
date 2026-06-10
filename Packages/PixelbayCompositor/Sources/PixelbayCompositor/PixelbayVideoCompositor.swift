@@ -98,32 +98,9 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
     /// of the bracket is one decimated sample away on a typical recording.
     private static let cursorVelocityHalfWindow: Double = 1.0 / 120.0
 
-    /// Cursor sprite enlarges by `(zoomFactor - 1) · this` while a zoom is
-    /// engaged. 0.75 yields ~1.45× cursor at a 1.6× zoom (the default
-    /// auto-zoom) — deliberately ahead of the UI's own scale-up so the
-    /// cursor pops while zoomed in and stays easy to locate (raised from
-    /// 0.5 on user feedback that the zoomed cursor was hard to spot).
-    /// Multiplied into `CursorSettings.scale` per frame so the boost rides
-    /// the ease curve naturally (no boost when zoom is idle, peak at hold).
-    private static let cursorScaleBoostPerZoomUnit: Double = 0.75
-
-    /// Velocity-driven cursor sprite boost (Phase 3c). Reads the
-    /// sprite's instantaneous norm-units/s speed (already computed via
-    /// the centred finite difference below) and ramps the sprite's scale
-    /// up by `velocityScaleBoost · smoothstep(vLow, vHigh, speed)`. A
-    /// cursor parked in the deadzone gets no boost; a cross-screen
-    /// sweep gets the full 12 % bump. Reads as "the cursor matters" —
-    /// the sprite leans into fast motion the way a live cursor would
-    /// (Loom's published cursor halo grows on fast moves; this is the
-    /// same idea without the halo).
-    ///
-    /// `vLow / vHigh` mirror `MouseTrajectory.cameraDamped`'s defaults
-    /// so the sprite boost ramps over the same speed window as the
-    /// camera's adaptive τ — visual consistency across the two systems
-    /// that read cursor velocity.
-    private static let velocityScaleBoost: Double = 0.12
-    private static let velocityScaleLow: Double = 0.15
-    private static let velocityScaleHigh: Double = 1.20
+    /// Cursor scale/velocity boost values are project-tunable through
+    /// `CursorSettings`. The compositor reads them per frame so Effects-tab
+    /// slider changes immediately affect preview/export without code changes.
 
     private func handle(request: AVAsynchronousVideoCompositionRequest) {
         if cancelled {
@@ -202,17 +179,17 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
             let zoomFactor = baseLayout.screen.size.width > 0
                 ? layout.screen.size.width / baseLayout.screen.size.width
                 : 1.0
-            let zoomCursorBoost = 1.0 + max(0.0, Double(zoomFactor) - 1.0) * Self.cursorScaleBoostPerZoomUnit
+            let zoomCursorBoost = 1.0 + max(0.0, Double(zoomFactor) - 1.0) * cursorSettings.zoomScaleBoostPerZoomUnit
             // Velocity-driven sprite scale (Phase 3c). Sprite grows
             // with cursor speed via smoothstep over the same window
             // cameraDamped uses for τ blending — keeps the visual
             // language of cursor + camera consistent (both react over
             // the same speed range, just differently).
             let cursorSpeed = (vx * vx + vy * vy).squareRoot()
-            let velocityBoost = 1.0 + Self.velocityScaleBoost
+            let velocityBoost = 1.0 + cursorSettings.velocityScaleBoost
                 * MouseTrajectory.smoothstep(
-                    Self.velocityScaleLow,
-                    Self.velocityScaleHigh,
+                    cursorSettings.velocityScaleLow,
+                    cursorSettings.velocityScaleHigh,
                     cursorSpeed
                 )
             // Motion blur is a zoom-follow-only effect (user feedback:
@@ -232,7 +209,12 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
                 scale: cursorSettings.scale * zoomCursorBoost * velocityBoost,
                 velocityXFractionPerSecond: vx,
                 velocityYFractionPerSecond: vy,
-                motionBlurStrength: followGate
+                motionBlurStrength: followGate,
+                blurSpeedLow: cursorSettings.blurSpeedLow,
+                blurSpeedHigh: cursorSettings.blurSpeedHigh,
+                blurShutterMin: cursorSettings.blurShutterMin,
+                blurShutterMax: cursorSettings.blurShutterMax,
+                blurMaxUV: cursorSettings.blurMaxUV
             )
             _ = sprite // keep clarity; sprite is forwarded below
         } else {

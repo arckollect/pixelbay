@@ -15,6 +15,36 @@ import Foundation
 // scale Screen Studio defaults to.
 
 public struct CursorSettings: Codable, Sendable, Equatable {
+    public static let defaultScale: Double = 3.25
+    public static let defaultZoomScaleBoostPerZoomUnit: Double = 0.75
+    public static let defaultVelocityScaleBoost: Double = 0.12
+    public static let defaultVelocityScaleLow: Double = 0.15
+    public static let defaultVelocityScaleHigh: Double = 1.20
+    public static let defaultBlurSpeedLow: Double = 0.35
+    public static let defaultBlurSpeedHigh: Double = 2.40
+    public static let defaultBlurShutterMin: Double = 1.0 / 110.0
+    public static let defaultBlurShutterMax: Double = 1.0 / 34.0
+    public static let defaultBlurMaxUV: Double = 1.00
+    public static let defaultPathSmoothingWindowSeconds: Double = 0.189
+    public static let defaultPathSmoothingSpeedLow: Double = 0.03
+    public static let defaultPathSmoothingSpeedHigh: Double = 0.29
+    public static let defaultPathSmoothingMaxDeviation: Double = 0.28
+
+    public static let scaleRange: ClosedRange<Double> = 0.5...4.0
+    public static let zoomScaleBoostPerZoomUnitRange: ClosedRange<Double> = 0.0...1.5
+    public static let velocityScaleBoostRange: ClosedRange<Double> = 0.0...0.5
+    public static let velocityScaleLowRange: ClosedRange<Double> = 0.0...2.0
+    public static let velocityScaleHighRange: ClosedRange<Double> = 0.05...4.0
+    public static let blurSpeedLowRange: ClosedRange<Double> = 0.0...3.0
+    public static let blurSpeedHighRange: ClosedRange<Double> = 0.05...6.0
+    public static let blurShutterMinRange: ClosedRange<Double> = (1.0 / 240.0)...(1.0 / 24.0)
+    public static let blurShutterMaxRange: ClosedRange<Double> = (1.0 / 240.0)...(1.0 / 12.0)
+    public static let blurMaxUVRange: ClosedRange<Double> = 0.05...2.0
+    public static let pathSmoothingWindowSecondsRange: ClosedRange<Double> = 0.0...0.30
+    public static let pathSmoothingSpeedLowRange: ClosedRange<Double> = 0.0...3.0
+    public static let pathSmoothingSpeedHighRange: ClosedRange<Double> = 0.05...6.0
+    public static let pathSmoothingMaxDeviationRange: ClosedRange<Double> = 0.0...0.35
+
     /// Master switch. When false the compositor skips the synthetic cursor
     /// pass even if the asset was captured with `showsCursor = false` —
     /// useful for users who want the raw OS cursor back on per-project basis.
@@ -30,7 +60,7 @@ public struct CursorSettings: Codable, Sendable, Equatable {
 
     public init(
         isEnabled: Bool = true,
-        scale: Double = 3.25,
+        scale: Double = CursorSettings.defaultScale,
         extras: [String: JSONValue] = [:]
     ) {
         self.isEnabled = isEnabled
@@ -40,7 +70,7 @@ public struct CursorSettings: Codable, Sendable, Equatable {
 
     /// What the v3→v4 migrator stamps onto old projects (and what `Project`'s
     /// default initializer uses for fresh projects).
-    public static let `default` = CursorSettings(isEnabled: true, scale: 3.25)
+    public static let `default` = CursorSettings(isEnabled: true, scale: defaultScale)
 
     private enum CodingKeys: String, CodingKey {
         case isEnabled
@@ -51,8 +81,95 @@ public struct CursorSettings: Codable, Sendable, Equatable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
-        self.scale = try c.decodeIfPresent(Double.self, forKey: .scale) ?? 3.25
+        self.scale = try c.decodeIfPresent(Double.self, forKey: .scale) ?? Self.defaultScale
         self.extras = try c.decodeIfPresent([String: JSONValue].self, forKey: .extras) ?? [:]
+    }
+}
+
+public extension CursorSettings {
+    var zoomScaleBoostPerZoomUnit: Double {
+        get { doubleExtra("zoomScaleBoostPerZoomUnit", default: Self.defaultZoomScaleBoostPerZoomUnit, range: Self.zoomScaleBoostPerZoomUnitRange) }
+        set { setDoubleExtra("zoomScaleBoostPerZoomUnit", newValue, default: Self.defaultZoomScaleBoostPerZoomUnit, range: Self.zoomScaleBoostPerZoomUnitRange) }
+    }
+
+    var velocityScaleBoost: Double {
+        get { doubleExtra("velocityScaleBoost", default: Self.defaultVelocityScaleBoost, range: Self.velocityScaleBoostRange) }
+        set { setDoubleExtra("velocityScaleBoost", newValue, default: Self.defaultVelocityScaleBoost, range: Self.velocityScaleBoostRange) }
+    }
+
+    var velocityScaleLow: Double {
+        get { doubleExtra("velocityScaleLow", default: Self.defaultVelocityScaleLow, range: Self.velocityScaleLowRange) }
+        set { setDoubleExtra("velocityScaleLow", newValue, default: Self.defaultVelocityScaleLow, range: Self.velocityScaleLowRange) }
+    }
+
+    var velocityScaleHigh: Double {
+        get { doubleExtra("velocityScaleHigh", default: Self.defaultVelocityScaleHigh, range: Self.velocityScaleHighRange) }
+        set { setDoubleExtra("velocityScaleHigh", newValue, default: Self.defaultVelocityScaleHigh, range: Self.velocityScaleHighRange) }
+    }
+
+    var blurSpeedLow: Double {
+        get { doubleExtra("blurSpeedLow", default: Self.defaultBlurSpeedLow, range: Self.blurSpeedLowRange) }
+        set { setDoubleExtra("blurSpeedLow", newValue, default: Self.defaultBlurSpeedLow, range: Self.blurSpeedLowRange) }
+    }
+
+    var blurSpeedHigh: Double {
+        get { doubleExtra("blurSpeedHigh", default: Self.defaultBlurSpeedHigh, range: Self.blurSpeedHighRange) }
+        set { setDoubleExtra("blurSpeedHigh", newValue, default: Self.defaultBlurSpeedHigh, range: Self.blurSpeedHighRange) }
+    }
+
+    var blurShutterMin: Double {
+        get { doubleExtra("blurShutterMin", default: Self.defaultBlurShutterMin, range: Self.blurShutterMinRange) }
+        set { setDoubleExtra("blurShutterMin", newValue, default: Self.defaultBlurShutterMin, range: Self.blurShutterMinRange) }
+    }
+
+    var blurShutterMax: Double {
+        get { doubleExtra("blurShutterMax", default: Self.defaultBlurShutterMax, range: Self.blurShutterMaxRange) }
+        set { setDoubleExtra("blurShutterMax", newValue, default: Self.defaultBlurShutterMax, range: Self.blurShutterMaxRange) }
+    }
+
+    var blurMaxUV: Double {
+        get { doubleExtra("blurMaxUV", default: Self.defaultBlurMaxUV, range: Self.blurMaxUVRange) }
+        set { setDoubleExtra("blurMaxUV", newValue, default: Self.defaultBlurMaxUV, range: Self.blurMaxUVRange) }
+    }
+
+    var pathSmoothingWindowSeconds: Double {
+        get { doubleExtra("pathSmoothingWindowSeconds", default: Self.defaultPathSmoothingWindowSeconds, range: Self.pathSmoothingWindowSecondsRange) }
+        set { setDoubleExtra("pathSmoothingWindowSeconds", newValue, default: Self.defaultPathSmoothingWindowSeconds, range: Self.pathSmoothingWindowSecondsRange) }
+    }
+
+    var pathSmoothingSpeedLow: Double {
+        get { doubleExtra("pathSmoothingSpeedLow", default: Self.defaultPathSmoothingSpeedLow, range: Self.pathSmoothingSpeedLowRange) }
+        set { setDoubleExtra("pathSmoothingSpeedLow", newValue, default: Self.defaultPathSmoothingSpeedLow, range: Self.pathSmoothingSpeedLowRange) }
+    }
+
+    var pathSmoothingSpeedHigh: Double {
+        get { doubleExtra("pathSmoothingSpeedHigh", default: Self.defaultPathSmoothingSpeedHigh, range: Self.pathSmoothingSpeedHighRange) }
+        set { setDoubleExtra("pathSmoothingSpeedHigh", newValue, default: Self.defaultPathSmoothingSpeedHigh, range: Self.pathSmoothingSpeedHighRange) }
+    }
+
+    var pathSmoothingMaxDeviation: Double {
+        get { doubleExtra("pathSmoothingMaxDeviation", default: Self.defaultPathSmoothingMaxDeviation, range: Self.pathSmoothingMaxDeviationRange) }
+        set { setDoubleExtra("pathSmoothingMaxDeviation", newValue, default: Self.defaultPathSmoothingMaxDeviation, range: Self.pathSmoothingMaxDeviationRange) }
+    }
+
+    private func doubleExtra(_ key: String, default defaultValue: Double, range: ClosedRange<Double>) -> Double {
+        guard case .double(let value)? = extras[key] else { return defaultValue }
+        return value.clamped(to: range)
+    }
+
+    private mutating func setDoubleExtra(_ key: String, _ value: Double, default defaultValue: Double, range: ClosedRange<Double>) {
+        let clamped = value.clamped(to: range)
+        if abs(clamped - defaultValue) < 0.000_001 {
+            extras[key] = nil
+        } else {
+            extras[key] = .double(clamped)
+        }
+    }
+}
+
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
     }
 }
 

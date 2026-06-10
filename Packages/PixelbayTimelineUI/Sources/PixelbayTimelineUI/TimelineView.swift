@@ -121,6 +121,7 @@ public struct TimelineView: NSViewRepresentable {
         timeline.setPlayhead(time: playheadTime)
         scroll.documentView = timeline
         context.coordinator.timeline = timeline
+        context.coordinator.observeBounds(of: scroll.contentView, timeline: timeline)
 
         // Sticky ruler. Floating subview pinned vertically to the top
         // of the viewport; AppKit scrolls it horizontally with the
@@ -141,6 +142,7 @@ public struct TimelineView: NSViewRepresentable {
 
     public func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let timeline = scroll.documentView as? TimelineNSView else { return }
+        context.coordinator.observeBounds(of: scroll.contentView, timeline: timeline)
         timeline.onSelect = onSelect
         timeline.onSelectEffectKeyframe = onSelectEffectKeyframe
         timeline.onApplyCommand = onApplyCommand
@@ -162,6 +164,34 @@ public struct TimelineView: NSViewRepresentable {
         // retains the timeline.
         weak var timeline: TimelineNSView?
         weak var rulerHost: StickyRulerView?
+        private weak var observedClipView: NSClipView?
+        private var boundsObserver: NSObjectProtocol?
+
+        deinit {
+            if let boundsObserver {
+                NotificationCenter.default.removeObserver(boundsObserver)
+            }
+        }
+
+        @MainActor
+        func observeBounds(of clipView: NSClipView, timeline: TimelineNSView) {
+            self.timeline = timeline
+            guard observedClipView !== clipView else { return }
+            if let boundsObserver {
+                NotificationCenter.default.removeObserver(boundsObserver)
+            }
+            observedClipView = clipView
+            clipView.postsBoundsChangedNotifications = true
+            boundsObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: clipView,
+                queue: .main
+            ) { [weak timeline] _ in
+                Task { @MainActor [weak timeline] in
+                    timeline?.visibleRegionDidChange()
+                }
+            }
+        }
     }
 
     /// Resize the documentView to the natural content size, with a floor
@@ -302,6 +332,7 @@ public final class TimelineNSView: NSView {
     /// floating `StickyRulerView` instead so it stays visible when the
     /// user scrolls past the ruler.
     private var playheadLineLayer: CALayer?
+    private var lastThumbnailVisibleBucket: Int?
 
     /// In-progress drag state. nil = not dragging; non-nil = dragging.
     /// On mouseUp: the deltaPixels is converted to a RationalTime and an
@@ -371,7 +402,16 @@ public final class TimelineNSView: NSView {
         self.selectedClipID = selectedClipID
         self.selectedEffectKeyframeID = selectedEffectKeyframeID
         self.lastInputs = snapshot
+        self.lastThumbnailVisibleBucket = nil
         needsLayout = true
+        rebuildLayers()
+    }
+
+    func visibleRegionDidChange() {
+        let bucketWidth: CGFloat = 400
+        let bucket = Int((visibleRect.minX / bucketWidth).rounded(.down))
+        guard bucket != lastThumbnailVisibleBucket else { return }
+        lastThumbnailVisibleBucket = bucket
         rebuildLayers()
     }
 
@@ -881,31 +921,36 @@ public final class TimelineNSView: NSView {
         )
         guard stripFrame.width > 0, stripFrame.height > 0 else { return }
 
+        let visibleFrame = visibleThumbnailFrame(for: stripFrame)
+        guard visibleFrame.width > 1, visibleFrame.height > 1 else { return }
+
         let strip = ThumbnailLayer()
-        strip.frame = stripFrame
+        strip.frame = visibleFrame
         strip.contentsScale = window?.backingScaleFactor ?? 2
         layer?.addSublayer(strip)
 
         // Adaptive tile width: one frame per ~16:9 slot, min 80pt.
-        let tileWidth = max(80, stripFrame.height * (16.0 / 9.0))
-        let tileCount = max(1, Int((stripFrame.width / tileWidth).rounded(.down)))
-        let actualTileWidth = stripFrame.width / CGFloat(tileCount)
+        let tileWidth = max(80, visibleFrame.height * (16.0 / 9.0))
+        let tileCount = max(1, Int((visibleFrame.width / tileWidth).rounded(.down)))
+        let actualTileWidth = visibleFrame.width / CGFloat(tileCount)
 
         let sourceStart = seconds(modelClip.sourceRange.start)
         let sourceDuration = seconds(modelClip.sourceRange.duration)
         let loader = thumbnailLoader
-        let targetSize = CGSize(width: actualTileWidth, height: stripFrame.height)
+        let targetSize = CGSize(width: actualTileWidth, height: visibleFrame.height)
 
         for i in 0..<tileCount {
             // Sample at the centre of each tile's time span.
-            let fraction = (Double(i) + 0.5) / Double(tileCount)
+            let tileMidXInClip = visibleFrame.minX - stripFrame.minX
+                + (CGFloat(i) + 0.5) * actualTileWidth
+            let fraction = max(0, min(1, Double(tileMidXInClip / stripFrame.width)))
             let atSeconds = sourceStart + fraction * sourceDuration
             // Tile frame is in the strip's own coordinate space (origin 0,0).
             let tileFrame = CGRect(
                 x: CGFloat(i) * actualTileWidth,
                 y: 0,
                 width: actualTileWidth,
-                height: stripFrame.height
+                height: visibleFrame.height
             )
             Task { @MainActor [weak strip] in
                 do {
@@ -923,6 +968,13 @@ public final class TimelineNSView: NSView {
                 }
             }
         }
+    }
+
+    private func visibleThumbnailFrame(for stripFrame: CGRect) -> CGRect {
+        let viewport = visibleRect
+        let margin = max(240, viewport.width * 0.75)
+        let interest = viewport.insetBy(dx: -margin, dy: 0)
+        return stripFrame.intersection(interest)
     }
 
     private static func cgImage(fromPNG data: Data) -> CGImage? {

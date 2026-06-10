@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import PixelbayCore
 
 // Phase 3c — sprite + hotspot for the synthetic cursor pass.
 //
@@ -59,6 +60,11 @@ public struct CursorRenderState: Sendable {
     /// this to the active follow keyframe's eased strength so the blur
     /// fades in/out with the zoom itself rather than hard-cutting.
     public let motionBlurStrength: Double
+    public let blurSpeedLow: Double
+    public let blurSpeedHigh: Double
+    public let blurShutterMin: Double
+    public let blurShutterMax: Double
+    public let blurMaxUV: Double
 
     public init(
         xFractionInScreen: Double,
@@ -66,7 +72,12 @@ public struct CursorRenderState: Sendable {
         scale: Double,
         velocityXFractionPerSecond: Double = 0,
         velocityYFractionPerSecond: Double = 0,
-        motionBlurStrength: Double = 0
+        motionBlurStrength: Double = 0,
+        blurSpeedLow: Double = CursorSettings.defaultBlurSpeedLow,
+        blurSpeedHigh: Double = CursorSettings.defaultBlurSpeedHigh,
+        blurShutterMin: Double = CursorSettings.defaultBlurShutterMin,
+        blurShutterMax: Double = CursorSettings.defaultBlurShutterMax,
+        blurMaxUV: Double = CursorSettings.defaultBlurMaxUV
     ) {
         self.xFractionInScreen = xFractionInScreen
         self.yFractionInScreen = yFractionInScreen
@@ -74,5 +85,10 @@ public struct CursorRenderState: Sendable {
         self.velocityXFractionPerSecond = velocityXFractionPerSecond
         self.velocityYFractionPerSecond = velocityYFractionPerSecond
         self.motionBlurStrength = motionBlurStrength
+        self.blurSpeedLow = blurSpeedLow
+        self.blurSpeedHigh = blurSpeedHigh
+        self.blurShutterMin = blurShutterMin
+        self.blurShutterMax = blurShutterMax
+        self.blurMaxUV = blurMaxUV
     }
 }

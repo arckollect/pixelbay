@@ -352,10 +352,10 @@ public enum MouseTrajectory {
     /// final positions.
     public static func spritePolished(
         _ master: [MouseTrajectorySample],
-        windowSeconds: Double = 0.055,
-        speedLow: Double = 0.35,
-        speedHigh: Double = 1.80,
-        maxRawDeviation: Double = 0.018
+        windowSeconds: Double = CursorSettings.defaultPathSmoothingWindowSeconds,
+        speedLow: Double = CursorSettings.defaultPathSmoothingSpeedLow,
+        speedHigh: Double = CursorSettings.defaultPathSmoothingSpeedHigh,
+        maxRawDeviation: Double = CursorSettings.defaultPathSmoothingMaxDeviation
     ) -> [MouseTrajectorySample] {
         guard master.count > 2 else { return master }
         let safeWindow = max(0.001, windowSeconds)
@@ -395,7 +395,9 @@ public enum MouseTrajectory {
             let dx = smoothX - sample.centerX
             let dy = smoothY - sample.centerY
             let deviation = (dx * dx + dy * dy).squareRoot()
-            let maxDeviation = max(0.0, maxRawDeviation)
+            let baseMaxDeviation = max(0.0, maxRawDeviation)
+            let extremeBlend = smoothstep(speedHigh, max(speedHigh + 0.001, speedHigh * 3.0), speeds[i])
+            let maxDeviation = min(0.35, baseMaxDeviation * (1.0 + extremeBlend * 1.5))
             if deviation > maxDeviation, deviation > 0 {
                 let scale = maxDeviation / deviation
                 smoothX = sample.centerX + dx * scale
@@ -429,10 +431,15 @@ public enum MouseTrajectory {
             } else {
                 let prev = trajectory[trajectory.index(before: i)]
                 let next = trajectory[trajectory.index(after: i)]
-                let dt = max(1e-6, next.timelineTime - prev.timelineTime)
-                let dx = next.centerX - prev.centerX
-                let dy = next.centerY - prev.centerY
-                speeds[i] = (dx * dx + dy * dy).squareRoot() / dt
+                let dtPrev = max(1e-6, trajectory[i].timelineTime - prev.timelineTime)
+                let dxPrev = trajectory[i].centerX - prev.centerX
+                let dyPrev = trajectory[i].centerY - prev.centerY
+                let prevSpeed = (dxPrev * dxPrev + dyPrev * dyPrev).squareRoot() / dtPrev
+                let dtNext = max(1e-6, next.timelineTime - trajectory[i].timelineTime)
+                let dxNext = next.centerX - trajectory[i].centerX
+                let dyNext = next.centerY - trajectory[i].centerY
+                let nextSpeed = (dxNext * dxNext + dyNext * dyNext).squareRoot() / dtNext
+                speeds[i] = max(prevSpeed, nextSpeed)
             }
         }
         return speeds
@@ -647,6 +654,24 @@ public enum MouseTrajectory {
         var result: [ZoomTrajectorySample] = []
         result.reserveCapacity(samples.count)
         result.append(first)
+        func enforceSafeZone(cursorX: Double, cursorY: Double) {
+            let dx = cursorX - anchorX
+            if dx > hSafe {
+                anchorX = cursorX - hSafe
+                vx = 0
+            } else if dx < -hSafe {
+                anchorX = cursorX + hSafe
+                vx = 0
+            }
+            let dy = cursorY - anchorY
+            if dy > hSafe {
+                anchorY = cursorY - hSafe
+                vy = 0
+            } else if dy < -hSafe {
+                anchorY = cursorY + hSafe
+                vy = 0
+            }
+        }
         for i in 1..<samples.count {
             let s = samples[i]
             let prev = samples[i - 1]
@@ -747,22 +772,7 @@ public enum MouseTrajectory {
             }
             // Hard barrier: enforce the safe-zone invariant even when
             // the spring couldn't catch up in the available `dtTotal`.
-            let dx = s.x - anchorX
-            if dx > hSafe {
-                anchorX = s.x - hSafe
-                vx = 0
-            } else if dx < -hSafe {
-                anchorX = s.x + hSafe
-                vx = 0
-            }
-            let dy = s.y - anchorY
-            if dy > hSafe {
-                anchorY = s.y - hSafe
-                vy = 0
-            } else if dy < -hSafe {
-                anchorY = s.y + hSafe
-                vy = 0
-            }
+            enforceSafeZone(cursorX: s.x, cursorY: s.y)
             if speedLimit.isFinite {
                 let maxDistance = speedLimit * dtTotal
                 let moveX = anchorX - sampleStartAnchorX

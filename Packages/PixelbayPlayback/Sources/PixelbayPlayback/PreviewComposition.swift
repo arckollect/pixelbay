@@ -86,6 +86,9 @@ public enum PreviewCompositionBuilder {
     // path, but let the zoom camera glide behind fast moves so cross-screen
     // pans are readable instead of instantly chasing the pointer.
     static let zoomFollowSafeZoneFraction: Double = EffectKeyframe.defaultZoomFollowSafeZoneFraction
+    static func zoomFollowOuterSafeZoneFraction(for deadzoneFraction: Double) -> Double {
+        min(0.95, max(deadzoneFraction + 0.14, deadzoneFraction + 0.02))
+    }
     // Tight spring — the smoothness lives in the ANTICIPATED TARGET PATH
     // (window-averaged, below), not in the spring. The old soft taus
     // (0.16/0.12) were tuned when the spring chased the raw cursor and had
@@ -93,15 +96,15 @@ public enum PreviewCompositionBuilder {
     // path through a soft spring double-smooths and reads as "the camera is
     // slow / dragging behind". Tight taus make the camera hug the smooth
     // path with near-zero added lag.
-    static let zoomFollowTauRelaxed: Double = 0.07
-    static let zoomFollowTauTight: Double = 0.04
+    static let zoomFollowTauRelaxed: Double = EffectKeyframe.defaultZoomFollowTauRelaxed
+    static let zoomFollowTauTight: Double = EffectKeyframe.defaultZoomFollowTauTight
     static let zoomFollowMaxAnchorSpeed: Double = EffectKeyframe.defaultZoomFollowMaxAnchorSpeed
     /// Half-width of the anticipated-target triangular window. Rendering is
     /// offline, so the camera target at time t averages the cursor's REAL
     /// path over [t − 0.25 s, t + 0.25 s] (plus the keyframe's anticipation
     /// lead) — the camera eases toward a sweep's destination before the
     /// cursor covers the distance instead of being dragged behind it.
-    static let zoomFollowAnticipationHalfWindow: Double = 0.25
+    static let zoomFollowAnticipationHalfWindow: Double = EffectKeyframe.defaultZoomFollowAnticipationHalfWindow
 
     /// Builds a PreviewComposition from a Project. `bundleURL` is the
     /// `.pixelbay` bundle's directory — `MediaAsset.relativePath`
@@ -273,7 +276,15 @@ public enum PreviewCompositionBuilder {
             asset.kind == .display && asset.cursorRenderedSynthetically
         }
         let cursorTrajectoryForRender: [MouseTrajectorySample] =
-            cursorSyntheticallyRendered ? MouseTrajectory.spritePolished(cursorMaster) : []
+            cursorSyntheticallyRendered
+            ? MouseTrajectory.spritePolished(
+                cursorMaster,
+                windowSeconds: project.cursorSettings.pathSmoothingWindowSeconds,
+                speedLow: project.cursorSettings.pathSmoothingSpeedLow,
+                speedHigh: project.cursorSettings.pathSmoothingSpeedHigh,
+                maxRawDeviation: project.cursorSettings.pathSmoothingMaxDeviation
+            )
+            : []
         return makeVideoComposition(
             duration: duration,
             outputSize: outputSize,
@@ -546,9 +557,15 @@ public enum PreviewCompositionBuilder {
                 next.trajectory = nil
                 return next
             }
-            // The zoom camera uses a configurable safe zone and slower spring than
-            // the cursor sprite path. Fast cursor moves can cross the frame
-            // naturally while the zoom window glides after them.
+            if kf.anchorMode == .centerCursor {
+                var next = kf
+                next.trajectory = windowed
+                return next
+            }
+            // The zoom camera uses a true no-force deadzone, plus a slightly
+            // wider hard clamp. Small cursor movement inside the deadzone
+            // should not make the camera chase jitter; larger movement gets a
+            // calm band before the clamp guarantees the cursor stays framed.
             //
             // The spring's target is the offline ANTICIPATED path — a
             // forward-biased window average of the cursor's real future
@@ -560,16 +577,16 @@ public enum PreviewCompositionBuilder {
             // real cursor so anticipation can never push it out of frame.
             let targets = MouseTrajectory.anticipatedTargets(
                 windowed,
-                halfWindowSeconds: zoomFollowAnticipationHalfWindow,
+                halfWindowSeconds: kf.zoomFollowAnticipationHalfWindow,
                 leadSeconds: kf.zoomFollowLookaheadSeconds
             )
             let followed = MouseTrajectory.anchorFollow(
                 windowed,
                 zoomFactor: kf.zoomFactor,
-                deadzoneFraction: 0.0,
-                safeZoneFraction: kf.zoomFollowSafeZoneFraction,
-                tauRelaxed: zoomFollowTauRelaxed,
-                tauTight: zoomFollowTauTight,
+                deadzoneFraction: kf.zoomFollowSafeZoneFraction,
+                safeZoneFraction: zoomFollowOuterSafeZoneFraction(for: kf.zoomFollowSafeZoneFraction),
+                tauRelaxed: kf.zoomFollowTauRelaxed,
+                tauTight: kf.zoomFollowTauTight,
                 maxAnchorSpeed: kf.zoomFollowMaxAnchorSpeed,
                 anticipatedTargets: targets
             )

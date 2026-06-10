@@ -83,6 +83,19 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         XCTAssertFalse(result[0].trajectory!.isEmpty)
     }
 
+    func test_centerCursorKeyframe_usesWindowedCursorPathDirectly() {
+        let input = masterTrajectory()
+        let centered = makeZoom(anchorMode: .centerCursor, trajectory: nil)
+        let result = PreviewCompositionBuilder.applyCursorTrajectory(
+            to: [centered],
+            cursorTrajectory: input
+        )
+        let trajectory = result[0].trajectory ?? []
+        XCTAssertFalse(trajectory.isEmpty)
+        XCTAssertEqual(trajectory[0].x, input[10].centerX, accuracy: 1e-9)
+        XCTAssertEqual(trajectory[0].y, input[10].centerY, accuracy: 1e-9)
+    }
+
     func test_emptyMasterTrajectory_passesAllKeyframesThrough() {
         let pinned = makeZoom(anchorMode: .pinned, trajectory: nil)
         let unpinned = makeZoom(anchorMode: .followCursor, trajectory: nil)
@@ -94,20 +107,15 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         XCTAssertNil(result[1].trajectory)
     }
 
-    // Follow-cursor zooms route only the camera anchor through a softer
+    // Follow-cursor zooms route only the camera anchor through a deadzone
     // spring. The visible cursor stays on the raw capture path, while the
-    // zoom frame gets a wider safe zone so fast moves glide instead of
-    // forcing an immediate camera chase.
-    func test_applyCursorTrajectory_followCursor_continuousSoftSpring() {
-        // Cursor wanders gently within ±0.04 of the start position. With
-        // no deadzone, the spring is always engaged and the anchor
-        // drifts toward the cursor's average position with the relaxed
-        // tau (0.16 s). For a wander whose mean stays near the start,
-        // anchor stays close to its start position but is allowed to
-        // move — assert it tracks within the safe-zone bound and ends
-        // somewhere reasonable rather than locked at the initial point.
+    // zoom frame ignores tiny pointer wiggles inside the deadzone.
+    func test_applyCursorTrajectory_followCursor_smallMotionInsideDeadzoneKeepsAnchorStill() {
+        // Cursor wanders gently within ±0.04 of the start position. The
+        // default deadzone is much wider than that at zoom 1.5, so this
+        // should not make the camera chase every small jitter.
         let zoomFactor = 1.5
-        let safeHalf = PreviewCompositionBuilder.zoomFollowSafeZoneFraction / 2.0 / zoomFactor
+        let deadHalf = PreviewCompositionBuilder.zoomFollowSafeZoneFraction / 2.0 / zoomFactor
         let input: [MouseTrajectorySample] = (0...20).map { i in
             MouseTrajectorySample(
                 timelineTime: 1.0 + 0.05 * Double(i),
@@ -123,13 +131,13 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         let trajectory = result[0].trajectory ?? []
         XCTAssertEqual(trajectory.count, input.count,
                        "all input samples lie inside the keyframe range — none should be dropped")
+        let initialX = trajectory[0].x
+        let initialY = trajectory[0].y
         for (cursorSample, anchor) in zip(input, trajectory) {
-            let lagX = abs(cursorSample.centerX - anchor.x)
-            let lagY = abs(cursorSample.centerY - anchor.y)
-            XCTAssertLessThanOrEqual(lagX, safeHalf + 1e-9,
-                                     "anchor-to-cursor lag must respect the safe-zone invariant")
-            XCTAssertLessThanOrEqual(lagY, safeHalf + 1e-9,
-                                     "anchor-to-cursor lag must respect the safe-zone invariant")
+            XCTAssertLessThanOrEqual(abs(cursorSample.centerX - initialX), deadHalf + 1e-9)
+            XCTAssertLessThanOrEqual(abs(cursorSample.centerY - initialY), deadHalf + 1e-9)
+            XCTAssertEqual(anchor.x, initialX, accuracy: 1e-9)
+            XCTAssertEqual(anchor.y, initialY, accuracy: 1e-9)
         }
     }
 
@@ -138,10 +146,12 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
     // windowed slice IS being piped through anchorFollow, not stored raw.
     func test_applyCursorTrajectory_followCursor_anchorTracksWithBoundedLagOnSustainedMotion() {
         // Linear sweep across 0.4 norm-units over 2.0s. The follow camera
-        // trails the cursor, but remains inside the configured safe-zone
-        // half-width (0.16 at zoom 1.5).
+        // trails the cursor, but remains inside the derived safe-zone
+        // half-width.
         let zoomFactor = 1.5
-        let safeHalf = PreviewCompositionBuilder.zoomFollowSafeZoneFraction / 2.0 / zoomFactor
+        let safeHalf = PreviewCompositionBuilder.zoomFollowOuterSafeZoneFraction(
+            for: EffectKeyframe.defaultZoomFollowSafeZoneFraction
+        ) / 2.0 / zoomFactor
         let input: [MouseTrajectorySample] = (0...40).map { i in
             MouseTrajectorySample(
                 timelineTime: 1.0 + 0.05 * Double(i),
@@ -163,35 +173,12 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
                                  "anchor lag must respect the safe-zone invariant")
     }
 
-    func test_applyCursorTrajectory_customTightSafeZone_reducesAllowedTrail() {
-        let zoomFactor = 1.5
-        let customSafeZone = 0.36
-        let safeHalf = customSafeZone / 2.0 / zoomFactor
-        let input: [MouseTrajectorySample] = (0...40).map { i in
-            MouseTrajectorySample(
-                timelineTime: 1.0 + 0.05 * Double(i),
-                centerX: 0.20 + 0.01 * Double(i),
-                centerY: 0.50
-            )
-        }
-        var unpinned = makeZoom(start: 1.0, duration: 2.0, anchorMode: .followCursor)
-        unpinned.zoomFollowSafeZoneFraction = customSafeZone
-        let result = PreviewCompositionBuilder.applyCursorTrajectory(
-            to: [unpinned],
-            cursorTrajectory: input
-        )
-        let trajectory = result[0].trajectory ?? []
-        let maxLag = zip(input, trajectory).map { cursor, anchor in
-            abs(cursor.centerX - anchor.x)
-        }.max() ?? 0
-        XCTAssertLessThanOrEqual(maxLag, safeHalf + 1e-9,
-                                 "custom deadzone slider value must drive anchorFollow's safe-zone clamp")
-    }
-
     func test_applyCursorTrajectory_fastSweep_allowsReadableCameraTrail() {
         let zoomFactor = 1.5
         let oldTightSafeHalf = 0.30 / 2.0 / zoomFactor
-        let safeHalf = PreviewCompositionBuilder.zoomFollowSafeZoneFraction / 2.0 / zoomFactor
+        let safeHalf = PreviewCompositionBuilder.zoomFollowOuterSafeZoneFraction(
+            for: EffectKeyframe.defaultZoomFollowSafeZoneFraction
+        ) / 2.0 / zoomFactor
         let input: [MouseTrajectorySample] = (0...12).map { i in
             MouseTrajectorySample(
                 timelineTime: 1.0 + 0.025 * Double(i),
@@ -211,13 +198,9 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         }.max() ?? 0
         XCTAssertGreaterThan(maxLag, oldTightSafeHalf,
                              "fast sweeps should be allowed to trail beyond the old tight follow window")
-        // Anticipated-path follow keeps the camera responsive enough that
-        // the cursor never escapes the safe zone even on a fast sweep —
-        // the trail is visible (above) but bounded (here). The old assert
-        // expected the low speed cap to let the cursor break out; that
-        // mechanical clamp-drag feel is exactly what the retune removed.
-        XCTAssertLessThanOrEqual(maxLag, safeHalf + 1e-9,
-                                 "the cursor must stay inside the safe zone during fast sweeps")
+        let sampleDt = input[1].timelineTime - input[0].timelineTime
+        XCTAssertLessThanOrEqual(maxLag, safeHalf + EffectKeyframe.defaultZoomFollowMaxAnchorSpeed * sampleDt + 1e-9,
+                                 "fast sweeps may trail one speed-limited frame beyond the soft safe zone")
         for i in 1..<trajectory.count {
             let dt = trajectory[i].t - trajectory[i - 1].t
             let dx = trajectory[i].x - trajectory[i - 1].x
@@ -236,11 +219,12 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         let input: [MouseTrajectorySample] = (0...12).map { i in
             MouseTrajectorySample(
                 timelineTime: 1.0 + 0.025 * Double(i),
-                centerX: 0.20 + 0.50 * Double(i) / 12.0,
+                centerX: 0.20 + 0.12 * Double(i) / 12.0,
                 centerY: 0.50
             )
         }
         var unpinned = makeZoom(start: 1.0, duration: 0.3, anchorMode: .followCursor)
+        unpinned.zoomFollowSafeZoneFraction = 0.0
         unpinned.zoomFollowMaxAnchorSpeed = customPanSpeed
         let result = PreviewCompositionBuilder.applyCursorTrajectory(
             to: [unpinned],

@@ -153,7 +153,7 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
                        "anchor must sit exactly at the trailing safe-zone wall after a forward teleport")
     }
 
-    func test_anchorFollow_maxAnchorSpeedPreventsTeleportClamp() {
+    func test_anchorFollow_maxAnchorSpeedCanPreserveElasticTrailPastSoftSafeZone() {
         let samples: [ZoomTrajectorySample] = [
             ZoomTrajectorySample(t: 0.0, x: 0.2, y: 0.5),
             ZoomTrajectorySample(t: 0.02, x: 0.7, y: 0.5)
@@ -166,10 +166,10 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
         XCTAssertLessThanOrEqual(abs(out[1].x - out[0].x), 0.02 + 1e-9,
                                  "speed-limited follow must glide instead of snapping to the safe-zone wall")
         XCTAssertGreaterThan(abs(samples[1].x - out[1].x), hSafeAtZoom2,
-                             "finite speed limit may temporarily allow extra trail during teleports")
+                             "finite speed limit may temporarily allow extra trail beyond the soft safe zone")
     }
 
-    func test_spritePolished_slowMotionPreservesRawCursorPath() {
+    func test_spritePolished_customSlowMotionThresholdPreservesRawCursorPath() {
         let samples: [MouseTrajectorySample] = (0...8).map { i in
             MouseTrajectorySample(
                 timelineTime: 0.05 * Double(i),
@@ -177,7 +177,13 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
                 centerY: 0.50
             )
         }
-        let out = MouseTrajectory.spritePolished(samples)
+        let out = MouseTrajectory.spritePolished(
+            samples,
+            windowSeconds: 0.085,
+            speedLow: 0.20,
+            speedHigh: 1.20,
+            maxRawDeviation: 0.12
+        )
         XCTAssertEqual(out, samples, "slow precise motion should remain authoritative and unsmoothed")
     }
 
@@ -201,6 +207,27 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
         XCTAssertEqual(out.last, samples.last)
         XCTAssertLessThan(abs(out[2].centerY - 0.50), abs(samples[2].centerY - 0.50),
                           "fast zig-zag motion should be pulled toward a smoother path")
+    }
+
+    func test_spritePolished_extremeCornerSweepsCompressTowardPresentationPath() {
+        let samples: [MouseTrajectorySample] = [
+            MouseTrajectorySample(timelineTime: 0.00, centerX: 0.50, centerY: 0.50),
+            MouseTrajectorySample(timelineTime: 0.02, centerX: 0.05, centerY: 0.95),
+            MouseTrajectorySample(timelineTime: 0.04, centerX: 0.95, centerY: 0.05),
+            MouseTrajectorySample(timelineTime: 0.06, centerX: 0.05, centerY: 0.95),
+            MouseTrajectorySample(timelineTime: 0.08, centerX: 0.95, centerY: 0.05),
+            MouseTrajectorySample(timelineTime: 0.10, centerX: 0.50, centerY: 0.50)
+        ]
+
+        let out = MouseTrajectory.spritePolished(samples)
+        let interior = out.dropFirst().dropLast()
+
+        XCTAssertEqual(out.first, samples.first)
+        XCTAssertEqual(out.last, samples.last)
+        XCTAssertGreaterThan(interior.map(\.centerX).min() ?? 0, 0.25)
+        XCTAssertLessThan(interior.map(\.centerX).max() ?? 1, 0.75)
+        XCTAssertGreaterThan(interior.map(\.centerY).min() ?? 0, 0.25)
+        XCTAssertLessThan(interior.map(\.centerY).max() ?? 1, 0.75)
     }
 
     // MARK: - Monotonicity under sustained motion

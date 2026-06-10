@@ -264,7 +264,8 @@ struct ProjectView: View {
                         ZoomFollowSafeZoneOverlay(
                             fraction: fraction,
                             videoSize: player.outputSize,
-                            fill: previewFill
+                            fill: previewFill,
+                            color: .blue
                         )
                         .allowsHitTesting(false)
                         .transition(.opacity)
@@ -609,10 +610,14 @@ struct ProjectView: View {
         EffectsInspector(
             project: document.project,
             bundleURL: document.bundleURL,
+            cursorSettings: document.project.cursorSettings,
             playheadTime: player.currentTime.seconds,
             selectedKeyframeID: $selectedEffectKeyframeID,
             onApply: { command in
                 Task { await document.apply(command) }
+            },
+            onCursorChange: { newCursor in
+                Task { await document.apply(SetCursorSettingsCommand(newSettings: newCursor)) }
             },
             onSeek: { time in
                 let cmTime = CMTime(value: time.value, timescale: time.timescale)
@@ -636,6 +641,7 @@ private struct ZoomFollowSafeZoneOverlay: View {
     let fraction: Double
     let videoSize: CGSize
     let fill: Bool
+    let color: Color
 
     var body: some View {
         GeometryReader { geo in
@@ -653,15 +659,15 @@ private struct ZoomFollowSafeZoneOverlay: View {
             )
             ZStack {
                 Rectangle()
-                    .fill(Color.red.opacity(0.10))
+                    .fill(color.opacity(0.10))
                     .frame(width: safeRect.width, height: safeRect.height)
                     .position(x: safeRect.midX, y: safeRect.midY)
                 Rectangle()
-                    .stroke(Color.red.opacity(0.82), lineWidth: 2)
+                    .stroke(color.opacity(0.82), lineWidth: 2)
                     .frame(width: safeRect.width, height: safeRect.height)
                     .position(x: safeRect.midX, y: safeRect.midY)
                 Rectangle()
-                    .stroke(Color.red.opacity(0.28), style: StrokeStyle(lineWidth: 1, dash: [6, 5]))
+                    .stroke(color.opacity(0.28), style: StrokeStyle(lineWidth: 1, dash: [6, 5]))
                     .frame(width: videoRect.width, height: videoRect.height)
                     .position(x: videoRect.midX, y: videoRect.midY)
             }

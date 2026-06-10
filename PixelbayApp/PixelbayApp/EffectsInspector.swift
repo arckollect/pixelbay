@@ -22,12 +22,14 @@ import SwiftUI
 struct EffectsInspector: View {
     let project: Project
     let bundleURL: URL
+    let cursorSettings: CursorSettings
     /// Current playhead position in project-timeline seconds. Forwarded to
     /// `ZoomActionsBar` so "Add Zoom at Playhead" lands at the user's scrub
     /// position. Source: `PreviewPlayer.currentTime` in `ProjectView`.
     let playheadTime: Double
     @Binding var selectedKeyframeID: EffectKeyframeID?
     let onApply: (any EditCommand) -> Void
+    let onCursorChange: (CursorSettings) -> Void
     let onSeek: (RationalTime) -> Void
     let onFollowSafeZonePreview: (Double?) -> Void
 
@@ -42,6 +44,28 @@ struct EffectsInspector: View {
     @State private var previewFollowMotionBlur: Double?
     @State private var previewFollowPanSpeed: Double?
     @State private var previewFollowLandingAssist: Double?
+    @State private var previewZoomPanShutter: Double?
+    @State private var previewZoomPanBlurCap: Double?
+    @State private var previewZoomBlurStartSpeed: Double?
+    @State private var previewZoomBlurFullSpeed: Double?
+    @State private var previewZoomCenterHandoff: Double?
+    @State private var previewZoomTauRelaxed: Double?
+    @State private var previewZoomTauTight: Double?
+    @State private var previewZoomAnticipationWindow: Double?
+    @State private var previewCursorScale: Double?
+    @State private var previewCursorZoomBoost: Double?
+    @State private var previewCursorVelocityBoost: Double?
+    @State private var previewCursorVelocityLow: Double?
+    @State private var previewCursorVelocityHigh: Double?
+    @State private var previewCursorBlurLow: Double?
+    @State private var previewCursorBlurHigh: Double?
+    @State private var previewCursorShutterMin: Double?
+    @State private var previewCursorShutterMax: Double?
+    @State private var previewCursorBlurCap: Double?
+    @State private var previewCursorPathWindow: Double?
+    @State private var previewCursorPathLow: Double?
+    @State private var previewCursorPathHigh: Double?
+    @State private var previewCursorPathDeviation: Double?
 
     private var sortedKeyframes: [EffectKeyframe] {
         project.effects.sorted { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
@@ -62,6 +86,8 @@ struct EffectsInspector: View {
                 onApply: onApply,
                 onSeek: onSeek
             )
+            PBDivider()
+            cursorTuningSection
             PBDivider()
             keyframeList
             if let keyframe = selectedKeyframe {
@@ -239,11 +265,291 @@ struct EffectsInspector: View {
             Text("Follow")
                 .font(Theme.Font.caption)
                 .foregroundStyle(Theme.Color.textSecondary)
+            centerCursorToggle(keyframe)
             followSafeZoneSlider(keyframe)
             followPanSpeedSlider(keyframe)
             followLandingAssistSlider(keyframe)
             followMotionBlurSlider(keyframe)
+            followAdvancedSection(keyframe)
         }
+    }
+
+    private var cursorTuningSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Cursor")
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
+                Spacer()
+                Toggle("", isOn: Binding<Bool>(
+                    get: { cursorSettings.isEnabled },
+                    set: { newValue in
+                        var next = cursorSettings
+                        next.isEnabled = newValue
+                        onCursorChange(next)
+                    }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(Theme.Color.accent)
+            }
+            Group {
+                cursorScaleSlider
+                cursorZoomBoostSlider
+                cursorVelocityBoostSlider
+                cursorVelocityLowSlider
+                cursorVelocityHighSlider
+                cursorBlurLowSlider
+                cursorBlurHighSlider
+                cursorShutterMinSlider
+                cursorShutterMaxSlider
+                cursorBlurCapSlider
+                cursorPathWindowSlider
+                cursorPathLowSlider
+                cursorPathHighSlider
+                cursorPathDeviationSlider
+            }
+            .disabled(!cursorSettings.isEnabled)
+            .opacity(cursorSettings.isEnabled ? 1 : 0.4)
+        }
+    }
+
+    private var cursorScaleSlider: some View {
+        cursorSettingSlider(
+            title: "Size",
+            liveValue: previewCursorScale ?? cursorSettings.scale,
+            committedValue: cursorSettings.scale,
+            range: CursorSettings.scaleRange,
+            valueText: { String(format: "%.2f×", $0) },
+            currentPreview: { previewCursorScale },
+            setPreview: { previewCursorScale = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.scale = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorZoomBoostSlider: some View {
+        cursorSettingSlider(
+            title: "Zoom Size Boost",
+            liveValue: previewCursorZoomBoost ?? cursorSettings.zoomScaleBoostPerZoomUnit,
+            committedValue: cursorSettings.zoomScaleBoostPerZoomUnit,
+            range: CursorSettings.zoomScaleBoostPerZoomUnitRange,
+            valueText: { String(format: "%.2f×/zoom", $0) },
+            currentPreview: { previewCursorZoomBoost },
+            setPreview: { previewCursorZoomBoost = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.zoomScaleBoostPerZoomUnit = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorVelocityBoostSlider: some View {
+        cursorSettingSlider(
+            title: "Speed Size Boost",
+            liveValue: previewCursorVelocityBoost ?? cursorSettings.velocityScaleBoost,
+            committedValue: cursorSettings.velocityScaleBoost,
+            range: CursorSettings.velocityScaleBoostRange,
+            valueText: { String(format: "%.2f×", $0) },
+            currentPreview: { previewCursorVelocityBoost },
+            setPreview: { previewCursorVelocityBoost = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.velocityScaleBoost = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorVelocityLowSlider: some View {
+        cursorSettingSlider(
+            title: "Speed Boost Start",
+            liveValue: previewCursorVelocityLow ?? cursorSettings.velocityScaleLow,
+            committedValue: cursorSettings.velocityScaleLow,
+            range: CursorSettings.velocityScaleLowRange,
+            valueText: { String(format: "%.2f/s", $0) },
+            currentPreview: { previewCursorVelocityLow },
+            setPreview: { previewCursorVelocityLow = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.velocityScaleLow = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorVelocityHighSlider: some View {
+        cursorSettingSlider(
+            title: "Speed Boost Full",
+            liveValue: previewCursorVelocityHigh ?? cursorSettings.velocityScaleHigh,
+            committedValue: cursorSettings.velocityScaleHigh,
+            range: CursorSettings.velocityScaleHighRange,
+            valueText: { String(format: "%.2f/s", $0) },
+            currentPreview: { previewCursorVelocityHigh },
+            setPreview: { previewCursorVelocityHigh = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.velocityScaleHigh = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorBlurLowSlider: some View {
+        cursorSettingSlider(
+            title: "Blur Start Speed",
+            liveValue: previewCursorBlurLow ?? cursorSettings.blurSpeedLow,
+            committedValue: cursorSettings.blurSpeedLow,
+            range: CursorSettings.blurSpeedLowRange,
+            valueText: { String(format: "%.2f/s", $0) },
+            currentPreview: { previewCursorBlurLow },
+            setPreview: { previewCursorBlurLow = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.blurSpeedLow = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorBlurHighSlider: some View {
+        cursorSettingSlider(
+            title: "Blur Full Speed",
+            liveValue: previewCursorBlurHigh ?? cursorSettings.blurSpeedHigh,
+            committedValue: cursorSettings.blurSpeedHigh,
+            range: CursorSettings.blurSpeedHighRange,
+            valueText: { String(format: "%.2f/s", $0) },
+            currentPreview: { previewCursorBlurHigh },
+            setPreview: { previewCursorBlurHigh = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.blurSpeedHigh = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorShutterMinSlider: some View {
+        cursorSettingSlider(
+            title: "Min Shutter",
+            liveValue: previewCursorShutterMin ?? cursorSettings.blurShutterMin,
+            committedValue: cursorSettings.blurShutterMin,
+            range: CursorSettings.blurShutterMinRange,
+            valueText: shutterText,
+            currentPreview: { previewCursorShutterMin },
+            setPreview: { previewCursorShutterMin = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.blurShutterMin = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorShutterMaxSlider: some View {
+        cursorSettingSlider(
+            title: "Max Shutter",
+            liveValue: previewCursorShutterMax ?? cursorSettings.blurShutterMax,
+            committedValue: cursorSettings.blurShutterMax,
+            range: CursorSettings.blurShutterMaxRange,
+            valueText: shutterText,
+            currentPreview: { previewCursorShutterMax },
+            setPreview: { previewCursorShutterMax = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.blurShutterMax = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorBlurCapSlider: some View {
+        cursorSettingSlider(
+            title: "Trail Cap",
+            liveValue: previewCursorBlurCap ?? cursorSettings.blurMaxUV,
+            committedValue: cursorSettings.blurMaxUV,
+            range: CursorSettings.blurMaxUVRange,
+            valueText: { String(format: "%.2f sprite", $0) },
+            currentPreview: { previewCursorBlurCap },
+            setPreview: { previewCursorBlurCap = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.blurMaxUV = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorPathWindowSlider: some View {
+        cursorSettingSlider(
+            title: "Path Smooth Window",
+            liveValue: previewCursorPathWindow ?? cursorSettings.pathSmoothingWindowSeconds,
+            committedValue: cursorSettings.pathSmoothingWindowSeconds,
+            range: CursorSettings.pathSmoothingWindowSecondsRange,
+            valueText: { String(format: "%dms", Int(($0 * 1000).rounded())) },
+            currentPreview: { previewCursorPathWindow },
+            setPreview: { previewCursorPathWindow = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.pathSmoothingWindowSeconds = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorPathLowSlider: some View {
+        cursorSettingSlider(
+            title: "Path Smooth Start",
+            liveValue: previewCursorPathLow ?? cursorSettings.pathSmoothingSpeedLow,
+            committedValue: cursorSettings.pathSmoothingSpeedLow,
+            range: CursorSettings.pathSmoothingSpeedLowRange,
+            valueText: { String(format: "%.2f/s", $0) },
+            currentPreview: { previewCursorPathLow },
+            setPreview: { previewCursorPathLow = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.pathSmoothingSpeedLow = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorPathHighSlider: some View {
+        cursorSettingSlider(
+            title: "Path Smooth Full",
+            liveValue: previewCursorPathHigh ?? cursorSettings.pathSmoothingSpeedHigh,
+            committedValue: cursorSettings.pathSmoothingSpeedHigh,
+            range: CursorSettings.pathSmoothingSpeedHighRange,
+            valueText: { String(format: "%.2f/s", $0) },
+            currentPreview: { previewCursorPathHigh },
+            setPreview: { previewCursorPathHigh = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.pathSmoothingSpeedHigh = final
+                onCursorChange(next)
+            }
+        )
+    }
+
+    private var cursorPathDeviationSlider: some View {
+        cursorSettingSlider(
+            title: "Path Max Drift",
+            liveValue: previewCursorPathDeviation ?? cursorSettings.pathSmoothingMaxDeviation,
+            committedValue: cursorSettings.pathSmoothingMaxDeviation,
+            range: CursorSettings.pathSmoothingMaxDeviationRange,
+            valueText: { String(format: "%.0f%% screen", $0 * 100) },
+            currentPreview: { previewCursorPathDeviation },
+            setPreview: { previewCursorPathDeviation = $0 },
+            commit: { final in
+                var next = cursorSettings
+                next.pathSmoothingMaxDeviation = final
+                onCursorChange(next)
+            }
+        )
     }
 
     private func followSafeZoneSlider(_ keyframe: EffectKeyframe) -> some View {
@@ -280,6 +586,24 @@ struct EffectsInspector: View {
                     }
                 }
             )
+        }
+    }
+
+    private func centerCursorToggle(_ keyframe: EffectKeyframe) -> some View {
+        HStack {
+            Text("Center Cursor")
+            Spacer()
+            Toggle("", isOn: Binding<Bool>(
+                get: { keyframe.anchorMode == .centerCursor },
+                set: { enabled in
+                    var updated = keyframe
+                    updated.anchorMode = enabled ? .centerCursor : .followCursor
+                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
+                }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .tint(Theme.Color.accent)
         }
     }
 
@@ -371,6 +695,196 @@ struct EffectsInspector: View {
                     previewFollowLandingAssist = nil
                     guard abs(final - committedValue) >= 0.002 else { return }
                     commitZoomFollowLandingAssist(keyframe: keyframe, seconds: final)
+                }
+            )
+        }
+    }
+
+    private func followAdvancedSection(_ keyframe: EffectKeyframe) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Advanced Zoom")
+                .font(Theme.Font.caption)
+                .foregroundStyle(Theme.Color.textSecondary)
+            zoomTuningSlider(
+                title: "Pan Shutter",
+                liveValue: previewZoomPanShutter ?? keyframe.zoomPanBlurShutterSeconds,
+                committedValue: keyframe.zoomPanBlurShutterSeconds,
+                range: EffectKeyframe.zoomPanBlurShutterSecondsRange,
+                valueText: shutterText,
+                currentPreview: { previewZoomPanShutter },
+                setPreview: { previewZoomPanShutter = $0 },
+                commit: { final in
+                    var updated = keyframe
+                    updated.zoomPanBlurShutterSeconds = final
+                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
+                }
+            )
+            zoomTuningSlider(
+                title: "Pan Blur Cap",
+                liveValue: previewZoomPanBlurCap ?? keyframe.zoomPanBlurMaxUV,
+                committedValue: keyframe.zoomPanBlurMaxUV,
+                range: EffectKeyframe.zoomPanBlurMaxUVRange,
+                valueText: { String(format: "%.3f uv", $0) },
+                currentPreview: { previewZoomPanBlurCap },
+                setPreview: { previewZoomPanBlurCap = $0 },
+                commit: { final in
+                    var updated = keyframe
+                    updated.zoomPanBlurMaxUV = final
+                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
+                }
+            )
+            zoomTuningSlider(
+                title: "Blur Start Speed",
+                liveValue: previewZoomBlurStartSpeed ?? keyframe.zoomPanBlurThresholdSpeed,
+                committedValue: keyframe.zoomPanBlurThresholdSpeed,
+                range: EffectKeyframe.zoomPanBlurThresholdSpeedRange,
+                valueText: { String(format: "%.2f/s", $0) },
+                currentPreview: { previewZoomBlurStartSpeed },
+                setPreview: { previewZoomBlurStartSpeed = $0 },
+                commit: { final in
+                    var updated = keyframe
+                    updated.zoomPanBlurThresholdSpeed = final
+                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
+                }
+            )
+            zoomTuningSlider(
+                title: "Blur Full Speed",
+                liveValue: previewZoomBlurFullSpeed ?? keyframe.zoomPanBlurFullSpeed,
+                committedValue: keyframe.zoomPanBlurFullSpeed,
+                range: EffectKeyframe.zoomPanBlurFullSpeedRange,
+                valueText: { String(format: "%.2f/s", $0) },
+                currentPreview: { previewZoomBlurFullSpeed },
+                setPreview: { previewZoomBlurFullSpeed = $0 },
+                commit: { final in
+                    var updated = keyframe
+                    updated.zoomPanBlurFullSpeed = final
+                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
+                }
+            )
+            zoomTuningSlider(
+                title: "Center Handoff",
+                liveValue: previewZoomCenterHandoff ?? keyframe.zoomCenterHandoffSeconds,
+                committedValue: keyframe.zoomCenterHandoffSeconds,
+                range: EffectKeyframe.zoomCenterHandoffSecondsRange,
+                valueText: { String(format: "%dms", Int(($0 * 1000).rounded())) },
+                currentPreview: { previewZoomCenterHandoff },
+                setPreview: { previewZoomCenterHandoff = $0 },
+                commit: { final in
+                    var updated = keyframe
+                    updated.zoomCenterHandoffSeconds = final
+                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
+                }
+            )
+            zoomTuningSlider(
+                title: "Spring Relaxed",
+                liveValue: previewZoomTauRelaxed ?? keyframe.zoomFollowTauRelaxed,
+                committedValue: keyframe.zoomFollowTauRelaxed,
+                range: EffectKeyframe.zoomFollowTauRelaxedRange,
+                valueText: { String(format: "%dms", Int(($0 * 1000).rounded())) },
+                currentPreview: { previewZoomTauRelaxed },
+                setPreview: { previewZoomTauRelaxed = $0 },
+                commit: { final in
+                    var updated = keyframe
+                    updated.zoomFollowTauRelaxed = final
+                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
+                }
+            )
+            zoomTuningSlider(
+                title: "Spring Tight",
+                liveValue: previewZoomTauTight ?? keyframe.zoomFollowTauTight,
+                committedValue: keyframe.zoomFollowTauTight,
+                range: EffectKeyframe.zoomFollowTauTightRange,
+                valueText: { String(format: "%dms", Int(($0 * 1000).rounded())) },
+                currentPreview: { previewZoomTauTight },
+                setPreview: { previewZoomTauTight = $0 },
+                commit: { final in
+                    var updated = keyframe
+                    updated.zoomFollowTauTight = final
+                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
+                }
+            )
+            zoomTuningSlider(
+                title: "Anticipation Window",
+                liveValue: previewZoomAnticipationWindow ?? keyframe.zoomFollowAnticipationHalfWindow,
+                committedValue: keyframe.zoomFollowAnticipationHalfWindow,
+                range: EffectKeyframe.zoomFollowAnticipationHalfWindowRange,
+                valueText: { String(format: "%dms", Int(($0 * 1000).rounded())) },
+                currentPreview: { previewZoomAnticipationWindow },
+                setPreview: { previewZoomAnticipationWindow = $0 },
+                commit: { final in
+                    var updated = keyframe
+                    updated.zoomFollowAnticipationHalfWindow = final
+                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
+                }
+            )
+        }
+    }
+
+    private func zoomTuningSlider(
+        title: String,
+        liveValue: Double,
+        committedValue: Double,
+        range: ClosedRange<Double>,
+        valueText: @escaping (Double) -> String,
+        currentPreview: @escaping () -> Double?,
+        setPreview: @escaping (Double?) -> Void,
+        commit: @escaping (Double) -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(valueText(liveValue))
+                    .font(Theme.Font.monoTimecode)
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+            PBSlider(
+                value: Binding<Double>(
+                    get: { liveValue },
+                    set: { newValue in setPreview(clamp(newValue, to: range)) }
+                ),
+                in: range,
+                onEditingChanged: { isEditing in
+                    guard !isEditing else { return }
+                    let final = clamp(currentPreview() ?? liveValue, to: range)
+                    setPreview(nil)
+                    guard abs(final - committedValue) >= 0.000_5 else { return }
+                    commit(final)
+                }
+            )
+        }
+    }
+
+    private func cursorSettingSlider(
+        title: String,
+        liveValue: Double,
+        committedValue: Double,
+        range: ClosedRange<Double>,
+        valueText: @escaping (Double) -> String,
+        currentPreview: @escaping () -> Double?,
+        setPreview: @escaping (Double?) -> Void,
+        commit: @escaping (Double) -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(valueText(liveValue))
+                    .font(Theme.Font.monoTimecode)
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+            PBSlider(
+                value: Binding<Double>(
+                    get: { liveValue },
+                    set: { newValue in setPreview(clamp(newValue, to: range)) }
+                ),
+                in: range,
+                onEditingChanged: { isEditing in
+                    guard !isEditing else { return }
+                    let final = clamp(currentPreview() ?? liveValue, to: range)
+                    setPreview(nil)
+                    guard abs(final - committedValue) >= 0.000_5 else { return }
+                    commit(final)
                 }
             )
         }
@@ -491,6 +1005,11 @@ struct EffectsInspector: View {
             keyframe.easeIn.seconds,
             keyframe.easeOut.seconds
         )
+    }
+
+    private func shutterText(_ seconds: Double) -> String {
+        guard seconds > 0 else { return "0" }
+        return String(format: "1/%d", Int((1.0 / seconds).rounded()))
     }
 
     // MARK: - Formatting

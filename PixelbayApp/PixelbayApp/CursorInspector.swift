@@ -63,7 +63,7 @@ struct CursorInspector: View {
                     get: { liveValue },
                     set: { newValue in previewCursorScale = newValue }
                 ),
-                in: 0.5...4.0,
+                in: CursorSettings.scaleRange,
                 onEditingChanged: { isEditing in
                     guard !isEditing, let final = previewCursorScale else { return }
                     previewCursorScale = nil
