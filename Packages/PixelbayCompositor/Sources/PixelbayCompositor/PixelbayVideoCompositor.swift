@@ -125,10 +125,21 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
             layout = baseLayout
         } else {
             let t = CMTimeGetSeconds(request.compositionTime)
+            // Temporal-blur exposure window: film-convention shutter angle
+            // (180° = open half the frame interval) scaled by the master
+            // blur strength. 0 on either knob disables the multi-transform
+            // sampling entirely.
+            let frameDuration = request.renderContext.videoComposition.frameDuration
+            let frameSeconds = frameDuration.isNumeric ? CMTimeGetSeconds(frameDuration) : 1.0 / 60.0
+            let shutterSeconds = frameSeconds
+                * (instruction.tuning.shutterAngle / 360.0)
+                * instruction.tuning.blurStrength
             layout = EffectEvaluator.apply(
                 keyframes: instruction.effects,
                 baseLayout: baseLayout,
-                atTime: t
+                atTime: t,
+                shutterSeconds: shutterSeconds,
+                transitionSoftness: instruction.tuning.transitionSoftness
             )
         }
         var sources: [LayerKind: CVPixelBuffer] = [:]
@@ -209,7 +220,10 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
                 scale: cursorSettings.scale * zoomCursorBoost * velocityBoost,
                 velocityXFractionPerSecond: vx,
                 velocityYFractionPerSecond: vy,
-                motionBlurStrength: followGate,
+                // The sprite streak follows the screen's shutter feel:
+                // tuning.cursorBlur scales the per-zoom gate so cursor and
+                // camera blur agree (0 = crisp sprite always).
+                motionBlurStrength: followGate * instruction.tuning.cursorBlur,
                 blurSpeedLow: cursorSettings.blurSpeedLow,
                 blurSpeedHigh: cursorSettings.blurSpeedHigh,
                 blurShutterMin: cursorSettings.blurShutterMin,
@@ -470,6 +484,11 @@ public final class PixelbayCompositionInstruction: NSObject, AVVideoCompositionI
     public let cursorSprite: CursorSpriteData?
     public let cursorSettings: CursorSettings?
     public let cursorTrajectory: [MouseTrajectorySample]
+    // Project-wide motion tuning. The compositor reads the blur knobs per
+    // frame (shutterAngle/blurStrength drive the temporal blur window,
+    // cursorBlur scales the sprite streak) so Motion Tuning slider edits
+    // affect preview/export without further plumbing.
+    public let tuning: TuningSettings
     // Image-wallpaper background, already center-cropped to the output aspect
     // ratio (so a full-screen draw is aspect-fill with no distortion). Static
     // across the whole instruction — the render graph uploads it to a texture
@@ -485,6 +504,7 @@ public final class PixelbayCompositionInstruction: NSObject, AVVideoCompositionI
         cursorSprite: CursorSpriteData? = nil,
         cursorSettings: CursorSettings? = nil,
         cursorTrajectory: [MouseTrajectorySample] = [],
+        tuning: TuningSettings = .default,
         backgroundImage: CGImage? = nil
     ) {
         self.timeRange = timeRange
@@ -494,6 +514,7 @@ public final class PixelbayCompositionInstruction: NSObject, AVVideoCompositionI
         self.cursorSprite = cursorSprite
         self.cursorSettings = cursorSettings
         self.cursorTrajectory = cursorTrajectory
+        self.tuning = tuning
         self.backgroundImage = backgroundImage
         super.init()
     }

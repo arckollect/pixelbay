@@ -46,6 +46,7 @@ final class ProjectModelTests: XCTestCase {
         XCTAssertEqual(decoded.tracks[0].clips[0].sourceRange.start.seconds, 2.0, accuracy: 1e-9)
         XCTAssertEqual(decoded.tracks[0].clips[0].sourceRange.duration.seconds, 20.0, accuracy: 1e-9)
         XCTAssertEqual(decoded.sourceSegments.count, 1)
+        XCTAssertEqual(decoded.tuning, .default)
     }
 
     func test_decodeLegacyProject_missingDefaultedFields_usesModelDefaults() throws {
@@ -96,6 +97,7 @@ final class ProjectModelTests: XCTestCase {
         XCTAssertTrue(project.sourceSegments.isEmpty)
         XCTAssertEqual(project.layout, .phase1Default)
         XCTAssertTrue(project.effects.isEmpty)
+        XCTAssertEqual(project.tuning, .default)
         XCTAssertEqual(project.cursorSettings, .default)
         XCTAssertNil(project.scenesSession)
         XCTAssertEqual(project.extras, [:])
@@ -108,6 +110,80 @@ final class ProjectModelTests: XCTestCase {
         XCTAssertEqual(clip.speed, 1)
         XCTAssertTrue(clip.enabled)
         XCTAssertEqual(clip.extras, [:])
+    }
+
+    func test_project_customTuning_roundTripsThroughCodable() throws {
+        var project = Project(name: "Motion tuning")
+        project.tuning = TuningSettings(
+            cameraTau: 0.55,
+            settle: 0.8,
+            deadzoneFraction: 0.2,
+            smoothingScope: .zoomsOnly,
+            shutterAngle: 270
+        )
+
+        let data = try JSONEncoder().encode(project)
+        let decoded = try JSONDecoder().decode(Project.self, from: data)
+
+        XCTAssertEqual(decoded.tuning, project.tuning)
+    }
+
+    func test_tuningSettings_clampOnInitAndMutation() {
+        var tuning = TuningSettings(
+            cameraTau: 99,
+            settle: -1,
+            deadzoneFraction: 99,
+            maxPanSpeed: 0,
+            shutterAngle: 999
+        )
+        XCTAssertEqual(tuning.cameraTau, TuningSettings.cameraTauRange.upperBound)
+        XCTAssertEqual(tuning.settle, TuningSettings.settleRange.lowerBound)
+        XCTAssertEqual(tuning.deadzoneFraction, TuningSettings.deadzoneFractionRange.upperBound)
+        XCTAssertEqual(tuning.maxPanSpeed, TuningSettings.maxPanSpeedRange.lowerBound)
+        XCTAssertEqual(tuning.shutterAngle, TuningSettings.shutterAngleRange.upperBound)
+
+        tuning.pathWindowSeconds = 99
+        tuning.travelCollapse = -5
+        XCTAssertEqual(tuning.pathWindowSeconds, TuningSettings.pathWindowSecondsRange.upperBound)
+        XCTAssertEqual(tuning.travelCollapse, TuningSettings.travelCollapseRange.lowerBound)
+    }
+
+    func test_tuningSettings_decodeMissingFields_usesDefaults() throws {
+        let decoded = try JSONDecoder().decode(TuningSettings.self, from: Data("{}".utf8))
+        XCTAssertEqual(decoded, .default)
+
+        let partial = try JSONDecoder().decode(
+            TuningSettings.self,
+            from: Data(#"{"cameraTau": 0.6, "smoothingScope": "zoomsOnly"}"#.utf8)
+        )
+        XCTAssertEqual(partial.cameraTau, 0.6, accuracy: 1e-9)
+        XCTAssertEqual(partial.smoothingScope, .zoomsOnly)
+        XCTAssertEqual(partial.settle, TuningSettings.default.settle)
+    }
+
+    func test_migrator_v5ToV6_dropsZoomFollowStyleKey() throws {
+        let v5: [String: Any] = [
+            "schemaVersion": 5,
+            "bundleVersion": 1,
+            "id": "p5",
+            "name": "v5 doc",
+            "createdAt": "2026-06-01T00:00:00Z",
+            "modifiedAt": "2026-06-01T00:00:00Z",
+            "assets": [],
+            "tracks": [],
+            "sourceSegments": [],
+            "extras": [:],
+            "zoomFollowStyle": ["float": 0.65, "speed": 0.35, "softness": 0.60]
+        ]
+        let migrated = try MigrationRegistry.standard.migrate(v5)
+        XCTAssertEqual(migrated["schemaVersion"] as? Int, currentSchemaVersion)
+        XCTAssertNil(migrated["zoomFollowStyle"])
+
+        let data = try JSONSerialization.data(withJSONObject: migrated, options: .sortedKeys)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let project = try decoder.decode(Project.self, from: data)
+        XCTAssertEqual(project.tuning, .default)
     }
 
     func test_decodeLegacySourceSegment_missingExtras_usesEmptyExtras() throws {
@@ -156,10 +232,6 @@ final class ProjectModelTests: XCTestCase {
         settings.blurShutterMin = 1.0 / 100.0
         settings.blurShutterMax = 1.0 / 25.0
         settings.blurMaxUV = 1.4
-        settings.pathSmoothingWindowSeconds = 0.08
-        settings.pathSmoothingSpeedLow = 0.5
-        settings.pathSmoothingSpeedHigh = 2.0
-        settings.pathSmoothingMaxDeviation = 0.03
 
         XCTAssertEqual(settings.extras["zoomScaleBoostPerZoomUnit"], .double(1.1))
         XCTAssertEqual(settings.extras["velocityScaleBoost"], .double(0.2))
@@ -170,10 +242,6 @@ final class ProjectModelTests: XCTestCase {
         XCTAssertEqual(settings.extras["blurShutterMin"], .double(1.0 / 100.0))
         XCTAssertEqual(settings.extras["blurShutterMax"], .double(1.0 / 25.0))
         XCTAssertEqual(settings.extras["blurMaxUV"], .double(1.4))
-        XCTAssertEqual(settings.extras["pathSmoothingWindowSeconds"], .double(0.08))
-        XCTAssertEqual(settings.extras["pathSmoothingSpeedLow"], .double(0.5))
-        XCTAssertEqual(settings.extras["pathSmoothingSpeedHigh"], .double(2.0))
-        XCTAssertEqual(settings.extras["pathSmoothingMaxDeviation"], .double(0.03))
 
         settings.blurMaxUV = 99
         XCTAssertEqual(settings.blurMaxUV, CursorSettings.blurMaxUVRange.upperBound)

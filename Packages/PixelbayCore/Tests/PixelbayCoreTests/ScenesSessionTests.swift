@@ -86,10 +86,10 @@ final class ScenesSessionTests: XCTestCase {
         }
     }
 
-    // MARK: - Project schema v5 integration
+    // MARK: - Project schema integration
 
-    func test_project_schemaVersion_isFive() {
-        XCTAssertEqual(currentSchemaVersion, 5)
+    func test_project_schemaVersion_isSix() {
+        XCTAssertEqual(currentSchemaVersion, 6)
     }
 
     func test_project_freshProject_scenesSessionIsNil() {
@@ -141,7 +141,7 @@ final class ScenesSessionTests: XCTestCase {
         ]
 
         let migrated = try MigrationRegistry.standard.migrate(v4Document)
-        XCTAssertEqual(migrated["schemaVersion"] as? Int, 5)
+        XCTAssertEqual(migrated["schemaVersion"] as? Int, currentSchemaVersion)
 
         // The migrated dict must decode straight into Project with
         // scenesSession == nil because the field is optional.
@@ -179,13 +179,13 @@ final class ScenesSessionTests: XCTestCase {
             "extras": [:]
         ]
         let migrated = try MigrationRegistry.standard.migrate(v1Document)
-        XCTAssertEqual(migrated["schemaVersion"] as? Int, 5)
+        XCTAssertEqual(migrated["schemaVersion"] as? Int, currentSchemaVersion)
 
         let data = try JSONSerialization.data(withJSONObject: migrated)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let project = try decoder.decode(Project.self, from: data)
-        XCTAssertEqual(project.schemaVersion, 5)
+        XCTAssertEqual(project.schemaVersion, currentSchemaVersion)
         XCTAssertNil(project.scenesSession)
     }
 }

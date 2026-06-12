@@ -62,24 +62,24 @@ public struct ResolvedLayout: Sendable, Equatable {
     // window while the webcam rect is overlaid on the screen rect, so the
     // webcam crossfades in on top of the still-rendered screen layer.
     public var webcamOpacity: Float
-    /// Phase 3d Gaussian blur sigma in pixels applied to the screen layer
-    /// during zoom transitions. EffectEvaluator peaks this via the eased-
-    /// strength bell (4·s·(1−s)) so it ramps in / out across ease-in and
-    /// ease-out windows, and is zero during the held zoom — settled
-    /// framing stays crisp. Replaces the Phase 3c radial zoom blur, which
-    /// felt like light-speed warping during transitions. The shader
-    /// normalises against the layer rect's size to produce symmetric soft
-    /// veil on non-square viewports.
+    /// Gaussian blur sigma in pixels applied to the screen layer. No longer
+    /// driven by the zoom transitions (true temporal blur covers those);
+    /// kept as a general-purpose soft-veil hook. 0 = no blur.
     public var screenZoomBlurSigmaPx: Float
-    /// Directional motion-blur vector for the screen layer, in the layer's
-    /// UV space (texCoord units). Points along the zoom camera's velocity;
-    /// magnitude is the blur kernel's half-extent. EffectEvaluator drives
-    /// this from the per-frame zoom-centre velocity so fast cursor-follow
-    /// pans pick up a velocity-proportional streak along the motion
-    /// direction (Screen Studio look) instead of the old isotropic Gaussian
-    /// softening. Zero (the default) keeps the frame bit-identical to a
-    /// no-blur pass.
-    public var screenMotionBlurUV: SIMD2<Float>
+    /// TRUE temporal motion blur: the camera transform sampled at shutter-
+    /// open and shutter-close, expressed as source-UV remappings RELATIVE
+    /// to the frame's drawn rect. For an output fragment whose texCoord is
+    /// `uv` under the rect at time t, the same output pixel under the rect
+    /// at shutter-open is `uv * screenUVOpen.xy + screenUVOpen.zw` (and
+    /// likewise for close). The fragment shader samples the SAME source
+    /// frame under N transforms interpolated open→close and averages —
+    /// physically-correct pan blur AND radial zoom blur fall out of the
+    /// transform delta, intensity comes from real camera velocity, and a
+    /// still camera collapses to a single tap (identity transforms).
+    public var screenUVOpen: SIMD4<Float>
+    public var screenUVClose: SIMD4<Float>
+
+    public static let identityUVTransform = SIMD4<Float>(1, 1, 0, 0)
 
     public init(
         outputSize: CGSize,
@@ -91,7 +91,8 @@ public struct ResolvedLayout: Sendable, Equatable {
         webcamCornerRadius: CGFloat,
         webcamOpacity: Float = 1.0,
         screenZoomBlurSigmaPx: Float = 0,
-        screenMotionBlurUV: SIMD2<Float> = .zero
+        screenUVOpen: SIMD4<Float> = ResolvedLayout.identityUVTransform,
+        screenUVClose: SIMD4<Float> = ResolvedLayout.identityUVTransform
     ) {
         self.outputSize = outputSize
         self.background = background
@@ -102,7 +103,8 @@ public struct ResolvedLayout: Sendable, Equatable {
         self.webcamCornerRadius = webcamCornerRadius
         self.webcamOpacity = webcamOpacity
         self.screenZoomBlurSigmaPx = screenZoomBlurSigmaPx
-        self.screenMotionBlurUV = screenMotionBlurUV
+        self.screenUVOpen = screenUVOpen
+        self.screenUVClose = screenUVClose
     }
 }
 

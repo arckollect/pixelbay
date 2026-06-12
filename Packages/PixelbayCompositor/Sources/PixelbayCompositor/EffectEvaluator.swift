@@ -26,44 +26,58 @@ import PixelbayCore
 // passes this to MetalRenderGraph just like a static layout.
 
 public enum EffectEvaluator {
-    /// Phase 3d transition-blur peak sigma in pixels. Driven by the eased
-    /// strength bell `4·s·(1−s)` so it ramps `0 → peak → 0` across each
-    /// ease window, hits 0 during held zoom and off-keyframe. Replaces
-    /// the Phase 3c camera-velocity radial blur for the *transition*
-    /// portion — Gaussian, not radial, so it reads as a soft veil rather
-    /// than a warp.
-    static let screenZoomBlurPeakSigmaPx: Double = 2.25
-
-    /// Follow-pan motion blur is DIRECTIONAL (along the camera's velocity
-    /// vector) and velocity-proportional: blur half-extent in layer-UV is
-    /// `cameraSpeed · panBlurShutterSeconds`, gated by a smoothstep onset
-    /// so slow drifts stay crisp, then scaled by the keyframe's eased
-    /// strength and the user's Motion Blur multiplier. Held-zoom with a
-    /// stationary cursor still reads as 0 (no blur), preserving crisp
-    /// paused frames.
+    /// Applies the active effect keyframes at time `t`, plus TRUE temporal
+    /// motion blur: when `shutterSeconds > 0`, the camera transform is also
+    /// evaluated at `t ± shutter/2` and packed into the layout as source-UV
+    /// remappings (`screenUVOpen` / `screenUVClose`). The fragment shader
+    /// samples the same source frame under N transforms interpolated
+    /// between them and averages — like a real camera shutter. Pan blur
+    /// during follow, radial blur during the zoom scale change, and curved-
+    /// path blur all fall out of the transform delta with no separate
+    /// heuristics; a still camera collapses to a single tap.
     ///
-    /// `panBlurShutterSeconds` is the synthetic exposure window — 1/50 s
-    /// makes a deliberate follow (~0.5 norm/s) streak ~1 % of the layer
-    /// and a fast chase visibly smear along the motion direction.
-    /// `panBlurMaxUV` caps the half-extent so even a teleport-fast pan
-    /// stays readable.
-    static let panBlurShutterSeconds: Double = EffectKeyframe.defaultZoomPanBlurShutterSeconds
-    static let panBlurMaxUV: Double = EffectKeyframe.defaultZoomPanBlurMaxUV
-
-    /// Camera-speed onset ramp for the pan blur, in norm-units/sec on the
-    /// camera's anchor-waypoint velocity. Below threshold the camera is
-    /// treated as still (no blur); by `panBlurFullSpeed` the blur is fully
-    /// proportional to speed. Raised from 0.06/0.30 so the slow
-    /// anticipatory pre-drift (the camera easing toward a sweep's
-    /// destination before the cursor commits) stays crisp — blur builds
-    /// only once the pan is actually fast.
-    static let panBlurThresholdSpeed: Double = EffectKeyframe.defaultZoomPanBlurThresholdSpeed
-    static let panBlurFullSpeed: Double = EffectKeyframe.defaultZoomPanBlurFullSpeed
-
+    /// `shutterSeconds` is the caller-computed exposure window — typically
+    /// `frameDuration · shutterAngle/360 · blurStrength` from the project's
+    /// motion tuning. `transitionSoftness` blends the zoom in/out strength
+    /// curve toward a longer-tailed ease (see `EffectKeyframe.strength`).
     public static func apply(
         keyframes: [EffectKeyframe],
         baseLayout: ResolvedLayout,
-        atTime t: Double
+        atTime t: Double,
+        shutterSeconds: Double = 0,
+        transitionSoftness: Double = 0
+    ) -> ResolvedLayout {
+        var layout = applyAtInstant(
+            keyframes: keyframes, baseLayout: baseLayout, atTime: t,
+            transitionSoftness: transitionSoftness
+        )
+
+        if shutterSeconds > 1e-6 {
+            let half = shutterSeconds / 2
+            let rectNow = layout.screen
+            let rectOpen = applyAtInstant(
+                keyframes: keyframes, baseLayout: baseLayout, atTime: t - half,
+                transitionSoftness: transitionSoftness
+            ).screen
+            let rectClose = applyAtInstant(
+                keyframes: keyframes, baseLayout: baseLayout, atTime: t + half,
+                transitionSoftness: transitionSoftness
+            ).screen
+            layout.screenUVOpen = uvTransform(from: rectNow, to: rectOpen)
+            layout.screenUVClose = uvTransform(from: rectNow, to: rectClose)
+        }
+        return layout
+    }
+
+    /// The instantaneous layout at time `t` — winner-takes-all zoom plus
+    /// talking-head swaps, no blur bookkeeping. Called once for the frame
+    /// itself and (when temporal blur is on) once each for the shutter-open
+    /// and shutter-close instants.
+    private static func applyAtInstant(
+        keyframes: [EffectKeyframe],
+        baseLayout: ResolvedLayout,
+        atTime t: Double,
+        transitionSoftness: Double = 0
     ) -> ResolvedLayout {
         var layout = baseLayout
 
@@ -82,7 +96,7 @@ public enum EffectEvaluator {
         // per-keyframe loop is preserved for that kind.
         var winner: (kf: EffectKeyframe, strength: Double)?
         for kf in keyframes where kf.kind == .zoom {
-            let strength = kf.strength(at: t)
+            let strength = kf.strength(at: t, transitionSoftness: transitionSoftness)
             guard strength > 0 else { continue }
             if let current = winner {
                 let beatsByStrength = strength > current.strength
@@ -97,45 +111,6 @@ public enum EffectEvaluator {
         }
         if let winner {
             layout = applyZoom(winner.kf, strength: winner.strength, atTime: t, to: layout)
-            // Two blur terms, naturally exclusive by construction (the zoom
-            // centre is locked during the ease windows, so the camera only
-            // moves during hold — when the bell is 0):
-            //   • Transition bell: isotropic Gaussian, peaks mid-ease and
-            //     resolves crisp at hold (Phase 3d).
-            //   • Pan blur: DIRECTIONAL streak along the camera's velocity,
-            //     half-extent proportional to camera speed (synthetic
-            //     shutter), so fast cursor-follow pans read as real motion
-            //     blur — the faster the pan, the longer the streak — while
-            //     held-zoom-with-stationary-cursor stays bit-identical to
-            //     no blur.
-            // Both terms scale with the keyframe's eased strength (no
-            // hard-cut blur pop at t = keyframe.start) and the user's
-            // Motion Blur multiplier.
-            let bell = max(0.0, 4.0 * winner.strength * (1.0 - winner.strength))
-            let transitionSigma = bell
-                * Self.screenZoomBlurPeakSigmaPx
-                * winner.kf.zoomFollowMotionBlur
-            let (vx, vy) = zoomCameraVelocity(for: winner.kf, atTime: t)
-            let cameraSpeed = (vx * vx + vy * vy).squareRoot()
-            let panRamp = MouseTrajectory.smoothstep(
-                winner.kf.zoomPanBlurThresholdSpeed,
-                winner.kf.zoomPanBlurFullSpeed,
-                cameraSpeed
-            )
-            let panHalfExtentUV = min(
-                winner.kf.zoomPanBlurMaxUV,
-                cameraSpeed * winner.kf.zoomPanBlurShutterSeconds
-                    * panRamp
-                    * winner.strength
-                    * winner.kf.zoomFollowMotionBlur
-            )
-            if cameraSpeed > 1e-9, panHalfExtentUV > 1e-5 {
-                layout.screenMotionBlurUV = SIMD2(
-                    Float(vx / cameraSpeed * panHalfExtentUV),
-                    Float(vy / cameraSpeed * panHalfExtentUV)
-                )
-            }
-            layout.screenZoomBlurSigmaPx = Float(transitionSigma)
         }
 
         for kf in keyframes where kf.kind == .talkingHeadSwap {
@@ -144,6 +119,21 @@ public enum EffectEvaluator {
             layout = applyTalkingHead(strength: strength, to: layout)
         }
         return layout
+    }
+
+    /// Source-UV remapping between two drawn rects. For an output pixel
+    /// whose texCoord is `uv` under `rect`, the same output pixel under
+    /// `other` has texCoord `uv * result.xy + result.zw`. Identity when the
+    /// rects match.
+    static func uvTransform(from rect: LayerRect, to other: LayerRect) -> SIMD4<Float> {
+        guard other.size.width > 0, other.size.height > 0 else {
+            return ResolvedLayout.identityUVTransform
+        }
+        let scaleX = rect.size.width / other.size.width
+        let scaleY = rect.size.height / other.size.height
+        let offsetX = (rect.origin.x - other.origin.x) / other.size.width
+        let offsetY = (rect.origin.y - other.origin.y) / other.size.height
+        return SIMD4<Float>(Float(scaleX), Float(scaleY), Float(offsetX), Float(offsetY))
     }
 
     // Edge-aware framing constants. When the raw anchor sits inside the
@@ -285,36 +275,23 @@ public enum EffectEvaluator {
         return (cx, cy, factor)
     }
 
-    /// Per-frame zoom centre.
+    /// Per-frame zoom centre: the LIVE camera path, sampled at `t` — during
+    /// the ease windows too. The zoom-in tracks the (already buttery)
+    /// glide-follow camera as it ramps instead of freezing at the trigger
+    /// point and snapping to the live path afterwards; the old ease-lock +
+    /// centre-handoff machinery existed to hide wobble from near-raw
+    /// trajectories, which the shared click-pinned smoothed path and the
+    /// constant-weight camera spring eliminated at the source. Ease-out
+    /// glides the same way: the trajectory's last sample (where the camera
+    /// came to rest) holds the centre while the rect shrinks.
     ///
-    /// Phase 3d+: the centre is stable during the ease-in and ease-out
-    /// windows. The ease windows now drive a deliberate rect-growth-in-
-    /// place feel (paired with the screen-position lerp in `applyZoom`):
-    ///   - Ease-in: hold at `trajectory[0]` (cursor-at-trigger). The
-    ///     viewer sees the framing rect grow around the click point.
-    ///   - Handoff/hold (middle): blend onto a non-uniform Catmull-Rom
-    ///     trajectory, then follow live cursor motion via the post-
-    ///     anchorFollow anchor positions.
-    ///   - Ease-out: freeze at the centre where the shrink begins. The
-    ///     framing rect shrinks back to 1× without the centre drifting or
-    ///     jumping to the trajectory's final sample.
-    ///
-    /// The earlier always-Catmull-Rom behaviour caused the focal point to
-    /// wobble while the rect was still small (low zoom factor), which
-    /// read as "the zoom doesn't centre on the cursor — it lands there
-    /// last-second." Locking the centre during the ease windows eliminates
-    /// that wobble: the only motion during the transition comes from the
-    /// strength lerp.
-    ///
-    /// Catmull-Rom (held middle): non-uniform Barry-Goldman across `(t, x,
-    /// y)` waypoints. Non-uniform parameterisation is load-bearing —
-    /// captured trajectory samples are unevenly spaced in time (CGEventTap
-    /// is event-driven, macOS coalesces under load), and uniform Catmull-
-    /// Rom on those gaps produces velocity overshoots at each spacing
-    /// change that read as jitter at zoom factors ≥ 1.5×. With only ≤ 2
-    /// samples (no outer neighbours available) falls back to linear; at
-    /// the trajectory's first / last segment the missing outer neighbour
-    /// is mirrored from the boundary sample.
+    /// Catmull-Rom sampling: non-uniform Barry-Goldman across `(t, x, y)`
+    /// waypoints. Non-uniform parameterisation is load-bearing — captured
+    /// trajectory samples are unevenly spaced in time (CGEventTap is
+    /// event-driven, macOS coalesces under load), and uniform Catmull-Rom
+    /// on those gaps produces velocity overshoots at each spacing change
+    /// that read as jitter at zoom factors ≥ 1.5×. With only ≤ 2 samples
+    /// (no outer neighbours available) falls back to linear.
     ///
     /// Falls back to the static `(centerX, centerY)` for manually-authored
     /// keyframes (`trajectory == nil`) and for the empty-explicit sentinel
@@ -336,37 +313,7 @@ public enum EffectEvaluator {
         guard let trajectory = kf.trajectory, !trajectory.isEmpty else {
             return (kf.centerX, kf.centerY)
         }
-        let localT = t - kf.timelineRange.start.seconds
-        let firstSample = trajectory[0]
-        let lastSample = trajectory[trajectory.count - 1]
-
-        // Centre-lock during the ease windows. Keep the focal point stable
-        // while the rect grows/shrinks, but make both handoffs continuous:
-        //   - after ease-in, blend from first sample to the live trajectory;
-        //   - during ease-out, freeze at the centre where shrink begins.
-        let (inEnd, outStart) = easeLockBounds(for: kf)
-        let inLockEnd = max(firstSample.t, inEnd)
-        let outLockStart = min(lastSample.t, outStart)
-        let easeInAnchor = sampledZoomCenter(
-            in: trajectory,
-            at: min(outLockStart, min(inLockEnd, firstSample.t + kf.zoomFollowLookaheadSeconds))
-        )
-        if localT <= inLockEnd {
-            return easeInAnchor
-        }
-        if localT >= outLockStart {
-            return sampledZoomCenter(in: trajectory, at: outLockStart)
-        }
-        let sampled = sampledZoomCenter(in: trajectory, at: localT)
-        let handoffEnd = min(outLockStart, inLockEnd + kf.zoomCenterHandoffSeconds)
-        if localT < handoffEnd, handoffEnd > inLockEnd {
-            let alpha = quinticSmoothstep((localT - inLockEnd) / (handoffEnd - inLockEnd))
-            return (
-                easeInAnchor.x + (sampled.x - easeInAnchor.x) * alpha,
-                easeInAnchor.y + (sampled.y - easeInAnchor.y) * alpha
-            )
-        }
-        return sampled
+        return sampledZoomCenter(in: trajectory, at: t - kf.timelineRange.start.seconds)
     }
 
     private static func sampledZoomCenter(
@@ -403,98 +350,6 @@ public enum EffectEvaluator {
             }
         }
         return (last.x, last.y)
-    }
-
-    /// Effective ease-window bounds in keyframe-local seconds, shared by
-    /// `zoomCenter`'s centre-lock and `zoomCameraVelocity`'s blur gating so
-    /// the two regimes can never drift apart. `inEnd` is where the ease-in
-    /// lock releases; `outStart` is where the ease-out lock engages. Ease
-    /// durations that overflow the keyframe's range are proportionally
-    /// shrunk, mirroring `EffectKeyframe.strength(at:)`.
-    private static func easeLockBounds(for kf: EffectKeyframe) -> (inEnd: Double, outStart: Double) {
-        let total = kf.timelineRange.end.seconds - kf.timelineRange.start.seconds
-        let easeIn = max(0.0, kf.easeIn.seconds)
-        let easeOut = max(0.0, kf.easeOut.seconds)
-        let easeBudget = easeIn + easeOut
-        let inEff: Double
-        let outEff: Double
-        if easeBudget > total, total > 0 {
-            let scale = total / easeBudget
-            inEff = easeIn * scale
-            outEff = easeOut * scale
-        } else {
-            inEff = easeIn
-            outEff = easeOut
-        }
-        return (inEff, total - outEff)
-    }
-
-    /// Camera velocity (norm-units/s in screen-content space) driving the
-    /// pan motion blur. Derived from the anchor trajectory's own waypoints
-    /// — a ±2-segment box average of per-segment velocities — rather than
-    /// finite-differencing the Catmull-Rom-interpolated `zoomCenter`, which
-    /// had two visible failure modes:
-    ///   • the spline's local curvature wiggles between 30 Hz waypoints, so
-    ///     a 1/60 s derivative points in noise directions during slow drift
-    ///     (the "blur direction is random" report);
-    ///   • differencing across the ease-lock boundary returned the entire
-    ///     ease window's accumulated anchor displacement in one frame — a
-    ///     massive fake speed spike right as the zoom settled (the "blur
-    ///     before the movement even starts" report).
-    /// Returns zero while the displayed centre is locked (ease windows,
-    /// same bounds as `zoomCenter` via `easeLockBounds`) and for pinned /
-    /// trajectory-less keyframes — no displayed pan, no blur, by
-    /// construction. Near-zero-Δt segments (scenes-merge boundaries place
-    /// two samples at the same timeline time) are skipped so a scene cut
-    /// can't masquerade as an infinite-speed pan.
-    private static func zoomCameraVelocity(
-        for kf: EffectKeyframe,
-        atTime t: Double
-    ) -> (vx: Double, vy: Double) {
-        if kf.anchorMode == .pinned { return (0, 0) }
-        guard let trajectory = kf.trajectory, trajectory.count >= 2 else { return (0, 0) }
-        let localT = t - kf.timelineRange.start.seconds
-        let firstSample = trajectory[0]
-        let lastSample = trajectory[trajectory.count - 1]
-        let (inEnd, outStart) = easeLockBounds(for: kf)
-        if localT <= max(firstSample.t, inEnd) { return (0, 0) }
-        if localT >= min(lastSample.t, outStart) { return (0, 0) }
-        let inLockEnd = max(firstSample.t, inEnd)
-        let outLockStart = min(lastSample.t, outStart)
-        // Bracketing segment: segment i spans [t_i, t_{i+1}].
-        var bracket = trajectory.count - 2
-        for i in 1..<trajectory.count where localT <= trajectory[i].t {
-            bracket = i - 1
-            break
-        }
-        var sumVx = 0.0
-        var sumVy = 0.0
-        var count = 0
-        let lo = max(0, bracket - 2)
-        let hi = min(trajectory.count - 2, bracket + 2)
-        for i in lo...hi {
-            let a = trajectory[i]
-            let b = trajectory[i + 1]
-            let dt = b.t - a.t
-            guard dt > 1e-4 else { continue }
-            sumVx += (b.x - a.x) / dt
-            sumVy += (b.y - a.y) / dt
-            count += 1
-        }
-        guard count > 0 else { return (0, 0) }
-        let handoffEnd = min(outLockStart, inLockEnd + kf.zoomCenterHandoffSeconds)
-        let scale: Double
-        if localT < handoffEnd, handoffEnd > inLockEnd {
-            scale = quinticSmoothstep((localT - inLockEnd) / (handoffEnd - inLockEnd))
-        } else {
-            scale = 1
-        }
-        return (sumVx / Double(count) * scale, sumVy / Double(count) * scale)
-    }
-
-    private static func quinticSmoothstep(_ x: Double) -> Double {
-        let c = max(0, min(1, x))
-        return c * c * c * (c * (c * 6 - 15) + 10)
     }
 
     private static func applyTalkingHead(

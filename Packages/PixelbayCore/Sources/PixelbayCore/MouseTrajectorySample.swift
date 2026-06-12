@@ -64,47 +64,11 @@ public enum MouseTrajectory {
         }
     }
 
-    /// Apply a one-pole IIR exponential moving average to a master
-    /// trajectory. Smooths sub-sample-rate jitter — the 30Hz capture rate
-    /// produces velocity discontinuities at each sample boundary under
-    /// linear interpolation, which read as a robotic / jerky cursor
-    /// follow. `alpha` is the weight of the new sample; lower values give
-    /// more smoothing but also more lag. Defaults to 0.22 (longer lag
-    /// than the original 0.35, but the 1.6× zoom amplifies sub-sample
-    /// velocity discontinuities enough that more aggressive low-pass
-    /// reads as "smooth follow" rather than "soggy follow").
-    ///
-    /// Returns a same-length array with the same `timelineTime` values
-    /// preserved; only `centerX` / `centerY` are filtered.
-    public static func smoothed(
-        _ master: [MouseTrajectorySample],
-        alpha: Double = 0.22
-    ) -> [MouseTrajectorySample] {
-        guard master.count > 1 else { return master }
-        let a = max(0.001, min(1.0, alpha))
-        var result: [MouseTrajectorySample] = []
-        result.reserveCapacity(master.count)
-        var sx = master[0].centerX
-        var sy = master[0].centerY
-        result.append(master[0])
-        for i in 1..<master.count {
-            let raw = master[i]
-            sx = a * raw.centerX + (1 - a) * sx
-            sy = a * raw.centerY + (1 - a) * sy
-            result.append(MouseTrajectorySample(
-                timelineTime: raw.timelineTime,
-                centerX: sx,
-                centerY: sy
-            ))
-        }
-        return result
-    }
-
     /// Per-sample deceleration confidence in `[0, 1]`, aligned to
     /// `trajectory`'s indices. Drives the decel-gated lookahead on
     /// `anchorFollow`: when confidence is high the camera leans toward
     /// the cursor's predicted landing zone; at 0 it behaves like a plain
-    /// deadzone follow. Same formula as the editor's `IntentScorer.sDecel`
+    /// slack follow. Same formula as the editor's `IntentScorer.sDecel`
     /// (the signal that decides which clicks earn an auto-zoom keyframe)
     /// so the "intent" signal that fires keyframes and the one that
     /// biases framing agree by construction.
@@ -186,102 +150,12 @@ public enum MouseTrajectory {
         return smoothed
     }
 
-    /// Camera-follow damping with **velocity-adaptive** time constant.
-    /// Smooths the master cursor trajectory through a critically-damped
-    /// spring whose `τ` scales with the cursor's instantaneous speed:
-    /// near-stationary input collapses τ toward `tauLow` so the spring
-    /// tracks tightly (no perceptible lag on precise clicks), while a
-    /// fast sweep ramps τ toward `tauHigh` so the on-screen motion reads
-    /// as a long glide rather than a strobe-fast streak. Output drives
-    /// BOTH the cursor sprite and the zoom anchor (Screen Studio /
-    /// Loom pattern) — sharing one filter keeps sprite + camera locked
-    /// together; the velocity adaptivity is what avoids the "delayed
-    /// cursor on click" failure mode the old fixed-τ shared design hit.
-    ///
-    /// Speed is measured as the magnitude of the inter-sample displacement
-    /// per second (norm-units / s), then low-passed by a one-pole EMA
-    /// (`velocityEmaTau`) so τ doesn't whiplash on micro-jitter. The blend
-    /// from `tauLow` → `tauHigh` is a smoothstep over `[vLow, vHigh]`.
-    ///
-    /// Defaults (norm-units = fraction of screen width):
-    ///   • `tauLow = 0.05` → 5τ settle = 0.25 s when stationary (snappy click feel)
-    ///   • `tauHigh = 0.32` → big glide on cross-screen sweeps
-    ///   • `vLow = 0.15`, `vHigh = 1.20` → adaptivity kicks in once the
-    ///     cursor crosses casual-motion speed, fully engaged on screen-sweep
-    ///   • `velocityEmaTau = 0.05` → speed estimate catches up to a stop
-    ///     within ~0.1 s, so τ drops fast when the user halts to click
-    ///
-    /// Steady-state lag at constant `v` is `2·v·τ(v)`; at the precise-click
-    /// regime (v ≈ 0.2 norm/s, τ ≈ 0.05) that's ~0.02 norm-units — beneath
-    /// perception. During a fast sweep the spring never reaches steady
-    /// state (sweep is shorter than ~5τ ≈ 1.6 s), so the trailing distance
-    /// is bounded by the sweep length and reads as a glide that decelerates
-    /// into the destination.
-    public static func cameraDamped(
-        _ master: [MouseTrajectorySample],
-        tauLow: Double = 0.05,
-        tauHigh: Double = 0.32,
-        vLow: Double = 0.15,
-        vHigh: Double = 1.20,
-        velocityEmaTau: Double = 0.05
-    ) -> [MouseTrajectorySample] {
-        guard master.count > 1 else { return master }
-        let safeTauLow = max(0.01, tauLow)
-        let safeTauHigh = max(safeTauLow, tauHigh)
-        let safeVelEma = max(0.005, velocityEmaTau)
-        var result: [MouseTrajectorySample] = []
-        result.reserveCapacity(master.count)
-        var x: Double = master[0].centerX
-        var y: Double = master[0].centerY
-        var vx: Double = 0.0
-        var vy: Double = 0.0
-        var prevT: Double = master[0].timelineTime
-        var smoothedSpeed: Double = 0.0
-        result.append(master[0])
-        for i in 1..<master.count {
-            let sample = master[i]
-            let dtTotal: Double = max(0.0, sample.timelineTime - prevT)
-            if dtTotal <= 0 {
-                result.append(MouseTrajectorySample(
-                    timelineTime: sample.timelineTime,
-                    centerX: x,
-                    centerY: y
-                ))
-                continue
-            }
-            let dx = sample.centerX - master[i - 1].centerX
-            let dy = sample.centerY - master[i - 1].centerY
-            let inputSpeed = (dx * dx + dy * dy).squareRoot() / dtTotal
-            // First-order low-pass on speed: dt-aware alpha so the EMA
-            // behaves consistently across capture rates.
-            let alpha = 1.0 - exp(-dtTotal / safeVelEma)
-            smoothedSpeed += alpha * (inputSpeed - smoothedSpeed)
-            let blend = MouseTrajectory.smoothstep(vLow, vHigh, smoothedSpeed)
-            let tau = safeTauLow + (safeTauHigh - safeTauLow) * blend
-            let omega = 1.0 / tau
-            let stiffness = omega * omega
-            let dampingCoef = 2.0 * omega
-            let maxStep = tau * 0.25
-            var remaining = dtTotal
-            while remaining > 0 {
-                let step = min(maxStep, remaining)
-                let ax = stiffness * (sample.centerX - x) - dampingCoef * vx
-                let ay = stiffness * (sample.centerY - y) - dampingCoef * vy
-                vx += ax * step
-                vy += ay * step
-                x += vx * step
-                y += vy * step
-                remaining -= step
-            }
-            prevT = sample.timelineTime
-            result.append(MouseTrajectorySample(
-                timelineTime: sample.timelineTime,
-                centerX: x,
-                centerY: y
-            ))
-        }
-        return result
-    }
+    // Note: the velocity-adaptive `cameraDamped` filter was retired in the
+    // motion-tuning overhaul. Its core flaw: it made the camera SNAPPIER
+    // the faster the cursor moved (tau tightened with speed), which read
+    // as panic on fast sweeps. The camera now keeps one constant weight at
+    // every speed (`glideFollow`), and fast input is tamed upstream by the
+    // shared `clickPinnedSmoothed` path instead.
 
     @inline(__always)
     public static func smoothstep(_ edge0: Double, _ edge1: Double, _ x: Double) -> Double {
@@ -344,73 +218,10 @@ public enum MouseTrajectory {
         return result
     }
 
-    /// Post-production cursor polish for the *rendered* synthetic cursor.
-    /// This is deliberately zero-phase: each output sample blends the raw
-    /// point with a centered time-window average, so it removes high-speed
-    /// jaggedness without introducing a temporal catch-up delay. Slow or
-    /// stopped cursor samples stay raw, preserving hover/click alignment and
-    /// final positions.
-    public static func spritePolished(
-        _ master: [MouseTrajectorySample],
-        windowSeconds: Double = CursorSettings.defaultPathSmoothingWindowSeconds,
-        speedLow: Double = CursorSettings.defaultPathSmoothingSpeedLow,
-        speedHigh: Double = CursorSettings.defaultPathSmoothingSpeedHigh,
-        maxRawDeviation: Double = CursorSettings.defaultPathSmoothingMaxDeviation
-    ) -> [MouseTrajectorySample] {
-        guard master.count > 2 else { return master }
-        let safeWindow = max(0.001, windowSeconds)
-        let speeds = instantaneousSpeeds(master)
-        var result: [MouseTrajectorySample] = []
-        result.reserveCapacity(master.count)
-        for i in master.indices {
-            let sample = master[i]
-            if i == master.startIndex || i == master.index(before: master.endIndex) {
-                result.append(sample)
-                continue
-            }
-            let speedBlend = smoothstep(speedLow, speedHigh, speeds[i])
-            guard speedBlend > 0 else {
-                result.append(sample)
-                continue
-            }
-            let start = sample.timelineTime - safeWindow
-            let end = sample.timelineTime + safeWindow
-            var sumX = 0.0
-            var sumY = 0.0
-            var totalWeight = 0.0
-            for neighbor in master {
-                guard neighbor.timelineTime >= start, neighbor.timelineTime <= end else { continue }
-                let distance = abs(neighbor.timelineTime - sample.timelineTime) / safeWindow
-                let weight = max(0.0, 1.0 - distance)
-                sumX += neighbor.centerX * weight
-                sumY += neighbor.centerY * weight
-                totalWeight += weight
-            }
-            guard totalWeight > 0 else {
-                result.append(sample)
-                continue
-            }
-            var smoothX = sumX / totalWeight
-            var smoothY = sumY / totalWeight
-            let dx = smoothX - sample.centerX
-            let dy = smoothY - sample.centerY
-            let deviation = (dx * dx + dy * dy).squareRoot()
-            let baseMaxDeviation = max(0.0, maxRawDeviation)
-            let extremeBlend = smoothstep(speedHigh, max(speedHigh + 0.001, speedHigh * 3.0), speeds[i])
-            let maxDeviation = min(0.35, baseMaxDeviation * (1.0 + extremeBlend * 1.5))
-            if deviation > maxDeviation, deviation > 0 {
-                let scale = maxDeviation / deviation
-                smoothX = sample.centerX + dx * scale
-                smoothY = sample.centerY + dy * scale
-            }
-            result.append(MouseTrajectorySample(
-                timelineTime: sample.timelineTime,
-                centerX: sample.centerX + (smoothX - sample.centerX) * speedBlend,
-                centerY: sample.centerY + (smoothY - sample.centerY) * speedBlend
-            ))
-        }
-        return result
-    }
+    // Note: the old `spritePolished` zero-phase polish was superseded by
+    // `clickPinnedSmoothed` below — same windowed-average core, plus click
+    // pinning and a tunable amplitude-collapse allowance instead of a fixed
+    // deviation cap.
 
     private static func instantaneousSpeeds(_ trajectory: [MouseTrajectorySample]) -> [Double] {
         guard trajectory.count > 1 else { return Array(repeating: 0, count: trajectory.count) }
@@ -445,87 +256,166 @@ public enum MouseTrajectory {
         return speeds
     }
 
-    /// Offline anticipated camera-target path (Screen Studio-style "the
-    /// camera knows where the cursor is going"). Because rendering happens
-    /// after the recording, every keyframe's full cursor path is known —
-    /// so instead of extrapolating along instantaneous velocity (causal
-    /// prediction, wrong on every direction change), each output sample is
-    /// a triangular-weighted average of the cursor's ACTUAL surrounding
-    /// path, with the window centre shifted `leadSeconds` into the future.
+    /// THE shared cursor path: zero-phase smoothing with amplitude collapse
+    /// and pixel-exact click pinning (Screen Studio's post-production cursor
+    /// rewrite). Both the rendered cursor sprite AND the zoom camera's
+    /// target consume this one path — sharing it is what makes the camera
+    /// feel effortless: it never sees violent raw motion, because the input
+    /// was tamed upstream.
     ///
-    /// Properties that fall out of the windowed average:
-    ///   • The target starts moving toward a sweep's destination *before*
-    ///     the cursor covers the distance — the camera eases out early
-    ///     instead of being yanked once the cursor escapes the safe zone.
-    ///   • Direction changes are corner-cut smoothly (an average can't
-    ///     overshoot the way velocity extrapolation does).
-    ///   • As the cursor decelerates into a landing point, the window
-    ///     converges on that point — the camera settles *with* the cursor,
-    ///     no separate decel-confidence gating needed.
-    ///   • A stationary cursor produces an identical target (zero phase,
-    ///     zero drift), so held frames stay locked.
+    /// Three behaviors compose per sample:
     ///
-    /// `halfWindowSeconds` is the triangular window's half-width; larger
-    /// values trade responsiveness for glide. `leadSeconds` biases the
-    /// window centre into the future — 0 gives pure zero-phase smoothing,
-    /// larger values make the camera visibly lead fast motion.
+    /// **Zero-phase window average.** Each output blends the raw point with
+    /// a centered triangular time-window average (half-width
+    /// `windowSeconds`), gated by instantaneous speed — hover and slow
+    /// precise motion stay raw (no lag, clicks align), fast motion smooths.
     ///
-    /// Scenes-merge defense: the window never averages across a merge
-    /// boundary (adjacent samples ≤ 1 ms apart but > 5 % of the screen
-    /// apart — same detector as the sprite interpolator), so the target
+    /// **Amplitude collapse.** The window average doesn't just slow fast
+    /// motion, it *shrinks* it: rapid edge-to-edge spam mostly cancels
+    /// inside the window, leaving a small graceful drift. `travelCollapse`
+    /// controls how far the smoothed path may deviate from raw during fast
+    /// travel — at 0 deviation is pinned tight (path stays honest), at 1
+    /// fast spam may fully collapse toward the window mean.
+    ///
+    /// **Click pinning.** At every `clickTimes` entry the output is exactly
+    /// the raw position, with the smoothing easing back in over
+    /// `clickSnapWindow` seconds on both sides — stylized travel between
+    /// clicks, pixel-accurate interaction at them.
+    ///
+    /// The window never averages across a scenes-merge boundary (adjacent
+    /// samples ≤ 1 ms apart but > 5 % of the screen apart), so the path
     /// can't smear across a scene cut.
     ///
-    /// Output shape matches input (`t` preserved, only `x`/`y` rewritten).
-    /// Feed the result to `anchorFollow(anticipatedTargets:)`; the spring
-    /// chases this path while the hard safe-zone barrier keeps using the
-    /// real cursor, so a generous window can never push the cursor out of
-    /// frame.
-    public static func anticipatedTargets(
-        _ samples: [ZoomTrajectorySample],
-        halfWindowSeconds: Double = 0.25,
-        leadSeconds: Double = 0.07
-    ) -> [ZoomTrajectorySample] {
-        guard samples.count > 2 else { return samples }
-        let halfW = max(0.01, halfWindowSeconds)
-        let lead = max(0.0, leadSeconds)
-        var result: [ZoomTrajectorySample] = []
-        result.reserveCapacity(samples.count)
-        for i in samples.indices {
-            let center = samples[i].t + lead
-            let start = center - halfW
-            let end = center + halfW
+    /// Output is same-length, same `timelineTime`s; only x/y rewritten.
+    public static func clickPinnedSmoothed(
+        _ master: [MouseTrajectorySample],
+        windowSeconds: Double,
+        travelCollapse: Double,
+        clickTimes: [Double] = [],
+        clickSnapWindow: Double = 0.15,
+        speedLow: Double = 0.05,
+        speedHigh: Double = 0.60
+    ) -> [MouseTrajectorySample] {
+        guard master.count > 2, windowSeconds > 0.001 else { return master }
+        let window = windowSeconds
+        let collapse = min(1.0, max(0.0, travelCollapse))
+        let snap = max(0.01, clickSnapWindow)
+        let sortedClicks = clickTimes.sorted()
+        let speeds = instantaneousSpeeds(master)
+        // Deviation allowance during fast travel. The floor keeps slow-ish
+        // motion visually honest even at collapse = 1; the ceiling lets
+        // edge-to-edge spam (raw deviation ~0.5 norm-units from the window
+        // mean) collapse completely.
+        let minDeviation = 0.02
+        let maxDeviationCeiling = 0.50
+
+        var result: [MouseTrajectorySample] = []
+        result.reserveCapacity(master.count)
+        for i in master.indices {
+            let sample = master[i]
+            // Endpoints are smoothed too (with a truncated, one-sided
+            // window) rather than passed through raw — a raw endpoint
+            // against a heavily stylized neighbor reads as a cursor jump
+            // at every clip boundary. Speed gating already keeps a
+            // stationary recording start/end honest.
+            let speedBlend = smoothstep(speedLow, speedHigh, speeds[i])
+            guard speedBlend > 0 else {
+                result.append(sample)
+                continue
+            }
+            // Triangular window walk, stopping at scenes-merge boundaries.
             var sumX = 0.0
             var sumY = 0.0
             var sumW = 0.0
-            func accumulate(_ s: ZoomTrajectorySample) {
-                let w = max(0.0, 1.0 - abs(s.t - center) / halfW)
+            func accumulate(_ s: MouseTrajectorySample) {
+                let w = max(0.0, 1.0 - abs(s.timelineTime - sample.timelineTime) / window)
                 guard w > 0 else { return }
-                sumX += s.x * w
-                sumY += s.y * w
+                sumX += s.centerX * w
+                sumY += s.centerY * w
                 sumW += w
             }
-            accumulate(samples[i])
+            accumulate(sample)
             var j = i - 1
             while j >= 0 {
-                if samples[j].t < start { break }
-                if isMergeBoundary(samples[j], samples[j + 1]) { break }
-                accumulate(samples[j])
+                if master[j].timelineTime < sample.timelineTime - window { break }
+                if isMergeBoundary(master[j], master[j + 1]) { break }
+                accumulate(master[j])
                 j -= 1
             }
             j = i + 1
-            while j < samples.count {
-                if samples[j].t > end { break }
-                if isMergeBoundary(samples[j - 1], samples[j]) { break }
-                accumulate(samples[j])
+            while j < master.count {
+                if master[j].timelineTime > sample.timelineTime + window { break }
+                if isMergeBoundary(master[j - 1], master[j]) { break }
+                accumulate(master[j])
                 j += 1
             }
-            if sumW > 0 {
-                result.append(ZoomTrajectorySample(t: samples[i].t, x: sumX / sumW, y: sumY / sumW))
-            } else {
-                result.append(samples[i])
+            guard sumW > 0 else {
+                result.append(sample)
+                continue
             }
+            var smoothX = sumX / sumW
+            var smoothY = sumY / sumW
+            // Amplitude collapse: allow deviation from raw proportional to
+            // speed and the collapse strength.
+            let dx = smoothX - sample.centerX
+            let dy = smoothY - sample.centerY
+            let deviation = (dx * dx + dy * dy).squareRoot()
+            let maxDeviation = minDeviation
+                + (maxDeviationCeiling - minDeviation) * collapse * speedBlend
+            if deviation > maxDeviation, deviation > 0 {
+                let scale = maxDeviation / deviation
+                smoothX = sample.centerX + dx * scale
+                smoothY = sample.centerY + dy * scale
+            }
+            var outX = sample.centerX + (smoothX - sample.centerX) * speedBlend
+            var outY = sample.centerY + (smoothY - sample.centerY) * speedBlend
+            // Click pinning: exactly raw at the click instant, smoothstep
+            // ease back to the stylized path over the snap window.
+            let pin = clickPinWeight(at: sample.timelineTime, clicks: sortedClicks, snapWindow: snap)
+            if pin > 0 {
+                outX += (sample.centerX - outX) * pin
+                outY += (sample.centerY - outY) * pin
+            }
+            result.append(MouseTrajectorySample(
+                timelineTime: sample.timelineTime,
+                centerX: outX,
+                centerY: outY
+            ))
         }
         return result
+    }
+
+    /// Pin weight in `[0, 1]` — 1 exactly at a click, smoothstep falloff
+    /// to 0 at `snapWindow` away from the nearest click. `clicks` must be
+    /// sorted ascending.
+    static func clickPinWeight(
+        at time: Double,
+        clicks: [Double],
+        snapWindow: Double
+    ) -> Double {
+        guard !clicks.isEmpty else { return 0 }
+        // Binary search for the nearest click.
+        var lo = 0
+        var hi = clicks.count - 1
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if clicks[mid] < time { lo = mid + 1 } else { hi = mid }
+        }
+        var nearest = abs(clicks[lo] - time)
+        if lo > 0 { nearest = min(nearest, abs(clicks[lo - 1] - time)) }
+        return 1.0 - smoothstep(0.0, snapWindow, nearest)
+    }
+
+    /// Scenes-merge boundary check for master-trajectory samples — same
+    /// constants as the keyframe-local `isMergeBoundary` below.
+    private static func isMergeBoundary(
+        _ a: MouseTrajectorySample,
+        _ b: MouseTrajectorySample
+    ) -> Bool {
+        guard b.timelineTime - a.timelineTime <= 0.001 else { return false }
+        let dx = b.centerX - a.centerX
+        let dy = b.centerY - a.centerY
+        return (dx * dx + dy * dy) > (0.05 * 0.05)
     }
 
     /// True when two adjacent trajectory samples straddle a scenes-merge
@@ -541,159 +431,144 @@ public enum MouseTrajectory {
         return (dx * dx + dy * dy) > (0.05 * 0.05)
     }
 
-    /// Deadzone-aware critically-damped spring that pulls the zoom anchor
-    /// toward the (already-smoothed) cursor position. Two-stage model
-    /// chosen specifically to fix the "cursor in slow motion" failure
-    /// mode of the previous tight-tracking iteration — without a
-    /// deadzone, the anchor follows the cursor every frame and the
-    /// cursor visually freezes in the viewport while the world scrolls
-    /// past. The deadzone restores the Screen-Studio look where the
-    /// cursor moves naturally inside a central region and the camera
-    /// only pans when the cursor approaches the edge.
+    /// The zoom camera: a heavy, CONSTANT-weight glide with a true deadzone
+    /// and a soft full recenter. This is the Screen Studio camera feel —
+    /// the camera never changes character with cursor speed (the retired
+    /// `anchorFollow` tightened its spring as the cursor sped up, which
+    /// read as panic on fast sweeps). Fast input is tamed upstream by the
+    /// shared `clickPinnedSmoothed` path; this stage adds only weight.
     ///
-    /// Default mode (`deadzoneFraction = 0`) is a **boundary-adaptive
-    /// soft spring**: the spring is always engaged, pulling the anchor
-    /// toward the cursor across the entire viewport, with τ ramping by
-    /// distance to the safe-zone wall. Near the centre τ is `tauRelaxed`
-    /// (0.05 s by default — Phase 3d iter 2 tightened from 0.08 s once
-    /// `cameraDamped` was removed from the upstream anchor path); near the
-    /// safe-zone wall τ tightens to `tauTight` (0.04 s — snappy catch-up
-    /// before the cursor escapes the safe zone). Safe zone shrunk to 30 %
-    /// in Phase 3d iter 2 (was 50 %) so the cursor visually locks within
-    /// the central 15 % of viewport from frame centre, with very little
-    /// drift visible at typical motion speeds.
-    /// Opting into a non-zero `deadzoneFraction` carves out an inner
-    /// no-force region — see below for the geometry when that's used.
+    /// **State machine.** The camera is either *resting* (perfectly still)
+    /// or *gliding*:
+    ///   • Resting: while the cursor stays within `deadzoneFraction` of
+    ///     the visible zoomed half-extent, the camera does not move at all
+    ///     — typing and small clicks leave the framing rock solid.
+    ///   • Gliding: once the cursor commits past the deadzone, the camera
+    ///     glides until the cursor is back near CENTER frame (soft full
+    ///     recenter — like a camera operator re-framing), then rests
+    ///     again. Spring strength ramps in over ~200 ms on engagement so
+    ///     there's never a kick.
     ///
-    /// `h_safe = (safeZoneFraction / 2) / max(1, zoomFactor)` is the
-    /// hard safe-zone boundary; cursor must never exit the central
-    /// `safeZoneFraction` of the visible viewport. After each substep
-    /// the anchor is clamped to `cursor ± h_safe` if the spring couldn't
-    /// catch up — failsafe for capture-rate dropouts and synthetic
-    /// teleports.
+    /// **Spring.** Critically-damped-to-elastic depending on `settle`
+    /// (dampingRatio = 1 − 0.45·settle): at 0 the camera approaches its
+    /// target with zero overshoot; at 1 it drifts slightly past a landing
+    /// and eases back — felt weight, never bounce. `cameraTau` is the one
+    /// time constant, identical at every cursor speed. `maxPanSpeed` caps
+    /// velocity during integration (inertia preserved, not position-
+    /// clamped). `lookaheadSeconds` aims the spring at the path's actual
+    /// future position (rendering is post-hoc — the future is known).
     ///
-    /// Opt-in deadzone (`deadzoneFraction > 0`): an inner radius
-    /// `h_dead = (deadzoneFraction / 2) / max(1, zoomFactor)` becomes a
-    /// no-force region; anchor velocity damps to zero inside, cursor
-    /// moves freely within the viewport, spring engages only past the
-    /// deadzone edge. The spring target then becomes
-    /// `cursor − h_dead` in the cursor's direction, so the rest state
-    /// is "cursor at the deadzone boundary" — continuous gradient with
-    /// no discontinuity at the boundary. The boundary-adaptive τ ramp
-    /// in this mode spans the *active band* `[h_dead, h_safe]` instead
-    /// of `[0, h_safe]`. Used by callers that want explicit calm-frame
-    /// behaviour over soft tracking.
+    /// The emergency visible-frame clamp (cursor can never leave the
+    /// zoomed viewport) and the scenes-merge boundary snap are preserved
+    /// from the previous camera unchanged.
     ///
-    /// `lookaheadSeconds` + `lookaheadConfidence` (optional) shift the
-    /// spring target forward along the cursor's instantaneous velocity:
-    /// `target = cursor + velocity · lookaheadSeconds · confidence[i]`.
-    /// Pass `lookaheadConfidence = nil` for a fixed-strength prediction
-    /// (confidence = 1 at every sample). Pass a same-length array of
-    /// `[0, 1]` values (typically from `IntentScorer`'s deceleration
-    /// signal) to gate prediction on per-sample confidence — at 0 the
-    /// behaviour is identical to a no-lookahead follow. The cursor's
-    /// actual position is still used for the hard-barrier safe-zone
-    /// invariant, so a wrong prediction (cursor changes direction
-    /// mid-decel) still cannot exceed the safe zone.
-    ///
-    /// `anticipatedTargets` (optional) replaces the spring target outright
-    /// with a precomputed path — see `anticipatedTargets(_:halfWindowSeconds:
-    /// leadSeconds:)`. Index-aligned with `samples`. When provided, the
-    /// velocity-extrapolation lookahead above is bypassed (the anticipated
-    /// path already encodes the future); the hard barrier and the
-    /// scenes-merge snap still key off the REAL cursor samples, so the
-    /// safe-zone invariant holds no matter how aggressive the anticipation.
-    ///
-    /// τ ramp inside the active band:
-    ///   `e = max(|cx-ax|, |cy-ay|) − h_dead) / (h_safe − h_dead)`,
-    ///   clamped to `[0, 1]`. Then
-    ///   `τ(e) = tauRelaxed + (tauTight − tauRelaxed) · e`.
-    ///
-    /// Hard barrier: after each sample's substep loop, if the anchor
-    /// would fall outside the safe zone, clamp to the wall and zero
-    /// that axis's velocity. Failsafe for capture-rate dropouts and
-    /// synthetic teleports the spring couldn't catch up to.
-    ///
-    /// Output shape: same `[ZoomTrajectorySample]` as input, same `t`
-    /// values; only `(x, y)` is rewritten. Catmull-Rom downstream
-    /// (`EffectEvaluator.zoomCenter`) consumes it unchanged.
-    ///
-    /// Pinned (gesture) keyframes bypass this entirely upstream — they
-    /// want the anchor locked, not following. `.pinned` remains a
-    /// valid mode for back-compat (legacy v4 sidecars decode through
-    /// it) and for future explicit-pin workflows.
-    public static func anchorFollow(
+    /// Output shape: same `[ZoomTrajectorySample]`, same `t`s; only (x, y)
+    /// rewritten. Pinned (gesture) keyframes bypass this upstream.
+    public static func glideFollow(
         _ samples: [ZoomTrajectorySample],
         zoomFactor: Double,
-        deadzoneFraction: Double = 0.0,
-        safeZoneFraction: Double = 0.30,
-        tauRelaxed: Double = 0.05,
-        tauTight: Double = 0.04,
-        maxAnchorSpeed: Double = .infinity,
-        lookaheadSeconds: Double = 0.0,
-        lookaheadConfidence: [Double]? = nil,
-        anticipatedTargets: [ZoomTrajectorySample]? = nil
+        cameraTau: Double = 0.35,
+        settle: Double = 0.25,
+        deadzoneFraction: Double = 0.35,
+        maxPanSpeed: Double = 0.9,
+        lookaheadSeconds: Double = 0.0
     ) -> [ZoomTrajectorySample] {
         guard let first = samples.first else { return [] }
         guard samples.count > 1 else { return samples }
         let safeZoom = max(1.0, zoomFactor)
-        let safeFrac = min(0.99, max(0.05, safeZoneFraction))
-        let deadFrac = min(safeFrac - 0.02, max(0.0, deadzoneFraction))
-        let safeTauRelaxed = max(0.01, tauRelaxed)
-        let safeTauTight = max(0.005, min(safeTauRelaxed, tauTight))
-        let hSafe = (safeFrac / 2.0) / safeZoom
-        let hDead = (deadFrac / 2.0) / safeZoom
-        let activeBand = max(1e-9, hSafe - hDead)
-        let safeLookahead = max(0.0, lookaheadSeconds)
-        let speedLimit = maxAnchorSpeed.isFinite ? max(0.0, maxAnchorSpeed) : .infinity
+        let visibleHalfExtent = 0.48 / safeZoom
+        let deadzoneRadius = min(0.95, max(0.0, deadzoneFraction)) * visibleHalfExtent
+        // Rest only once the camera has genuinely re-centered: a quarter
+        // of the deadzone (or a hair above zero when there is no deadzone,
+        // so a stopped cursor still lets the camera fall fully asleep).
+        let restRadius = max(0.004, 0.25 * deadzoneRadius)
+        let restCursorSpeed = 0.08
+        let restCameraSpeed = 0.05
+        let tau = max(0.02, cameraTau)
+        let dampingRatio = 1.0 - 0.45 * min(1.0, max(0.0, settle))
+        let omega = 1.0 / tau
+        let stiffness = omega * omega
+        let damping = 2.0 * dampingRatio * omega
+        let speedLimit = maxPanSpeed.isFinite ? max(0.0, maxPanSpeed) : .infinity
+        let lookahead = max(0.0, lookaheadSeconds)
+        let engageRampSeconds = 0.2
+
         var anchorX = first.x
         var anchorY = first.y
         var vx: Double = 0
         var vy: Double = 0
         var prevT: Double = first.t
+        var isResting = true
+        var engagement: Double = 0
         var result: [ZoomTrajectorySample] = []
         result.reserveCapacity(samples.count)
         result.append(first)
-        func enforceSafeZone(cursorX: Double, cursorY: Double) {
-            let dx = cursorX - anchorX
-            if dx > hSafe {
-                anchorX = cursorX - hSafe
-                vx = 0
-            } else if dx < -hSafe {
-                anchorX = cursorX + hSafe
-                vx = 0
-            }
-            let dy = cursorY - anchorY
-            if dy > hSafe {
-                anchorY = cursorY - hSafe
-                vy = 0
-            } else if dy < -hSafe {
-                anchorY = cursorY + hSafe
-                vy = 0
-            }
+
+        func capVector(_ x: inout Double, _ y: inout Double, to limit: Double) {
+            guard limit.isFinite else { return }
+            let magnitude = (x * x + y * y).squareRoot()
+            guard magnitude > limit, magnitude > 0 else { return }
+            let scale = limit / magnitude
+            x *= scale
+            y *= scale
         }
+
+        func enforceVisibleFrame(cursorX: Double, cursorY: Double) {
+            let dx = cursorX - anchorX
+            let dy = cursorY - anchorY
+            let distance = (dx * dx + dy * dy).squareRoot()
+            guard distance > visibleHalfExtent, distance > 1e-9 else { return }
+            let unitX = dx / distance
+            let unitY = dy / distance
+            anchorX = cursorX - unitX * visibleHalfExtent
+            anchorY = cursorY - unitY * visibleHalfExtent
+            // Keep useful tangential/inward momentum, but remove outward
+            // velocity that would immediately push the cursor out again.
+            let radialVelocity = vx * unitX + vy * unitY
+            if radialVelocity < 0 {
+                vx -= radialVelocity * unitX
+                vy -= radialVelocity * unitY
+            }
+            capVector(&vx, &vy, to: speedLimit)
+        }
+
+        /// The path's actual position `lookahead` seconds after sample
+        /// `index` (linear interp; clamps at the end; never reads across a
+        /// scenes-merge boundary).
+        func lookaheadTarget(from index: Int) -> (x: Double, y: Double) {
+            guard lookahead > 0 else { return (samples[index].x, samples[index].y) }
+            let targetT = samples[index].t + lookahead
+            var j = index
+            while j + 1 < samples.count, samples[j + 1].t <= targetT {
+                if isMergeBoundary(samples[j], samples[j + 1]) {
+                    return (samples[j].x, samples[j].y)
+                }
+                j += 1
+            }
+            guard j + 1 < samples.count,
+                  !isMergeBoundary(samples[j], samples[j + 1])
+            else { return (samples[j].x, samples[j].y) }
+            let a = samples[j]
+            let b = samples[j + 1]
+            let span = b.t - a.t
+            guard span > 1e-9 else { return (a.x, a.y) }
+            let f = (targetT - a.t) / span
+            return (a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f)
+        }
+
         for i in 1..<samples.count {
             let s = samples[i]
             let prev = samples[i - 1]
             let dtTotal = max(0.0, s.t - prevT)
-            let sampleStartAnchorX = anchorX
-            let sampleStartAnchorY = anchorY
             if dtTotal <= 0 {
-                // Scenes-merge defense: ScenesMerger places clips
-                // back-to-back, so scene N's last sample and scene
-                // N+1's first sample land at the same timeline time
-                // with potentially very different cursor positions
-                // (separate recording sessions). Without this branch
-                // the spring would carry over its anchor from scene N
-                // and chase scene N+1's position over the next dt —
-                // visible camera lag at every scene cut. SNAP the
-                // anchor to the new sample's position so the spring
-                // resumes from the right place; velocity resets so
-                // the cross-scene step doesn't bleed into the next
-                // iteration as fake high speed. Single-shot recordings
-                // never trip this (their trajectory has strictly
-                // monotonic timestamps), so the existing single-shot
-                // behavior is preserved.
+                // Scenes-merge defense: ScenesMerger places clips back-to-
+                // back, so scene N's last sample and scene N+1's first land
+                // at the same timeline time with potentially very different
+                // cursor positions. SNAP the camera to the new position and
+                // reset state so cross-scene steps never bleed into the
+                // spring as fake velocity. Same-timestamp samples with a
+                // small delta (clock quantization inside one recording)
+                // pass through untouched.
                 let dx = s.x - anchorX
                 let dy = s.y - anchorY
                 if (dx * dx + dy * dy) > (0.05 * 0.05) {
@@ -701,91 +576,79 @@ public enum MouseTrajectory {
                     anchorY = s.y
                     vx = 0
                     vy = 0
+                    isResting = true
+                    engagement = 0
                     prevT = s.t
-                    result.append(ZoomTrajectorySample(t: s.t, x: anchorX, y: anchorY))
-                    continue
                 }
                 result.append(ZoomTrajectorySample(t: s.t, x: anchorX, y: anchorY))
                 continue
             }
-            // Per-sample cursor velocity from the *cursor* trajectory (not
-            // the anchor's). Used by the lookahead term to shift the spring
-            // target forward along the cursor's heading. Confidence ∈ [0,1]
-            // gates how aggressively we predict — at 0, lookahead vanishes
-            // and we behave exactly like the plain deadzone follow.
-            let cursorVx: Double
-            let cursorVy: Double
-            if dtTotal > 0 {
-                cursorVx = (s.x - prev.x) / dtTotal
-                cursorVy = (s.y - prev.y) / dtTotal
-            } else {
-                cursorVx = 0
-                cursorVy = 0
-            }
-            let conf: Double = {
-                guard let arr = lookaheadConfidence else { return 1.0 }
-                guard i < arr.count else { return 0.0 }
-                return max(0.0, min(1.0, arr[i]))
+            let cursorSpeed = {
+                let dx = (s.x - prev.x) / dtTotal
+                let dy = (s.y - prev.y) / dtTotal
+                return (dx * dx + dy * dy).squareRoot()
             }()
-            // Spring target: the anticipated path when one was precomputed
-            // (offline future-window average — already encodes lookahead),
-            // otherwise the cursor plus the velocity-extrapolated lead.
-            let targetX: Double
-            let targetY: Double
-            if let targets = anticipatedTargets, i < targets.count {
-                targetX = targets[i].x
-                targetY = targets[i].y
-            } else {
-                targetX = s.x + cursorVx * safeLookahead * conf
-                targetY = s.y + cursorVy * safeLookahead * conf
+            let distToCursor = {
+                let dx = s.x - anchorX
+                let dy = s.y - anchorY
+                return (dx * dx + dy * dy).squareRoot()
+            }()
+
+            if isResting {
+                if distToCursor > deadzoneRadius {
+                    isResting = false
+                    engagement = 0
+                } else {
+                    enforceVisibleFrame(cursorX: s.x, cursorY: s.y)
+                    prevT = s.t
+                    result.append(ZoomTrajectorySample(t: s.t, x: anchorX, y: anchorY))
+                    continue
+                }
             }
+
+            // Gliding: full recenter onto the (lookahead-shifted) cursor.
+            let target = lookaheadTarget(from: i)
             var remaining = dtTotal
+            let maxStep = tau * 0.20
             while remaining > 0 {
-                // Spring target offset: target (anticipated or lookahead)
-                // minus the deadzone radius in the cursor's direction.
-                // Inside the deadzone the target offset is zero, so the
-                // spring exerts no force — anchor velocity damps to a stop.
-                let dxRaw = targetX - anchorX
-                let dyRaw = targetY - anchorY
-                let targetDx = abs(dxRaw) > hDead ? dxRaw - copysign(hDead, dxRaw) : 0
-                let targetDy = abs(dyRaw) > hDead ? dyRaw - copysign(hDead, dyRaw) : 0
-                // Adaptive τ: ramps from relaxed (just past deadzone) to
-                // tight (at safe-zone wall). Continuous in cursor
-                // position so there's no velocity step at the deadzone
-                // boundary.
-                let exOuter = max(0.0, abs(dxRaw) - hDead) / activeBand
-                let eyOuter = max(0.0, abs(dyRaw) - hDead) / activeBand
-                let eOuter = min(1.0, max(exOuter, eyOuter))
-                let tau = safeTauRelaxed + (safeTauTight - safeTauRelaxed) * eOuter
-                let omega = 1.0 / tau
-                let stiffness = omega * omega
-                let damping = 2.0 * omega
-                let maxStep = tau * 0.25
                 let step = min(maxStep, remaining)
-                let ax = stiffness * targetDx - damping * vx
-                let ay = stiffness * targetDy - damping * vy
+                engagement = min(1.0, engagement + step / engageRampSeconds)
+                // Smoothstep the engagement so the spring force fades in —
+                // exiting the deadzone must never read as a kick.
+                let engage = MouseTrajectory.smoothstep(0.0, 1.0, engagement)
+                var ax = (stiffness * (target.x - anchorX) - damping * vx) * engage
+                var ay = (stiffness * (target.y - anchorY) - damping * vy) * engage
+                // Damping always acts at full strength on existing
+                // velocity so the ramp can't leave momentum unmanaged.
+                if engage < 1.0 {
+                    ax -= damping * vx * (1.0 - engage)
+                    ay -= damping * vy * (1.0 - engage)
+                }
                 vx += ax * step
                 vy += ay * step
+                capVector(&vx, &vy, to: speedLimit)
                 anchorX += vx * step
                 anchorY += vy * step
                 remaining -= step
             }
-            // Hard barrier: enforce the safe-zone invariant even when
-            // the spring couldn't catch up in the available `dtTotal`.
-            enforceSafeZone(cursorX: s.x, cursorY: s.y)
-            if speedLimit.isFinite {
-                let maxDistance = speedLimit * dtTotal
-                let moveX = anchorX - sampleStartAnchorX
-                let moveY = anchorY - sampleStartAnchorY
-                let moveDistance = (moveX * moveX + moveY * moveY).squareRoot()
-                if moveDistance > maxDistance, moveDistance > 0 {
-                    let scale = maxDistance / moveDistance
-                    anchorX = sampleStartAnchorX + moveX * scale
-                    anchorY = sampleStartAnchorY + moveY * scale
-                    vx = 0
-                    vy = 0
-                }
+            enforceVisibleFrame(cursorX: s.x, cursorY: s.y)
+
+            // Settle back to rest once the camera has re-centered, the
+            // cursor has stopped committing, and any settle drift-past has
+            // played out.
+            let cameraSpeed = (vx * vx + vy * vy).squareRoot()
+            let postDist = {
+                let dx = s.x - anchorX
+                let dy = s.y - anchorY
+                return (dx * dx + dy * dy).squareRoot()
+            }()
+            if postDist < restRadius, cursorSpeed < restCursorSpeed, cameraSpeed < restCameraSpeed {
+                isResting = true
+                engagement = 0
+                vx = 0
+                vy = 0
             }
+
             prevT = s.t
             result.append(ZoomTrajectorySample(t: s.t, x: anchorX, y: anchorY))
         }

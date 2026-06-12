@@ -301,7 +301,8 @@ public final class MetalRenderGraph: @unchecked Sendable {
             isCircle: false,
             opacity: 1.0,
             screenBlurSigmaPx: layout.screenZoomBlurSigmaPx,
-            screenMotionBlurUV: layout.screenMotionBlurUV,
+            screenUVOpen: layout.screenUVOpen,
+            screenUVClose: layout.screenUVClose,
             cvTextureRefs: &cvTextureRefs
         )
 
@@ -489,14 +490,13 @@ public final class MetalRenderGraph: @unchecked Sendable {
         var isCircle: Float
         var opacity: Float
         var screenBlurSigmaPx: Float = 0
-        // Directional motion-blur half-extent in layer UV. Zero collapses
-        // the directional kernel and falls back to the Gaussian path.
-        // SIMD2<Float> is 8-aligned, so it lands at offset 32 — matching
-        // the Metal-side float2 slot.
-        var motionBlurUV: SIMD2<Float> = .zero
-        // Tail padding so the struct matches the Metal-side 48-byte layout.
-        var pad0: Float = 0
-        var pad1: Float = 0
+        // Temporal-blur UV remaps at shutter-open / shutter-close (xy =
+        // scale, zw = offset), relative to the drawn rect. Identity on
+        // both collapses the kernel to a single sample. SIMD4<Float> is
+        // 16-aligned, so they land at offsets 32 and 48 — matching the
+        // Metal-side float4 slots (struct total 64 bytes).
+        var uvOpen: SIMD4<Float> = SIMD4<Float>(1, 1, 0, 0)
+        var uvClose: SIMD4<Float> = SIMD4<Float>(1, 1, 0, 0)
     }
 
     /// Cursor-specific uniforms. Adds a velocity offset (in cursor-UV space)
@@ -520,7 +520,8 @@ public final class MetalRenderGraph: @unchecked Sendable {
         isCircle: Bool,
         opacity: Float,
         screenBlurSigmaPx: Float = 0,
-        screenMotionBlurUV: SIMD2<Float> = .zero,
+        screenUVOpen: SIMD4<Float> = SIMD4<Float>(1, 1, 0, 0),
+        screenUVClose: SIMD4<Float> = SIMD4<Float>(1, 1, 0, 0),
         cvTextureRefs: inout [CVMetalTexture]
     ) throws {
         let vertices = makeQuadVertices(rect: destinationRect, outputSize: outputSize)
@@ -533,7 +534,8 @@ public final class MetalRenderGraph: @unchecked Sendable {
             isCircle: isCircle ? 1 : 0,
             opacity: max(0, min(1, opacity)),
             screenBlurSigmaPx: max(0, screenBlurSigmaPx),
-            motionBlurUV: screenMotionBlurUV
+            uvOpen: screenUVOpen,
+            uvClose: screenUVClose
         )
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerUniforms>.stride, index: 0)
 
@@ -865,9 +867,8 @@ public final class MetalRenderGraph: @unchecked Sendable {
         float isCircle;
         float opacity;
         float screenBlurSigmaPx;
-        float2 motionBlurUV;
-        float _pad0;
-        float _pad1;
+        float4 uvOpen;
+        float4 uvClose;
     };
 
     // Phase 3d screen blur. Approximate Gaussian as a 9-tap cross
@@ -927,50 +928,47 @@ public final class MetalRenderGraph: @unchecked Sendable {
         return fract(52.9829189 * fract(0.06711056 * px.x + 0.00583715 * px.y));
     }
 
-    // Directional camera-pan motion blur, film-style:
-    //   • Adaptive tap count (~1 tap per 1.5 px of streak, 9–49) so long
-    //     streaks get enough samples to stay smooth.
-    //   • Per-pixel dithered tap phase (gradient noise) — kills ghost
-    //     banding entirely.
-    //   • A ±0.75 px per-tap perpendicular jitter gives the streak a soft
-    //     Gaussian cross-section instead of a razor-thin hard line.
-    //   • Trapezoid weights (flat core, taper over the outer quarter)
-    //     match a real shutter's uniform exposure with soft ends.
-    // `blurUV` is the kernel half-extent in layer UV. Collapses to the
-    // Gaussian path (and from there to a single sample) when the extent
-    // is under a pixel, so static frames stay bit-identical to no blur.
-    static inline float4 screenMotionBlurSample(
+    // TRUE temporal motion blur: integrate the SAME source frame under the
+    // camera transform interpolated from shutter-open to shutter-close —
+    // exactly what a physical shutter records of a moving camera over a
+    // static scene. `uvOpen`/`uvClose` are source-UV remappings relative
+    // to the drawn rect (xy = scale, zw = offset); the per-pixel delta
+    // between them yields directional streaks during pans AND radial
+    // streaks during the zoom scale change, with intensity derived from
+    // real camera velocity. Uniform tap weights = box shutter; per-pixel
+    // dithered phase converts tap banding into fine noise the eye
+    // integrates as one continuous smear. Collapses to the Gaussian veil
+    // (and from there to a single sample) when the local delta is under a
+    // pixel, so a still camera stays bit-identical to no blur.
+    static inline float4 temporalBlurSample(
         texture2d<float, access::sample> tex,
         sampler s,
         float2 uv,
         float2 layerSizePx,
-        float2 blurUV,
+        float4 uvOpen,
+        float4 uvClose,
         float sigmaPx,
         float2 fragPx
     ) {
-        float extentPx = length(blurUV * layerSizePx);
+        float2 uvA = uv * uvOpen.xy + uvOpen.zw;
+        float2 uvB = uv * uvClose.xy + uvClose.zw;
+        float extentPx = length((uvB - uvA) * layerSizePx);
         if (extentPx < 0.75) {
             return screenBlurSample(tex, s, uv, layerSizePx, sigmaPx);
         }
-        // ~1 tap per 2.5 px of streak: with the dithered phase the wider
-        // spacing is invisible (noise, not ghosts), and the lower cap keeps
-        // a worst-case full-frame 4-tap-direction blur comfortably inside a
-        // 60 fps GPU budget — a backed-up compositor reads as "laggy
-        // follow" long before it reads as "lower blur quality".
-        int taps = clamp(int(extentPx / 2.5), 9, 31);
+        // ~1 tap per 2 px of streak: with the dithered phase the wider
+        // spacing is invisible (noise, not ghosts), and the cap keeps a
+        // worst-case full-frame sweep comfortably inside a 60 fps GPU
+        // budget — a backed-up compositor reads as "laggy follow" long
+        // before it reads as "lower blur quality".
+        int taps = clamp(int(extentPx / 2.0), 9, 31);
         float noise = gradientNoise(fragPx);
-        float2 dirPx = normalize(blurUV * layerSizePx);
-        float2 perpUV = float2(-dirPx.y, dirPx.x) * 0.75 / layerSizePx;
         float4 acc = float4(0.0);
-        float wSum = 0.0;
         for (int i = 0; i < taps; ++i) {
-            float t = ((float(i) + noise) / float(taps)) * 2.0 - 1.0;
-            float w = saturate((1.0 - abs(t)) * 4.0);
-            float pj = fract(noise + float(i) * 0.61803398875) * 2.0 - 1.0;
-            acc += tex.sample(s, uv + blurUV * t + perpUV * pj) * w;
-            wSum += w;
+            float t = (float(i) + noise) / float(taps);
+            acc += tex.sample(s, mix(uvA, uvB, t));
         }
-        return acc / wSum;
+        return acc / float(taps);
     }
 
     struct BackgroundUniforms {
@@ -1044,7 +1042,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
         constant LayerUniforms &u [[buffer(0)]]
     ) {
         constexpr sampler s(address::clamp_to_edge, filter::linear);
-        float4 c = screenMotionBlurSample(tex, s, in.texCoord, u.layerSizePx, u.motionBlurUV, u.screenBlurSigmaPx, in.position.xy);
+        float4 c = temporalBlurSample(tex, s, in.texCoord, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
         c.a *= layerAlphaMask(in, u) * u.opacity;
         return c;
     }
@@ -1129,8 +1127,8 @@ public final class MetalRenderGraph: @unchecked Sendable {
         // would amplify quantisation error around chroma boundaries;
         // averaging in YCbCr space is exactly the right place since both
         // planes share the same UV.
-        float4 yAcc = screenMotionBlurSample(yPlane, s, in.texCoord, u.layerSizePx, u.motionBlurUV, u.screenBlurSigmaPx, in.position.xy);
-        float4 cbcrAcc = screenMotionBlurSample(cbcrPlane, s, in.texCoord, u.layerSizePx, u.motionBlurUV, u.screenBlurSigmaPx, in.position.xy);
+        float4 yAcc = temporalBlurSample(yPlane, s, in.texCoord, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
+        float4 cbcrAcc = temporalBlurSample(cbcrPlane, s, in.texCoord, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
         float y = yAcc.r;
         float2 cbcr = cbcrAcc.rg;
 

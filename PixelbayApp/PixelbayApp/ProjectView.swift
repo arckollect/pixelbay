@@ -47,6 +47,14 @@ struct ProjectView: View {
     /// can keep restructuring timeline row rendering without conflict.
     @State private var appendPopoverPresented: Bool = false
     @State private var zoomFollowSafeZoneOverlayFraction: Double?
+    /// Live Motion Tuning drag preview. The master cursor data is cached by
+    /// the main reload task so each drag tick can re-solve the camera path +
+    /// rebuild the videoComposition without re-reading the clicks sidecar
+    /// from disk; the in-flight task is replaced on every tick (≈10 Hz after
+    /// the debounce) and the mouse-up commit takes over via the normal
+    /// revision-keyed reload.
+    @State private var cachedCursorData: CursorTrajectoryLoader.CursorData?
+    @State private var liveTuningTask: Task<Void, Never>?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -100,11 +108,12 @@ struct ProjectView: View {
             } catch {
                 return  // superseded by a newer edit
             }
-            let cursorTrajectory = await CursorTrajectoryLoader.load(
+            let cursorData = await CursorTrajectoryLoader.load(
                 for: document.project,
                 bundleURL: document.bundleURL
             )
             guard !Task.isCancelled else { return }
+            cachedCursorData = cursorData
             await player.load(
                 project: document.project,
                 bundleURL: document.bundleURL,
@@ -113,7 +122,8 @@ struct ProjectView: View {
                     bundleURL: document.bundleURL,
                     builtinURL: { WallpaperCatalog.url(forBuiltinID: $0) }
                 ),
-                cursorTrajectory: cursorTrajectory,
+                cursorTrajectory: cursorData?.samples,
+                cursorClickTimes: cursorData?.clickTimes ?? [],
                 cursorSprite: SystemCursorSprite.make()
             )
             guard !Task.isCancelled else { return }
@@ -625,6 +635,36 @@ struct ProjectView: View {
             },
             onFollowSafeZonePreview: { fraction in
                 zoomFollowSafeZoneOverlayFraction = fraction
+            },
+            onTuningPreview: { tuning in
+                liveTuningTask?.cancel()
+                guard let tuning else { return }  // release → committed reload takes over
+                liveTuningTask = Task {
+                    // ~100 ms coalescing: drag ticks arrive at display rate;
+                    // re-solving the camera path + swapping the
+                    // videoComposition at ~10 Hz tracks the finger closely
+                    // without churning AVFoundation.
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    guard !Task.isCancelled else { return }
+                    var previewProject = document.project
+                    previewProject.tuning = tuning
+                    // Structure (tracks/clips/assets) is unchanged, so
+                    // PreviewPlayer's fast path rebuilds ONLY the
+                    // videoComposition against the existing player item —
+                    // no decoder churn while scrubbing a slider.
+                    await player.load(
+                        project: previewProject,
+                        bundleURL: document.bundleURL,
+                        wallpaperSource: .live,
+                        wallpaperImageProvider: .live(
+                            bundleURL: document.bundleURL,
+                            builtinURL: { WallpaperCatalog.url(forBuiltinID: $0) }
+                        ),
+                        cursorTrajectory: cachedCursorData?.samples,
+                        cursorClickTimes: cachedCursorData?.clickTimes ?? [],
+                        cursorSprite: SystemCursorSprite.make()
+                    )
+                }
             }
         )
     }

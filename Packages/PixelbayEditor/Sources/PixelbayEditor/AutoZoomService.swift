@@ -115,6 +115,18 @@ public enum AutoZoomService {
         }
     }
 
+    /// Timeline-time instants of every recorded click (any button).
+    /// Feeds `MouseTrajectory.clickPinnedSmoothed` so the stylized cursor
+    /// path stays pixel-exact at interaction moments — right clicks count
+    /// too (a context-menu open is just as position-critical as a left
+    /// click). Mirrors the time-domain mapping in `autoZoomClicks`.
+    public static func clickTimes(from sidecar: ClicksSidecar) -> [Double] {
+        sidecar.events.compactMap { event in
+            let timelineTime = event.timestamp - sidecar.captureStart
+            return timelineTime >= 0 ? timelineTime : nil
+        }
+    }
+
     // MARK: - Mouse trajectory conversion (Phase 3b #7 slice 2/3)
 
     /// Convert a `ClicksSidecar`'s `moves` array to a list of

@@ -29,7 +29,7 @@ import Foundation
 // produces a normal timeline-editable project and clears the field back to
 // nil). The migrator is a no-op because the field is optional — pre-v5
 // projects decode cleanly with `scenesSession == nil`.
-public let currentSchemaVersion: Int = 5
+public let currentSchemaVersion: Int = 6
 
 // Bumped on any breaking change to the .pixelbay directory layout itself
 // (e.g. renaming the media/ folder, splitting sidecars into a new subdirectory).
@@ -353,6 +353,11 @@ public struct Project: Codable, Sendable, Identifiable {
     // Phase 3b — auto-zoom + talking-head swap keyframes. Empty array =
     // legacy compositing (base layout only, no per-frame effects).
     public var effects: [EffectKeyframe]
+    // v6 — project-wide motion tuning: camera-follow feel, cursor-path
+    // smoothing, and motion blur. The single authority for motion params;
+    // nothing downstream resolves or overwrites these. Replaces the retired
+    // `zoomFollowStyle` macro sliders (the v5→v6 migrator drops that key).
+    public var tuning: TuningSettings
     // Phase 3c — synthetic cursor settings (size, on/off). Defaults preserve
     // the new "render synthetic cursor at 3.25× scale" behavior for fresh
     // projects; the v3→v4 migrator stamps the same default onto old projects
@@ -380,6 +385,7 @@ public struct Project: Codable, Sendable, Identifiable {
         sourceSegments: [SourceSegment] = [],
         layout: LayoutPreset = .phase1Default,
         effects: [EffectKeyframe] = [],
+        tuning: TuningSettings = .default,
         cursorSettings: CursorSettings = .default,
         scenesSession: ScenesSession? = nil,
         extras: [String: JSONValue] = [:]
@@ -395,6 +401,7 @@ public struct Project: Codable, Sendable, Identifiable {
         self.sourceSegments = sourceSegments
         self.layout = layout
         self.effects = effects
+        self.tuning = tuning
         self.cursorSettings = cursorSettings
         self.scenesSession = scenesSession
         self.extras = extras
@@ -412,6 +419,7 @@ public struct Project: Codable, Sendable, Identifiable {
         case sourceSegments
         case layout
         case effects
+        case tuning
         case cursorSettings
         case scenesSession
         case extras
@@ -430,6 +438,7 @@ public struct Project: Codable, Sendable, Identifiable {
         self.sourceSegments = try c.decodeIfPresent([SourceSegment].self, forKey: .sourceSegments) ?? []
         self.layout = try c.decodeIfPresent(LayoutPreset.self, forKey: .layout) ?? .phase1Default
         self.effects = try c.decodeIfPresent([EffectKeyframe].self, forKey: .effects) ?? []
+        self.tuning = try c.decodeIfPresent(TuningSettings.self, forKey: .tuning) ?? .default
         self.cursorSettings = try c.decodeIfPresent(CursorSettings.self, forKey: .cursorSettings) ?? .default
         self.scenesSession = try c.decodeIfPresent(ScenesSession.self, forKey: .scenesSession)
         self.extras = try c.decodeIfPresent([String: JSONValue].self, forKey: .extras) ?? [:]

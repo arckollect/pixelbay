@@ -107,19 +107,6 @@ public struct ZoomTrajectorySample: Codable, Sendable, Equatable {
 public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
     public static let defaultZoomEaseIn: RationalTime = .seconds(0.55)
     public static let defaultZoomEaseOut: RationalTime = .seconds(0.55)
-    public static let defaultZoomFollowSafeZoneFraction: Double = 0.38
-    public static let defaultZoomFollowMotionBlur: Double = 0.30
-    public static let defaultZoomPanBlurShutterSeconds: Double = 1.0 / 24.0
-    public static let defaultZoomPanBlurMaxUV: Double = 0.006
-    public static let defaultZoomPanBlurThresholdSpeed: Double = 1.32
-    public static let defaultZoomPanBlurFullSpeed: Double = 0.80
-    public static let defaultZoomCenterHandoffSeconds: Double = 0.343
-    public static let defaultZoomFollowMaxAnchorSpeed: Double = 1.30
-    public static let defaultZoomFollowLookaheadSeconds: Double = 0.072
-    public static let defaultZoomFollowTauRelaxed: Double = 0.190
-    public static let defaultZoomFollowTauTight: Double = 0.060
-    public static let defaultZoomFollowAnticipationHalfWindow: Double = 0.152
-
     public let id: EffectKeyframeID
     public var kind: EffectKind
     public var timelineRange: TimeRange
@@ -186,7 +173,13 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
     /// (seconds). 0 outside the range, 1 in the hold portion, smoothly
     /// interpolated through ease-in / ease-out. Pure-data, no Metal /
     /// AVFoundation.
-    public func strength(at t: Double) -> Double {
+    ///
+    /// `transitionSoftness` (0...1) blends the quintic smoothstep ramp
+    /// toward a longer-tailed curve (the smoothstep composed with itself):
+    /// at 1 the transition lingers near 0 and 1 noticeably longer with a
+    /// quicker middle — a softer engage and a gentler exhale into the
+    /// hold. 0 preserves the historical quintic ramp exactly.
+    public func strength(at t: Double, transitionSoftness: Double = 0) -> Double {
         let start = timelineRange.start.seconds
         let end = timelineRange.end.seconds
         guard t >= start, t < end else { return 0 }
@@ -211,12 +204,23 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
         }
         let timeRemaining = total - local
         if inEff > 0, local < inEff {
-            return Self.smoothstep(local / inEff)
+            return Self.eased(local / inEff, transitionSoftness: transitionSoftness)
         }
         if outEff > 0, timeRemaining < outEff {
-            return Self.smoothstep(timeRemaining / outEff)
+            return Self.eased(timeRemaining / outEff, transitionSoftness: transitionSoftness)
         }
         return 1
+    }
+
+    static func eased(_ x: Double, transitionSoftness: Double) -> Double {
+        let base = smoothstep(x)
+        let softness = max(0, min(1, transitionSoftness))
+        guard softness > 0 else { return base }
+        // Composing the smoothstep with itself stretches the flat tails at
+        // both ends — the curve spends longer near 0 and 1, which reads as
+        // a softer engage and exit (still C² at the endpoints).
+        let softer = smoothstep(base)
+        return base + (softer - base) * softness
     }
 
     /// Quintic smoothstep — `6x⁵ - 15x⁴ + 10x³`. C² at both endpoints
@@ -261,159 +265,8 @@ public struct EffectKeyframe: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
-public extension EffectKeyframe {
-    static let zoomFollowSafeZoneRange: ClosedRange<Double> = 0.28...0.80
-    static let zoomFollowMotionBlurRange: ClosedRange<Double> = 0.0...2.5
-    static let zoomFollowMaxAnchorSpeedRange: ClosedRange<Double> = 0.35...3.00
-    static let zoomFollowLookaheadSecondsRange: ClosedRange<Double> = 0.0...0.20
-    static let zoomFollowTauRelaxedRange: ClosedRange<Double> = 0.01...0.25
-    static let zoomFollowTauTightRange: ClosedRange<Double> = 0.005...0.18
-    static let zoomFollowAnticipationHalfWindowRange: ClosedRange<Double> = 0.0...0.60
-    static let zoomPanBlurShutterSecondsRange: ClosedRange<Double> = (1.0 / 120.0)...(1.0 / 20.0)
-    static let zoomPanBlurMaxUVRange: ClosedRange<Double> = 0.0...0.08
-    static let zoomPanBlurThresholdSpeedRange: ClosedRange<Double> = 0.0...1.5
-    static let zoomPanBlurFullSpeedRange: ClosedRange<Double> = 0.05...3.0
-    static let zoomCenterHandoffSecondsRange: ClosedRange<Double> = 0.0...0.5
-
-    /// Central region, as a fraction of the visible zoomed viewport, where the
-    /// cursor can move before the follow camera is forced to catch up. Smaller
-    /// values feel tighter; larger values allow more Screen Studio-style drift.
-    var zoomFollowSafeZoneFraction: Double {
-        get {
-            guard case .double(let value)? = extras["zoomFollowSafeZoneFraction"] else {
-                return Self.defaultZoomFollowSafeZoneFraction
-            }
-            return value.clamped(to: Self.zoomFollowSafeZoneRange)
-        }
-        set {
-            let clamped = newValue.clamped(to: Self.zoomFollowSafeZoneRange)
-            if abs(clamped - Self.defaultZoomFollowSafeZoneFraction) < 0.000_001 {
-                extras["zoomFollowSafeZoneFraction"] = nil
-            } else {
-                extras["zoomFollowSafeZoneFraction"] = .double(clamped)
-            }
-        }
-    }
-
-    /// Multiplier for zoom-follow pan blur. `0` disables follow blur;
-    /// `1` uses the tuned default; values above 1 add more softness on fast
-    /// zoom camera motion while stationary held zooms remain crisp.
-    var zoomFollowMotionBlur: Double {
-        get {
-            guard case .double(let value)? = extras["zoomFollowMotionBlur"] else {
-                return Self.defaultZoomFollowMotionBlur
-            }
-            return value.clamped(to: Self.zoomFollowMotionBlurRange)
-        }
-        set {
-            let clamped = newValue.clamped(to: Self.zoomFollowMotionBlurRange)
-            if abs(clamped - Self.defaultZoomFollowMotionBlur) < 0.000_001 {
-                extras["zoomFollowMotionBlur"] = nil
-            } else {
-                extras["zoomFollowMotionBlur"] = .double(clamped)
-            }
-        }
-    }
-
-    /// Maximum zoom-camera pan speed in normalized screen-units per second.
-    /// Lower values glide more and can trail farther during fast cursor sweeps;
-    /// higher values catch up more aggressively.
-    var zoomFollowMaxAnchorSpeed: Double {
-        get {
-            guard case .double(let value)? = extras["zoomFollowMaxAnchorSpeed"] else {
-                return Self.defaultZoomFollowMaxAnchorSpeed
-            }
-            return value.clamped(to: Self.zoomFollowMaxAnchorSpeedRange)
-        }
-        set {
-            let clamped = newValue.clamped(to: Self.zoomFollowMaxAnchorSpeedRange)
-            if abs(clamped - Self.defaultZoomFollowMaxAnchorSpeed) < 0.000_001 {
-                extras["zoomFollowMaxAnchorSpeed"] = nil
-            } else {
-                extras["zoomFollowMaxAnchorSpeed"] = .double(clamped)
-            }
-        }
-    }
-
-    /// Anticipation lead, in seconds. Biases the camera's anticipated-target
-    /// window (`MouseTrajectory.anticipatedTargets`) into the cursor's future
-    /// path, so the camera starts moving toward a sweep's destination before
-    /// the cursor arrives. 0 gives pure zero-phase smoothing; higher values
-    /// make the camera visibly lead fast motion.
-    var zoomFollowLookaheadSeconds: Double {
-        get {
-            guard case .double(let value)? = extras["zoomFollowLookaheadSeconds"] else {
-                return Self.defaultZoomFollowLookaheadSeconds
-            }
-            return value.clamped(to: Self.zoomFollowLookaheadSecondsRange)
-        }
-        set {
-            let clamped = newValue.clamped(to: Self.zoomFollowLookaheadSecondsRange)
-            if abs(clamped - Self.defaultZoomFollowLookaheadSeconds) < 0.000_001 {
-                extras["zoomFollowLookaheadSeconds"] = nil
-            } else {
-                extras["zoomFollowLookaheadSeconds"] = .double(clamped)
-            }
-        }
-    }
-
-    var zoomFollowTauRelaxed: Double {
-        get { doubleExtra("zoomFollowTauRelaxed", default: Self.defaultZoomFollowTauRelaxed, range: Self.zoomFollowTauRelaxedRange) }
-        set { setDoubleExtra("zoomFollowTauRelaxed", newValue, default: Self.defaultZoomFollowTauRelaxed, range: Self.zoomFollowTauRelaxedRange) }
-    }
-
-    var zoomFollowTauTight: Double {
-        get { doubleExtra("zoomFollowTauTight", default: Self.defaultZoomFollowTauTight, range: Self.zoomFollowTauTightRange) }
-        set { setDoubleExtra("zoomFollowTauTight", newValue, default: Self.defaultZoomFollowTauTight, range: Self.zoomFollowTauTightRange) }
-    }
-
-    var zoomFollowAnticipationHalfWindow: Double {
-        get { doubleExtra("zoomFollowAnticipationHalfWindow", default: Self.defaultZoomFollowAnticipationHalfWindow, range: Self.zoomFollowAnticipationHalfWindowRange) }
-        set { setDoubleExtra("zoomFollowAnticipationHalfWindow", newValue, default: Self.defaultZoomFollowAnticipationHalfWindow, range: Self.zoomFollowAnticipationHalfWindowRange) }
-    }
-
-    var zoomPanBlurShutterSeconds: Double {
-        get { doubleExtra("zoomPanBlurShutterSeconds", default: Self.defaultZoomPanBlurShutterSeconds, range: Self.zoomPanBlurShutterSecondsRange) }
-        set { setDoubleExtra("zoomPanBlurShutterSeconds", newValue, default: Self.defaultZoomPanBlurShutterSeconds, range: Self.zoomPanBlurShutterSecondsRange) }
-    }
-
-    var zoomPanBlurMaxUV: Double {
-        get { doubleExtra("zoomPanBlurMaxUV", default: Self.defaultZoomPanBlurMaxUV, range: Self.zoomPanBlurMaxUVRange) }
-        set { setDoubleExtra("zoomPanBlurMaxUV", newValue, default: Self.defaultZoomPanBlurMaxUV, range: Self.zoomPanBlurMaxUVRange) }
-    }
-
-    var zoomPanBlurThresholdSpeed: Double {
-        get { doubleExtra("zoomPanBlurThresholdSpeed", default: Self.defaultZoomPanBlurThresholdSpeed, range: Self.zoomPanBlurThresholdSpeedRange) }
-        set { setDoubleExtra("zoomPanBlurThresholdSpeed", newValue, default: Self.defaultZoomPanBlurThresholdSpeed, range: Self.zoomPanBlurThresholdSpeedRange) }
-    }
-
-    var zoomPanBlurFullSpeed: Double {
-        get { doubleExtra("zoomPanBlurFullSpeed", default: Self.defaultZoomPanBlurFullSpeed, range: Self.zoomPanBlurFullSpeedRange) }
-        set { setDoubleExtra("zoomPanBlurFullSpeed", newValue, default: Self.defaultZoomPanBlurFullSpeed, range: Self.zoomPanBlurFullSpeedRange) }
-    }
-
-    var zoomCenterHandoffSeconds: Double {
-        get { doubleExtra("zoomCenterHandoffSeconds", default: Self.defaultZoomCenterHandoffSeconds, range: Self.zoomCenterHandoffSecondsRange) }
-        set { setDoubleExtra("zoomCenterHandoffSeconds", newValue, default: Self.defaultZoomCenterHandoffSeconds, range: Self.zoomCenterHandoffSecondsRange) }
-    }
-
-    private func doubleExtra(_ key: String, default defaultValue: Double, range: ClosedRange<Double>) -> Double {
-        guard case .double(let value)? = extras[key] else { return defaultValue }
-        return value.clamped(to: range)
-    }
-
-    private mutating func setDoubleExtra(_ key: String, _ value: Double, default defaultValue: Double, range: ClosedRange<Double>) {
-        let clamped = value.clamped(to: range)
-        if abs(clamped - defaultValue) < 0.000_001 {
-            extras[key] = nil
-        } else {
-            extras[key] = .double(clamped)
-        }
-    }
-}
-
-private extension Comparable {
-    func clamped(to range: ClosedRange<Self>) -> Self {
-        min(max(self, range.lowerBound), range.upperBound)
-    }
-}
+// Note: the per-keyframe `zoomFollow*` / `zoomPanBlur*` /
+// `zoomCenterHandoffSeconds` extras accessors were retired across the
+// motion-tuning overhaul — `Project.tuning` is the single authority for
+// camera feel, cursor-path smoothing, and motion blur. Old documents that
+// still carry those keys in `extras` decode cleanly; the values are inert.

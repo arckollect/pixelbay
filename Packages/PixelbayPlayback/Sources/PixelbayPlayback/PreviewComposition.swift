@@ -82,29 +82,6 @@ public enum PreviewCompositionBuilder {
     // editor pane sizes while cutting per-frame pixel cost ~44 %.
     public static let previewMaxOutputSize = CGSize(width: 2880, height: 1620)
 
-    // Follow-cursor zoom framing. Keep the visible cursor on the raw capture
-    // path, but let the zoom camera glide behind fast moves so cross-screen
-    // pans are readable instead of instantly chasing the pointer.
-    static let zoomFollowSafeZoneFraction: Double = EffectKeyframe.defaultZoomFollowSafeZoneFraction
-    static func zoomFollowOuterSafeZoneFraction(for deadzoneFraction: Double) -> Double {
-        min(0.95, max(deadzoneFraction + 0.14, deadzoneFraction + 0.02))
-    }
-    // Tight spring — the smoothness lives in the ANTICIPATED TARGET PATH
-    // (window-averaged, below), not in the spring. The old soft taus
-    // (0.16/0.12) were tuned when the spring chased the raw cursor and had
-    // to do the smoothing itself; chasing the already-smooth anticipated
-    // path through a soft spring double-smooths and reads as "the camera is
-    // slow / dragging behind". Tight taus make the camera hug the smooth
-    // path with near-zero added lag.
-    static let zoomFollowTauRelaxed: Double = EffectKeyframe.defaultZoomFollowTauRelaxed
-    static let zoomFollowTauTight: Double = EffectKeyframe.defaultZoomFollowTauTight
-    static let zoomFollowMaxAnchorSpeed: Double = EffectKeyframe.defaultZoomFollowMaxAnchorSpeed
-    /// Half-width of the anticipated-target triangular window. Rendering is
-    /// offline, so the camera target at time t averages the cursor's REAL
-    /// path over [t − 0.25 s, t + 0.25 s] (plus the keyframe's anticipation
-    /// lead) — the camera eases toward a sweep's destination before the
-    /// cursor covers the distance instead of being dragged behind it.
-    static let zoomFollowAnticipationHalfWindow: Double = EffectKeyframe.defaultZoomFollowAnticipationHalfWindow
 
     /// Builds a PreviewComposition from a Project. `bundleURL` is the
     /// `.pixelbay` bundle's directory — `MediaAsset.relativePath`
@@ -127,6 +104,7 @@ public enum PreviewCompositionBuilder {
         wallpaperSource: WallpaperSource? = nil,
         wallpaperImageProvider: WallpaperImageProvider? = nil,
         cursorTrajectory: [MouseTrajectorySample]? = nil,
+        cursorClickTimes: [Double] = [],
         cursorSprite: CursorSpriteData? = nil,
         maxOutputSize: CGSize = PreviewCompositionBuilder.defaultOutputSize
     ) async throws -> PreviewComposition {
@@ -203,6 +181,7 @@ public enum PreviewCompositionBuilder {
             screenTrackID: screenTrackID,
             webcamTrackID: webcamTrackID,
             cursorTrajectory: cursorTrajectory,
+            cursorClickTimes: cursorClickTimes,
             cursorSprite: cursorSprite,
             wallpaperSource: wallpaperSource,
             wallpaperImageProvider: wallpaperImageProvider
@@ -241,6 +220,7 @@ public enum PreviewCompositionBuilder {
         screenTrackID: CMPersistentTrackID,
         webcamTrackID: CMPersistentTrackID?,
         cursorTrajectory: [MouseTrajectorySample]?,
+        cursorClickTimes: [Double] = [],
         cursorSprite: CursorSpriteData?,
         wallpaperSource: WallpaperSource?,
         wallpaperImageProvider: WallpaperImageProvider?
@@ -255,19 +235,31 @@ public enum PreviewCompositionBuilder {
         } else {
             backgroundImage = nil
         }
-        // Raw cursor samples remain the source of truth for timing, hover
-        // states, and click positions. The rendered synthetic cursor gets a
-        // zero-phase polish later, so fast sweeps read smoothly without a
-        // temporal catch-up delay.
         let cursorMaster: [MouseTrajectorySample]
         if let master = cursorTrajectory, !master.isEmpty {
             cursorMaster = master
         } else {
             cursorMaster = []
         }
+        // THE shared cursor path (Screen Studio architecture): one heavily-
+        // smoothable, click-pinned, amplitude-collapsing rewrite of the raw
+        // recording, consumed by BOTH the rendered cursor sprite and the
+        // zoom camera's target. The camera never sees violent raw motion —
+        // the input is tamed upstream, which is what makes the follow feel
+        // effortless instead of panicky on fast sweeps.
+        let sharedPath: [MouseTrajectorySample] = cursorMaster.isEmpty
+            ? []
+            : MouseTrajectory.clickPinnedSmoothed(
+                MouseTrajectory.spriteSmoothed(cursorMaster),  // light de-jitter first
+                windowSeconds: project.tuning.pathWindowSeconds,
+                travelCollapse: project.tuning.travelCollapse,
+                clickTimes: cursorClickTimes,
+                clickSnapWindow: project.tuning.clickSnapWindow
+            )
         let effects = applyCursorTrajectory(
             to: project.effects,
-            cursorTrajectory: cursorMaster.isEmpty ? nil : cursorMaster
+            cursorTrajectory: sharedPath.isEmpty ? nil : sharedPath,
+            tuning: project.tuning
         )
         // Phase 3c — only enable the synthetic cursor pass when the screen
         // asset was captured with `showsCursor = false`. Legacy recordings
@@ -275,16 +267,25 @@ public enum PreviewCompositionBuilder {
         let cursorSyntheticallyRendered = project.assets.contains { asset in
             asset.kind == .display && asset.cursorRenderedSynthetically
         }
-        let cursorTrajectoryForRender: [MouseTrajectorySample] =
-            cursorSyntheticallyRendered
-            ? MouseTrajectory.spritePolished(
-                cursorMaster,
-                windowSeconds: project.cursorSettings.pathSmoothingWindowSeconds,
-                speedLow: project.cursorSettings.pathSmoothingSpeedLow,
-                speedHigh: project.cursorSettings.pathSmoothingSpeedHigh,
-                maxRawDeviation: project.cursorSettings.pathSmoothingMaxDeviation
-            )
-            : []
+        // Sprite path scope: `.fullRecording` renders the smoothed path
+        // everywhere; `.zoomsOnly` keeps the cursor true to the raw
+        // recording outside zoom segments, blending the stylized path in
+        // with each zoom's strength.
+        let cursorTrajectoryForRender: [MouseTrajectorySample]
+        if cursorSyntheticallyRendered {
+            switch project.tuning.smoothingScope {
+            case .fullRecording:
+                cursorTrajectoryForRender = sharedPath
+            case .zoomsOnly:
+                cursorTrajectoryForRender = blendByZoomStrength(
+                    raw: cursorMaster,
+                    smoothed: sharedPath,
+                    effects: project.effects
+                )
+            }
+        } else {
+            cursorTrajectoryForRender = []
+        }
         return makeVideoComposition(
             duration: duration,
             outputSize: outputSize,
@@ -295,8 +296,35 @@ public enum PreviewCompositionBuilder {
             cursorSprite: cursorSyntheticallyRendered ? cursorSprite : nil,
             cursorSettings: cursorSyntheticallyRendered ? project.cursorSettings : nil,
             cursorTrajectory: cursorTrajectoryForRender,
+            tuning: project.tuning,
             backgroundImage: backgroundImage
         )
+    }
+
+    /// Per-sample blend of the raw and smoothed cursor paths by the highest
+    /// zoom-keyframe strength at that instant — the `.zoomsOnly` smoothing
+    /// scope. Outside any zoom the cursor is the honest recording; the
+    /// stylized path fades in/out with each zoom's ease windows so the
+    /// switch is never visible as a jump.
+    static func blendByZoomStrength(
+        raw: [MouseTrajectorySample],
+        smoothed: [MouseTrajectorySample],
+        effects: [EffectKeyframe]
+    ) -> [MouseTrajectorySample] {
+        guard raw.count == smoothed.count else { return smoothed }
+        let zooms = effects.filter { $0.kind == .zoom }
+        guard !zooms.isEmpty else { return raw }
+        return zip(raw, smoothed).map { rawSample, smoothSample in
+            let strength = zooms.reduce(0.0) { acc, kf in
+                max(acc, kf.strength(at: rawSample.timelineTime))
+            }
+            guard strength > 0 else { return rawSample }
+            return MouseTrajectorySample(
+                timelineTime: rawSample.timelineTime,
+                centerX: rawSample.centerX + (smoothSample.centerX - rawSample.centerX) * strength,
+                centerY: rawSample.centerY + (smoothSample.centerY - rawSample.centerY) * strength
+            )
+        }
     }
 
     // MARK: - Per-track population
@@ -501,30 +529,31 @@ public enum PreviewCompositionBuilder {
     /// range, so without re-slicing the evaluator clamps to the last
     /// stored sample for the extended portion.
     ///
-    /// `build()` passes the raw cursor sidecar path here. This helper only
-    /// touches the zoom-anchor path; rendered cursor polish is applied
-    /// separately and never feeds back into camera targeting.
+    /// `buildVideoComposition()` passes THE shared smoothed cursor path
+    /// here — the same click-pinned, amplitude-collapsed path the rendered
+    /// sprite consumes. Camera and cursor agree by construction; the spring
+    /// below adds the camera's weight/lag on top of an already-tame input.
     ///
-    /// **Anchor follows an anticipated path via continuous soft spring.**
-    /// After windowing each cursor-follow keyframe's slice, an anticipated
-    /// target path is computed (`MouseTrajectory.anticipatedTargets` — a
-    /// forward-biased triangular window over the cursor's known future) and
-    /// the slice is routed through `MouseTrajectory.anchorFollow` with NO
-    /// deadzone and a default 48 % safe zone, springing toward those
-    /// targets. Spring τ ramps from `tauRelaxed = 0.16 s` near viewport
-    /// centre to `tauTight = 0.12 s` near the safe-zone wall. The visible
-    /// cursor is not smoothed here; only the camera anchor glides, and its
-    /// lag is bounded by the safe-zone barrier against the real cursor.
+    /// **Camera glide.** After windowing each cursor-follow keyframe's
+    /// slice, it is routed through `MouseTrajectory.glideFollow` — a
+    /// constant-weight spring with a true deadzone, soft full recenter,
+    /// settle-controlled damping, and an emergency visible-frame clamp.
     ///
     /// Pinned (gesture) keyframes still short-circuit before this stage —
-    /// they want a locked anchor, not a deadzone follow.
+    /// they want a locked anchor, not a slack follow.
     ///
-    /// No-op (returns input unchanged) when `cursorTrajectory` is nil or
-    /// empty. Non-zoom keyframes pass through untouched. When a re-slice
-    /// produces an empty result (no samples fall in the new range) the
-    /// keyframe's trajectory is cleared to nil so the evaluator falls
-    /// back to the static (centerX, centerY) instead of locking to a
-    /// stale single sample.
+    /// Motion parameters come from `tuning` (the project-wide
+    /// `TuningSettings`) and are passed straight into the solver — nothing
+    /// is stamped onto the keyframes. The retired `ZoomFollowStyle` resolver
+    /// used to overwrite per-keyframe values here on every rebuild, which is
+    /// why the old advanced sliders never had any effect.
+    ///
+    /// Non-zoom and pinned keyframes pass through untouched. When
+    /// `cursorTrajectory` is nil or empty, cursor-follow zooms keep their
+    /// existing trajectory state. When a re-slice produces an empty result
+    /// (no samples fall in the new range) the keyframe's trajectory is
+    /// cleared to nil so the evaluator falls back to the static
+    /// (centerX, centerY) instead of locking to a stale single sample.
     // Exposed `internal` (no `private`) so `ApplyCursorTrajectoryTests` can
     // exercise the pinned-skip contract without going through the full
     // AVMutableComposition build path. The helper is still a static, no-state
@@ -533,11 +562,9 @@ public enum PreviewCompositionBuilder {
     // (the value type returned by build).
     static func applyCursorTrajectory(
         to effects: [EffectKeyframe],
-        cursorTrajectory: [MouseTrajectorySample]?
+        cursorTrajectory: [MouseTrajectorySample]?,
+        tuning: TuningSettings = .default
     ) -> [EffectKeyframe] {
-        guard let master = cursorTrajectory, !master.isEmpty else {
-            return effects
-        }
         return effects.map { kf -> EffectKeyframe in
             guard kf.kind == .zoom else { return kf }
             // Pinned keyframes opt out of trajectory re-slicing. Without this,
@@ -547,25 +574,27 @@ public enum PreviewCompositionBuilder {
             // it with a fresh windowed slice of the master cursor path,
             // re-enabling the jitter the pinned mode exists to prevent.
             if kf.anchorMode == .pinned { return kf }
+            var next = kf
+            guard let master = cursorTrajectory, !master.isEmpty else {
+                return next
+            }
             let windowed = MouseTrajectory.window(
                 master,
                 timelineRange: kf.timelineRange,
                 leadSeconds: kf.followLeadSeconds
             )
             guard !windowed.isEmpty else {
-                var next = kf
                 next.trajectory = nil
                 return next
             }
             if kf.anchorMode == .centerCursor {
-                var next = kf
                 next.trajectory = windowed
                 return next
             }
-            // The zoom camera uses a true no-force deadzone, plus a slightly
-            // wider hard clamp. Small cursor movement inside the deadzone
-            // should not make the camera chase jitter; larger movement gets a
-            // calm band before the clamp guarantees the cursor stays framed.
+            // The zoom camera uses slack + elastic tension. Small cursor
+            // movement inside the slack radius should not make the camera
+            // chase jitter; larger movement stretches a soft bungee before
+            // the emergency visible-frame clamp ever has to intervene.
             //
             // The spring's target is the offline ANTICIPATED path — a
             // forward-biased window average of the cursor's real future
@@ -573,24 +602,18 @@ public enum PreviewCompositionBuilder {
             // the old velocity-extrapolated, decel-gated lookahead: the
             // window average leads sweeps, corner-cuts direction changes,
             // and converges onto landing points by construction, while the
-            // hard safe-zone barrier inside anchorFollow still keys off the
-            // real cursor so anticipation can never push it out of frame.
-            let targets = MouseTrajectory.anticipatedTargets(
+            // emergency visible-frame clamp inside anchorFollow still keys
+            // off the real cursor so anticipation can never push it out of
+            // frame.
+            let followed = MouseTrajectory.glideFollow(
                 windowed,
-                halfWindowSeconds: kf.zoomFollowAnticipationHalfWindow,
-                leadSeconds: kf.zoomFollowLookaheadSeconds
+                zoomFactor: next.zoomFactor,
+                cameraTau: tuning.cameraTau,
+                settle: tuning.settle,
+                deadzoneFraction: tuning.deadzoneFraction,
+                maxPanSpeed: tuning.maxPanSpeed,
+                lookaheadSeconds: tuning.lookaheadSeconds
             )
-            let followed = MouseTrajectory.anchorFollow(
-                windowed,
-                zoomFactor: kf.zoomFactor,
-                deadzoneFraction: kf.zoomFollowSafeZoneFraction,
-                safeZoneFraction: zoomFollowOuterSafeZoneFraction(for: kf.zoomFollowSafeZoneFraction),
-                tauRelaxed: kf.zoomFollowTauRelaxed,
-                tauTight: kf.zoomFollowTauTight,
-                maxAnchorSpeed: kf.zoomFollowMaxAnchorSpeed,
-                anticipatedTargets: targets
-            )
-            var next = kf
             next.trajectory = followed
             return next
         }
@@ -632,6 +655,7 @@ public enum PreviewCompositionBuilder {
         cursorSprite: CursorSpriteData?,
         cursorSettings: CursorSettings?,
         cursorTrajectory: [MouseTrajectorySample],
+        tuning: TuningSettings,
         backgroundImage: CGImage?
     ) -> AVMutableVideoComposition {
         let videoComposition = AVMutableVideoComposition()
@@ -656,6 +680,7 @@ public enum PreviewCompositionBuilder {
             cursorSprite: cursorSprite,
             cursorSettings: cursorSettings,
             cursorTrajectory: cursorTrajectory,
+            tuning: tuning,
             backgroundImage: backgroundImage
         )
         videoComposition.instructions = [instruction]

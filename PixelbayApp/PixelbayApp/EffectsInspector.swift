@@ -32,6 +32,12 @@ struct EffectsInspector: View {
     let onCursorChange: (CursorSettings) -> Void
     let onSeek: (RationalTime) -> Void
     let onFollowSafeZonePreview: (Double?) -> Void
+    /// Live-drag tuning preview. Fired with the in-flight `TuningSettings`
+    /// on every slider tick (the owner debounces and rebuilds just the
+    /// videoComposition so the preview updates WHILE dragging), then with
+    /// nil on release — the committed `SetTuningSettingsCommand` takes
+    /// over from there.
+    let onTuningPreview: (TuningSettings?) -> Void
 
     /// Drag-preview value for the zoom-factor slider. Mirrors the
     /// previewVolumes/previewSpeeds pattern in `ProjectView` — non-nil
@@ -40,18 +46,12 @@ struct EffectsInspector: View {
     @State private var previewZoomFactor: Double?
     @State private var previewEaseIn: Double?
     @State private var previewEaseOut: Double?
-    @State private var previewFollowSafeZone: Double?
-    @State private var previewFollowMotionBlur: Double?
-    @State private var previewFollowPanSpeed: Double?
-    @State private var previewFollowLandingAssist: Double?
-    @State private var previewZoomPanShutter: Double?
-    @State private var previewZoomPanBlurCap: Double?
-    @State private var previewZoomBlurStartSpeed: Double?
-    @State private var previewZoomBlurFullSpeed: Double?
-    @State private var previewZoomCenterHandoff: Double?
-    @State private var previewZoomTauRelaxed: Double?
-    @State private var previewZoomTauTight: Double?
-    @State private var previewZoomAnticipationWindow: Double?
+    /// Drag-preview copy of the project's motion tuning. Non-nil while any
+    /// tuning slider is mid-drag; one `SetTuningSettingsCommand` commits on
+    /// mouse-up so the undo stack gets one entry per gesture.
+    @State private var previewTuning: TuningSettings?
+    /// Brief "copied" affordance on the Copy Values button.
+    @State private var didCopyTuning = false
     @State private var previewCursorScale: Double?
     @State private var previewCursorZoomBoost: Double?
     @State private var previewCursorVelocityBoost: Double?
@@ -62,10 +62,6 @@ struct EffectsInspector: View {
     @State private var previewCursorShutterMin: Double?
     @State private var previewCursorShutterMax: Double?
     @State private var previewCursorBlurCap: Double?
-    @State private var previewCursorPathWindow: Double?
-    @State private var previewCursorPathLow: Double?
-    @State private var previewCursorPathHigh: Double?
-    @State private var previewCursorPathDeviation: Double?
 
     private var sortedKeyframes: [EffectKeyframe] {
         project.effects.sorted { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
@@ -86,6 +82,8 @@ struct EffectsInspector: View {
                 onApply: onApply,
                 onSeek: onSeek
             )
+            PBDivider()
+            motionTuningSection
             PBDivider()
             cursorTuningSection
             PBDivider()
@@ -169,7 +167,7 @@ struct EffectsInspector: View {
             if keyframe.kind == .zoom {
                 zoomFactorSlider(keyframe)
                 easingSection(keyframe)
-                followSection(keyframe)
+                zoomKeyframeAdvancedSection(keyframe)
             }
         }
     }
@@ -260,17 +258,188 @@ struct EffectsInspector: View {
         }
     }
 
-    private func followSection(_ keyframe: EffectKeyframe) -> some View {
+    // MARK: - Motion Tuning
+
+    /// The raw tuning panel: every slider binds 1:1 onto one
+    /// `TuningSettings` field, and every field is authoritative — nothing
+    /// downstream resolves or overwrites these values. "Copy Values" puts a
+    /// Swift literal of the current settings on the pasteboard so a feel
+    /// worth keeping can be hardcoded as the new defaults.
+    private var motionTuningSection: some View {
+        let tuning = previewTuning ?? project.tuning
+        return VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack(spacing: Theme.Spacing.sm) {
+                Text("Motion Tuning")
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
+                Spacer()
+                if tuning != TuningSettings.default {
+                    Button {
+                        commitTuning(.default)
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.Color.textTertiary)
+                    .help("Reset all motion tuning to defaults")
+                }
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(project.tuning.swiftLiteral, forType: .string)
+                    withAnimation(.easeOut(duration: 0.15)) { didCopyTuning = true }
+                    Task {
+                        try? await Task.sleep(nanoseconds: 1_200_000_000)
+                        withAnimation(.easeIn(duration: 0.3)) { didCopyTuning = false }
+                    }
+                } label: {
+                    Image(systemName: didCopyTuning ? "checkmark" : "doc.on.doc")
+                        .foregroundStyle(didCopyTuning ? Theme.Color.accent : Theme.Color.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Copy values as a Swift literal")
+            }
+
+            tuningGroup("Camera Feel") {
+                tuningSlider("Camera Weight", tuning, \.cameraTau, TuningSettings.cameraTauRange) { msText($0) }
+                tuningSlider("Settle", tuning, \.settle, TuningSettings.settleRange) { percentText($0) }
+                tuningSlider("Deadzone", tuning, \.deadzoneFraction, TuningSettings.deadzoneFractionRange,
+                             onDrag: { onFollowSafeZonePreview($0) }) { percentText($0) }
+                tuningSlider("Max Pan Speed", tuning, \.maxPanSpeed, TuningSettings.maxPanSpeedRange) {
+                    String(format: "%.2f/s", $0)
+                }
+                tuningSlider("Anticipation", tuning, \.lookaheadSeconds, TuningSettings.lookaheadSecondsRange) { msText($0) }
+            }
+
+            tuningGroup("Cursor Path") {
+                tuningSlider("Path Smoothness", tuning, \.pathWindowSeconds, TuningSettings.pathWindowSecondsRange) { msText($0) }
+                tuningSlider("Travel Collapse", tuning, \.travelCollapse, TuningSettings.travelCollapseRange) { percentText($0) }
+                tuningSlider("Click Snap", tuning, \.clickSnapWindow, TuningSettings.clickSnapWindowRange) { msText($0) }
+                smoothingScopePicker(tuning)
+            }
+
+            tuningGroup("Motion Blur") {
+                tuningSlider("Shutter Angle", tuning, \.shutterAngle, TuningSettings.shutterAngleRange) {
+                    String(format: "%d°", Int($0.rounded()))
+                }
+                tuningSlider("Blur Strength", tuning, \.blurStrength, TuningSettings.blurStrengthRange) {
+                    String(format: "%.2f×", $0)
+                }
+                tuningSlider("Cursor Blur", tuning, \.cursorBlur, TuningSettings.cursorBlurRange) { percentText($0) }
+            }
+
+            tuningGroup("Transition") {
+                tuningSlider("Transition Softness", tuning, \.transitionSoftness, TuningSettings.transitionSoftnessRange) { percentText($0) }
+            }
+        }
+    }
+
+    private func tuningGroup(
+        _ title: String,
+        @ViewBuilder content: () -> some View
+    ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Follow")
+            Text(title.uppercased())
+                .font(Theme.Font.caption)
+                .kerning(0.6)
+                .foregroundStyle(Theme.Color.textTertiary)
+            content()
+        }
+        .padding(Theme.Spacing.sm)
+        .background(
+            Theme.Color.bgInsetCard,
+            in: RoundedRectangle(cornerRadius: Theme.Radius.medium)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                .stroke(Theme.Color.borderSubtle, lineWidth: 1)
+        )
+    }
+
+    private func smoothingScopePicker(_ tuning: TuningSettings) -> some View {
+        HStack {
+            Text("Smooth")
+            Spacer()
+            Picker("", selection: Binding<SmoothingScope>(
+                get: { tuning.smoothingScope },
+                set: { newScope in
+                    var next = project.tuning
+                    next.smoothingScope = newScope
+                    commitTuning(next)
+                }
+            )) {
+                Text("Everywhere").tag(SmoothingScope.fullRecording)
+                Text("Zooms Only").tag(SmoothingScope.zoomsOnly)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 180)
+        }
+    }
+
+    private func tuningSlider(
+        _ title: String,
+        _ tuning: TuningSettings,
+        _ keyPath: WritableKeyPath<TuningSettings, Double>,
+        _ range: ClosedRange<Double>,
+        onDrag: ((Double?) -> Void)? = nil,
+        valueText: @escaping (Double) -> String
+    ) -> some View {
+        let liveValue = tuning[keyPath: keyPath]
+        let committedValue = project.tuning[keyPath: keyPath]
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(valueText(liveValue))
+                    .font(Theme.Font.monoTimecode)
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+            PBSlider(
+                value: Binding<Double>(
+                    get: { liveValue },
+                    set: { newValue in
+                        var next = previewTuning ?? project.tuning
+                        next[keyPath: keyPath] = clamp(newValue, to: range)
+                        previewTuning = next
+                        onDrag?(next[keyPath: keyPath])
+                        onTuningPreview(next)
+                    }
+                ),
+                in: range,
+                onEditingChanged: { isEditing in
+                    guard !isEditing else { return }
+                    let final = previewTuning ?? project.tuning
+                    previewTuning = nil
+                    onDrag?(nil)
+                    onTuningPreview(nil)
+                    guard abs(final[keyPath: keyPath] - committedValue) >= 0.000_5 else { return }
+                    commitTuning(final)
+                }
+            )
+        }
+    }
+
+    private func commitTuning(_ tuning: TuningSettings) {
+        guard tuning != project.tuning else { return }
+        onApply(SetTuningSettingsCommand(newSettings: tuning))
+    }
+
+    private func msText(_ seconds: Double) -> String {
+        String(format: "%dms", Int((seconds * 1000).rounded()))
+    }
+
+    private func percentText(_ fraction: Double) -> String {
+        String(format: "%d%%", Int((fraction * 100).rounded()))
+    }
+
+    private func zoomKeyframeAdvancedSection(_ keyframe: EffectKeyframe) -> some View {
+        DisclosureGroup {
+            centerCursorToggle(keyframe)
+                .padding(.top, 2)
+        } label: {
+            Text("Advanced")
                 .font(Theme.Font.caption)
                 .foregroundStyle(Theme.Color.textSecondary)
-            centerCursorToggle(keyframe)
-            followSafeZoneSlider(keyframe)
-            followPanSpeedSlider(keyframe)
-            followLandingAssistSlider(keyframe)
-            followMotionBlurSlider(keyframe)
-            followAdvancedSection(keyframe)
         }
     }
 
@@ -304,10 +473,6 @@ struct EffectsInspector: View {
                 cursorShutterMinSlider
                 cursorShutterMaxSlider
                 cursorBlurCapSlider
-                cursorPathWindowSlider
-                cursorPathLowSlider
-                cursorPathHighSlider
-                cursorPathDeviationSlider
             }
             .disabled(!cursorSettings.isEnabled)
             .opacity(cursorSettings.isEnabled ? 1 : 0.4)
@@ -484,111 +649,6 @@ struct EffectsInspector: View {
         )
     }
 
-    private var cursorPathWindowSlider: some View {
-        cursorSettingSlider(
-            title: "Path Smooth Window",
-            liveValue: previewCursorPathWindow ?? cursorSettings.pathSmoothingWindowSeconds,
-            committedValue: cursorSettings.pathSmoothingWindowSeconds,
-            range: CursorSettings.pathSmoothingWindowSecondsRange,
-            valueText: { String(format: "%dms", Int(($0 * 1000).rounded())) },
-            currentPreview: { previewCursorPathWindow },
-            setPreview: { previewCursorPathWindow = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.pathSmoothingWindowSeconds = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private var cursorPathLowSlider: some View {
-        cursorSettingSlider(
-            title: "Path Smooth Start",
-            liveValue: previewCursorPathLow ?? cursorSettings.pathSmoothingSpeedLow,
-            committedValue: cursorSettings.pathSmoothingSpeedLow,
-            range: CursorSettings.pathSmoothingSpeedLowRange,
-            valueText: { String(format: "%.2f/s", $0) },
-            currentPreview: { previewCursorPathLow },
-            setPreview: { previewCursorPathLow = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.pathSmoothingSpeedLow = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private var cursorPathHighSlider: some View {
-        cursorSettingSlider(
-            title: "Path Smooth Full",
-            liveValue: previewCursorPathHigh ?? cursorSettings.pathSmoothingSpeedHigh,
-            committedValue: cursorSettings.pathSmoothingSpeedHigh,
-            range: CursorSettings.pathSmoothingSpeedHighRange,
-            valueText: { String(format: "%.2f/s", $0) },
-            currentPreview: { previewCursorPathHigh },
-            setPreview: { previewCursorPathHigh = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.pathSmoothingSpeedHigh = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private var cursorPathDeviationSlider: some View {
-        cursorSettingSlider(
-            title: "Path Max Drift",
-            liveValue: previewCursorPathDeviation ?? cursorSettings.pathSmoothingMaxDeviation,
-            committedValue: cursorSettings.pathSmoothingMaxDeviation,
-            range: CursorSettings.pathSmoothingMaxDeviationRange,
-            valueText: { String(format: "%.0f%% screen", $0 * 100) },
-            currentPreview: { previewCursorPathDeviation },
-            setPreview: { previewCursorPathDeviation = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.pathSmoothingMaxDeviation = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private func followSafeZoneSlider(_ keyframe: EffectKeyframe) -> some View {
-        let liveValue = previewFollowSafeZone ?? keyframe.zoomFollowSafeZoneFraction
-        let committedValue = keyframe.zoomFollowSafeZoneFraction
-        return VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("Deadzone")
-                Spacer()
-                Text("\(Int((liveValue * 100).rounded()))%")
-                    .font(Theme.Font.monoTimecode)
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-            PBSlider(
-                value: Binding<Double>(
-                    get: { liveValue },
-                    set: { newValue in
-                        let clamped = clamp(newValue, to: EffectKeyframe.zoomFollowSafeZoneRange)
-                        previewFollowSafeZone = clamped
-                        onFollowSafeZonePreview(clamped)
-                    }
-                ),
-                in: EffectKeyframe.zoomFollowSafeZoneRange,
-                onEditingChanged: { isEditing in
-                    if isEditing {
-                        onFollowSafeZonePreview(liveValue)
-                    } else {
-                        let final = clamp(previewFollowSafeZone ?? liveValue,
-                                          to: EffectKeyframe.zoomFollowSafeZoneRange)
-                        previewFollowSafeZone = nil
-                        onFollowSafeZonePreview(nil)
-                        guard abs(final - committedValue) >= 0.005 else { return }
-                        commitZoomFollowSafeZone(keyframe: keyframe, fraction: final)
-                    }
-                }
-            )
-        }
-    }
-
     private func centerCursorToggle(_ keyframe: EffectKeyframe) -> some View {
         HStack {
             Text("Center Cursor")
@@ -604,254 +664,6 @@ struct EffectsInspector: View {
             .labelsHidden()
             .toggleStyle(.switch)
             .tint(Theme.Color.accent)
-        }
-    }
-
-    private func followMotionBlurSlider(_ keyframe: EffectKeyframe) -> some View {
-        let liveValue = previewFollowMotionBlur ?? keyframe.zoomFollowMotionBlur
-        let committedValue = keyframe.zoomFollowMotionBlur
-        return VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("Motion Blur")
-                Spacer()
-                Text(String(format: "%.1f×", liveValue))
-                    .font(Theme.Font.monoTimecode)
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-            PBSlider(
-                value: Binding<Double>(
-                    get: { liveValue },
-                    set: { newValue in
-                        previewFollowMotionBlur = clamp(newValue, to: EffectKeyframe.zoomFollowMotionBlurRange)
-                    }
-                ),
-                in: EffectKeyframe.zoomFollowMotionBlurRange,
-                onEditingChanged: { isEditing in
-                    guard !isEditing else { return }
-                    let final = clamp(previewFollowMotionBlur ?? liveValue,
-                                      to: EffectKeyframe.zoomFollowMotionBlurRange)
-                    previewFollowMotionBlur = nil
-                    guard abs(final - committedValue) >= 0.01 else { return }
-                    commitZoomFollowMotionBlur(keyframe: keyframe, amount: final)
-                }
-            )
-        }
-    }
-
-    private func followPanSpeedSlider(_ keyframe: EffectKeyframe) -> some View {
-        let liveValue = previewFollowPanSpeed ?? keyframe.zoomFollowMaxAnchorSpeed
-        let committedValue = keyframe.zoomFollowMaxAnchorSpeed
-        return VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("Pan Speed")
-                Spacer()
-                Text(String(format: "%.2f/s", liveValue))
-                    .font(Theme.Font.monoTimecode)
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-            PBSlider(
-                value: Binding<Double>(
-                    get: { liveValue },
-                    set: { newValue in
-                        previewFollowPanSpeed = clamp(newValue, to: EffectKeyframe.zoomFollowMaxAnchorSpeedRange)
-                    }
-                ),
-                in: EffectKeyframe.zoomFollowMaxAnchorSpeedRange,
-                onEditingChanged: { isEditing in
-                    guard !isEditing else { return }
-                    let final = clamp(previewFollowPanSpeed ?? liveValue,
-                                      to: EffectKeyframe.zoomFollowMaxAnchorSpeedRange)
-                    previewFollowPanSpeed = nil
-                    guard abs(final - committedValue) >= 0.01 else { return }
-                    commitZoomFollowPanSpeed(keyframe: keyframe, speed: final)
-                }
-            )
-        }
-    }
-
-    private func followLandingAssistSlider(_ keyframe: EffectKeyframe) -> some View {
-        let liveValue = previewFollowLandingAssist ?? keyframe.zoomFollowLookaheadSeconds
-        let committedValue = keyframe.zoomFollowLookaheadSeconds
-        return VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("Anticipation")
-                Spacer()
-                Text("\(Int((liveValue * 1000).rounded()))ms")
-                    .font(Theme.Font.monoTimecode)
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-            PBSlider(
-                value: Binding<Double>(
-                    get: { liveValue },
-                    set: { newValue in
-                        previewFollowLandingAssist = clamp(newValue, to: EffectKeyframe.zoomFollowLookaheadSecondsRange)
-                    }
-                ),
-                in: EffectKeyframe.zoomFollowLookaheadSecondsRange,
-                onEditingChanged: { isEditing in
-                    guard !isEditing else { return }
-                    let final = clamp(previewFollowLandingAssist ?? liveValue,
-                                      to: EffectKeyframe.zoomFollowLookaheadSecondsRange)
-                    previewFollowLandingAssist = nil
-                    guard abs(final - committedValue) >= 0.002 else { return }
-                    commitZoomFollowLandingAssist(keyframe: keyframe, seconds: final)
-                }
-            )
-        }
-    }
-
-    private func followAdvancedSection(_ keyframe: EffectKeyframe) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Advanced Zoom")
-                .font(Theme.Font.caption)
-                .foregroundStyle(Theme.Color.textSecondary)
-            zoomTuningSlider(
-                title: "Pan Shutter",
-                liveValue: previewZoomPanShutter ?? keyframe.zoomPanBlurShutterSeconds,
-                committedValue: keyframe.zoomPanBlurShutterSeconds,
-                range: EffectKeyframe.zoomPanBlurShutterSecondsRange,
-                valueText: shutterText,
-                currentPreview: { previewZoomPanShutter },
-                setPreview: { previewZoomPanShutter = $0 },
-                commit: { final in
-                    var updated = keyframe
-                    updated.zoomPanBlurShutterSeconds = final
-                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
-                }
-            )
-            zoomTuningSlider(
-                title: "Pan Blur Cap",
-                liveValue: previewZoomPanBlurCap ?? keyframe.zoomPanBlurMaxUV,
-                committedValue: keyframe.zoomPanBlurMaxUV,
-                range: EffectKeyframe.zoomPanBlurMaxUVRange,
-                valueText: { String(format: "%.3f uv", $0) },
-                currentPreview: { previewZoomPanBlurCap },
-                setPreview: { previewZoomPanBlurCap = $0 },
-                commit: { final in
-                    var updated = keyframe
-                    updated.zoomPanBlurMaxUV = final
-                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
-                }
-            )
-            zoomTuningSlider(
-                title: "Blur Start Speed",
-                liveValue: previewZoomBlurStartSpeed ?? keyframe.zoomPanBlurThresholdSpeed,
-                committedValue: keyframe.zoomPanBlurThresholdSpeed,
-                range: EffectKeyframe.zoomPanBlurThresholdSpeedRange,
-                valueText: { String(format: "%.2f/s", $0) },
-                currentPreview: { previewZoomBlurStartSpeed },
-                setPreview: { previewZoomBlurStartSpeed = $0 },
-                commit: { final in
-                    var updated = keyframe
-                    updated.zoomPanBlurThresholdSpeed = final
-                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
-                }
-            )
-            zoomTuningSlider(
-                title: "Blur Full Speed",
-                liveValue: previewZoomBlurFullSpeed ?? keyframe.zoomPanBlurFullSpeed,
-                committedValue: keyframe.zoomPanBlurFullSpeed,
-                range: EffectKeyframe.zoomPanBlurFullSpeedRange,
-                valueText: { String(format: "%.2f/s", $0) },
-                currentPreview: { previewZoomBlurFullSpeed },
-                setPreview: { previewZoomBlurFullSpeed = $0 },
-                commit: { final in
-                    var updated = keyframe
-                    updated.zoomPanBlurFullSpeed = final
-                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
-                }
-            )
-            zoomTuningSlider(
-                title: "Center Handoff",
-                liveValue: previewZoomCenterHandoff ?? keyframe.zoomCenterHandoffSeconds,
-                committedValue: keyframe.zoomCenterHandoffSeconds,
-                range: EffectKeyframe.zoomCenterHandoffSecondsRange,
-                valueText: { String(format: "%dms", Int(($0 * 1000).rounded())) },
-                currentPreview: { previewZoomCenterHandoff },
-                setPreview: { previewZoomCenterHandoff = $0 },
-                commit: { final in
-                    var updated = keyframe
-                    updated.zoomCenterHandoffSeconds = final
-                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
-                }
-            )
-            zoomTuningSlider(
-                title: "Spring Relaxed",
-                liveValue: previewZoomTauRelaxed ?? keyframe.zoomFollowTauRelaxed,
-                committedValue: keyframe.zoomFollowTauRelaxed,
-                range: EffectKeyframe.zoomFollowTauRelaxedRange,
-                valueText: { String(format: "%dms", Int(($0 * 1000).rounded())) },
-                currentPreview: { previewZoomTauRelaxed },
-                setPreview: { previewZoomTauRelaxed = $0 },
-                commit: { final in
-                    var updated = keyframe
-                    updated.zoomFollowTauRelaxed = final
-                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
-                }
-            )
-            zoomTuningSlider(
-                title: "Spring Tight",
-                liveValue: previewZoomTauTight ?? keyframe.zoomFollowTauTight,
-                committedValue: keyframe.zoomFollowTauTight,
-                range: EffectKeyframe.zoomFollowTauTightRange,
-                valueText: { String(format: "%dms", Int(($0 * 1000).rounded())) },
-                currentPreview: { previewZoomTauTight },
-                setPreview: { previewZoomTauTight = $0 },
-                commit: { final in
-                    var updated = keyframe
-                    updated.zoomFollowTauTight = final
-                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
-                }
-            )
-            zoomTuningSlider(
-                title: "Anticipation Window",
-                liveValue: previewZoomAnticipationWindow ?? keyframe.zoomFollowAnticipationHalfWindow,
-                committedValue: keyframe.zoomFollowAnticipationHalfWindow,
-                range: EffectKeyframe.zoomFollowAnticipationHalfWindowRange,
-                valueText: { String(format: "%dms", Int(($0 * 1000).rounded())) },
-                currentPreview: { previewZoomAnticipationWindow },
-                setPreview: { previewZoomAnticipationWindow = $0 },
-                commit: { final in
-                    var updated = keyframe
-                    updated.zoomFollowAnticipationHalfWindow = final
-                    onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
-                }
-            )
-        }
-    }
-
-    private func zoomTuningSlider(
-        title: String,
-        liveValue: Double,
-        committedValue: Double,
-        range: ClosedRange<Double>,
-        valueText: @escaping (Double) -> String,
-        currentPreview: @escaping () -> Double?,
-        setPreview: @escaping (Double?) -> Void,
-        commit: @escaping (Double) -> Void
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(title)
-                Spacer()
-                Text(valueText(liveValue))
-                    .font(Theme.Font.monoTimecode)
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-            PBSlider(
-                value: Binding<Double>(
-                    get: { liveValue },
-                    set: { newValue in setPreview(clamp(newValue, to: range)) }
-                ),
-                in: range,
-                onEditingChanged: { isEditing in
-                    guard !isEditing else { return }
-                    let final = clamp(currentPreview() ?? liveValue, to: range)
-                    setPreview(nil)
-                    guard abs(final - committedValue) >= 0.000_5 else { return }
-                    commit(final)
-                }
-            )
         }
     }
 
@@ -961,30 +773,6 @@ struct EffectsInspector: View {
     private func commitEaseOut(keyframe: EffectKeyframe, seconds: Double) {
         var updated = keyframe
         updated.easeOut = .seconds(max(0, seconds))
-        onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
-    }
-
-    private func commitZoomFollowSafeZone(keyframe: EffectKeyframe, fraction: Double) {
-        var updated = keyframe
-        updated.zoomFollowSafeZoneFraction = fraction
-        onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
-    }
-
-    private func commitZoomFollowMotionBlur(keyframe: EffectKeyframe, amount: Double) {
-        var updated = keyframe
-        updated.zoomFollowMotionBlur = amount
-        onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
-    }
-
-    private func commitZoomFollowPanSpeed(keyframe: EffectKeyframe, speed: Double) {
-        var updated = keyframe
-        updated.zoomFollowMaxAnchorSpeed = speed
-        onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
-    }
-
-    private func commitZoomFollowLandingAssist(keyframe: EffectKeyframe, seconds: Double) {
-        var updated = keyframe
-        updated.zoomFollowLookaheadSeconds = seconds
         onApply(UpdateEffectKeyframeCommand(keyframeID: keyframe.id, newValue: updated))
     }
 

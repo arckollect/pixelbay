@@ -25,10 +25,6 @@ public struct CursorSettings: Codable, Sendable, Equatable {
     public static let defaultBlurShutterMin: Double = 1.0 / 110.0
     public static let defaultBlurShutterMax: Double = 1.0 / 34.0
     public static let defaultBlurMaxUV: Double = 1.00
-    public static let defaultPathSmoothingWindowSeconds: Double = 0.189
-    public static let defaultPathSmoothingSpeedLow: Double = 0.03
-    public static let defaultPathSmoothingSpeedHigh: Double = 0.29
-    public static let defaultPathSmoothingMaxDeviation: Double = 0.28
 
     public static let scaleRange: ClosedRange<Double> = 0.5...4.0
     public static let zoomScaleBoostPerZoomUnitRange: ClosedRange<Double> = 0.0...1.5
@@ -40,10 +36,11 @@ public struct CursorSettings: Codable, Sendable, Equatable {
     public static let blurShutterMinRange: ClosedRange<Double> = (1.0 / 240.0)...(1.0 / 24.0)
     public static let blurShutterMaxRange: ClosedRange<Double> = (1.0 / 240.0)...(1.0 / 12.0)
     public static let blurMaxUVRange: ClosedRange<Double> = 0.05...2.0
-    public static let pathSmoothingWindowSecondsRange: ClosedRange<Double> = 0.0...0.30
-    public static let pathSmoothingSpeedLowRange: ClosedRange<Double> = 0.0...3.0
-    public static let pathSmoothingSpeedHighRange: ClosedRange<Double> = 0.05...6.0
-    public static let pathSmoothingMaxDeviationRange: ClosedRange<Double> = 0.0...0.35
+    // Path-smoothing knobs retired 2026-06: the cursor sprite now renders
+    // from the shared click-pinned smoothed path driven by
+    // `TuningSettings.pathWindowSeconds` / `travelCollapse` /
+    // `clickSnapWindow`. Old `pathSmoothing*` extras keys decode as inert
+    // data.
 
     /// Master switch. When false the compositor skips the synthetic cursor
     /// pass even if the asset was captured with `showsCursor = false` —
@@ -130,26 +127,6 @@ public extension CursorSettings {
     var blurMaxUV: Double {
         get { doubleExtra("blurMaxUV", default: Self.defaultBlurMaxUV, range: Self.blurMaxUVRange) }
         set { setDoubleExtra("blurMaxUV", newValue, default: Self.defaultBlurMaxUV, range: Self.blurMaxUVRange) }
-    }
-
-    var pathSmoothingWindowSeconds: Double {
-        get { doubleExtra("pathSmoothingWindowSeconds", default: Self.defaultPathSmoothingWindowSeconds, range: Self.pathSmoothingWindowSecondsRange) }
-        set { setDoubleExtra("pathSmoothingWindowSeconds", newValue, default: Self.defaultPathSmoothingWindowSeconds, range: Self.pathSmoothingWindowSecondsRange) }
-    }
-
-    var pathSmoothingSpeedLow: Double {
-        get { doubleExtra("pathSmoothingSpeedLow", default: Self.defaultPathSmoothingSpeedLow, range: Self.pathSmoothingSpeedLowRange) }
-        set { setDoubleExtra("pathSmoothingSpeedLow", newValue, default: Self.defaultPathSmoothingSpeedLow, range: Self.pathSmoothingSpeedLowRange) }
-    }
-
-    var pathSmoothingSpeedHigh: Double {
-        get { doubleExtra("pathSmoothingSpeedHigh", default: Self.defaultPathSmoothingSpeedHigh, range: Self.pathSmoothingSpeedHighRange) }
-        set { setDoubleExtra("pathSmoothingSpeedHigh", newValue, default: Self.defaultPathSmoothingSpeedHigh, range: Self.pathSmoothingSpeedHighRange) }
-    }
-
-    var pathSmoothingMaxDeviation: Double {
-        get { doubleExtra("pathSmoothingMaxDeviation", default: Self.defaultPathSmoothingMaxDeviation, range: Self.pathSmoothingMaxDeviationRange) }
-        set { setDoubleExtra("pathSmoothingMaxDeviation", newValue, default: Self.defaultPathSmoothingMaxDeviation, range: Self.pathSmoothingMaxDeviationRange) }
     }
 
     private func doubleExtra(_ key: String, default defaultValue: Double, range: ClosedRange<Double>) -> Double {

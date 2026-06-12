@@ -32,11 +32,21 @@ private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "Curso
 
 enum CursorTrajectoryLoader {
 
-    /// Returns the master cursor trajectory for `project`, or nil when
-    /// there's no screen asset, no sidecar, or the sidecars carry no
-    /// mouse-move samples. Silent on errors: any I/O failure for a single
-    /// asset is dropped so the preview still loads — cursor-follow simply
-    /// falls back to the per-keyframe stored slice (or, when that's
+    /// The master cursor trajectory plus the timeline-time instants of
+    /// every recorded click. Click times feed the click-pinning stage of
+    /// the shared smoothed cursor path; recordings whose sidecars predate
+    /// click capture simply produce an empty `clickTimes` (no pinning —
+    /// graceful degradation).
+    struct CursorData {
+        var samples: [MouseTrajectorySample]
+        var clickTimes: [Double]
+    }
+
+    /// Returns the master cursor trajectory + click times for `project`,
+    /// or nil when there's no screen asset, no sidecar, or the sidecars
+    /// carry no mouse-move samples. Silent on errors: any I/O failure for
+    /// a single asset is dropped so the preview still loads — cursor-follow
+    /// simply falls back to the per-keyframe stored slice (or, when that's
     /// nil/empty, the static centre).
     ///
     /// In a single-asset project (the only Phase 1–4 shape) the returned
@@ -44,11 +54,12 @@ enum CursorTrajectoryLoader {
     static func load(
         for project: Project,
         bundleURL: URL
-    ) async -> [MouseTrajectorySample]? {
+    ) async -> CursorData? {
         let pairs = screenClipsByAsset(in: project)
         guard !pairs.isEmpty else { return nil }
 
         var merged: [MouseTrajectorySample] = []
+        var mergedClicks: [Double] = []
         for (asset, clips) in pairs {
             guard let sidecarURL = AutoZoomService.clicksSidecarURL(
                 forScreenAsset: asset,
@@ -67,9 +78,14 @@ enum CursorTrajectoryLoader {
                     screenPixelSize: naturalSize
                 )
                 guard !perAsset.isEmpty else { continue }
+                let perAssetClicks = AutoZoomService.clickTimes(from: sidecar)
                 for clip in clips {
                     merged.append(contentsOf: shift(
                         perAsset,
+                        intoClipTimeline: clip
+                    ))
+                    mergedClicks.append(contentsOf: shiftTimes(
+                        perAssetClicks,
                         intoClipTimeline: clip
                     ))
                 }
@@ -83,7 +99,9 @@ enum CursorTrajectoryLoader {
         // contributes its own shifted sidecar slice. The compositor's
         // linear-bracket-pair scan expects a timeline-ordered master stream.
         let sorted = merged.sorted { $0.timelineTime < $1.timelineTime }
-        return sorted.isEmpty ? nil : sorted
+        return sorted.isEmpty
+            ? nil
+            : CursorData(samples: sorted, clickTimes: mergedClicks.sorted())
     }
 
     // MARK: - Helpers
@@ -143,6 +161,25 @@ enum CursorTrajectoryLoader {
                 centerX: sample.centerX,
                 centerY: sample.centerY
             )
+        }
+    }
+
+    /// Same source-range → timeline mapping as `shift`, for bare click
+    /// instants.
+    private static func shiftTimes(
+        _ times: [Double],
+        intoClipTimeline clip: Clip
+    ) -> [Double] {
+        let sourceStart = clip.sourceRange.start.seconds
+        let sourceEnd = clip.sourceRange.end.seconds
+        let sourceDuration = clip.sourceRange.duration.seconds
+        let timelineStart = clip.timelineRange.start.seconds
+        let timelineDuration = clip.timelineRange.duration.seconds
+        guard sourceDuration > 0, timelineDuration > 0 else { return [] }
+        return times.compactMap { time -> Double? in
+            guard time >= sourceStart, time <= sourceEnd else { return nil }
+            let sourceProgress = (time - sourceStart) / sourceDuration
+            return timelineStart + sourceProgress * timelineDuration
         }
     }
 }

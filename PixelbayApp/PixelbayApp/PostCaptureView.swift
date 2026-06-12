@@ -130,7 +130,7 @@ struct PostCaptureView: View {
         let bundle = ProjectBundle(url: result.bundleURL)
         do {
             let project = try store.loadProject(from: bundle)
-            let cursorTrajectory = await CursorTrajectoryLoader.load(
+            let cursorData = await CursorTrajectoryLoader.load(
                 for: project,
                 bundleURL: bundle.url
             )
@@ -143,7 +143,8 @@ struct PostCaptureView: View {
                     bundleURL: bundle.url,
                     builtinURL: { WallpaperCatalog.url(forBuiltinID: $0) }
                 ),
-                cursorTrajectory: cursorTrajectory,
+                cursorTrajectory: cursorData?.samples,
+                cursorClickTimes: cursorData?.clickTimes ?? [],
                 cursorSprite: SystemCursorSprite.make()
             )
             guard !Task.isCancelled else { return }

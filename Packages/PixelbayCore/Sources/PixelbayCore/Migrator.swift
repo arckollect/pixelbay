@@ -55,6 +55,7 @@ public struct MigrationRegistry: Sendable {
         Migrator2To3(),
         Migrator3To4(),
         Migrator4To5(),
+        Migrator5To6(),
     ])
 
     public func migrate(_ raw: [String: Any]) throws -> [String: Any] {

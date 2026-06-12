@@ -24,19 +24,20 @@ struct VertexOut {
 };
 
 // Uniforms shared across passes. Layer-local rect normalisation happens on
-// the CPU side (vertex inputs). Phase 3d swapped the radial zoom-blur for a
-// Gaussian veil driven by `screenBlurSigmaPx`; the trailing pads keep this
-// struct 16-byte aligned and matched in size with the Swift-side mirror.
+// the CPU side (vertex inputs). `uvOpen`/`uvClose` carry the TRUE temporal
+// motion blur: the camera transform at shutter-open / shutter-close as
+// source-UV remappings relative to the drawn rect (xy = scale, zw =
+// offset). Identity (1,1,0,0) on both collapses to a single sample. Struct
+// must stay 16-byte aligned and matched with the Swift-side mirror.
 struct LayerUniforms {
     float2 outputSizePx;        // total framebuffer in pixels
     float2 layerSizePx;         // this layer's rect in pixels
     float cornerRadiusPx;       // 0 disables rounded-rect masking
     float isCircle;             // 1 → mask to inscribed circle (overrides cornerRadius)
     float opacity;              // Phase 3b talking-head crossfade — multiplies final alpha
-    float screenBlurSigmaPx;    // Phase 3d Gaussian sigma in pixels; 0 = no blur
-    float2 motionBlurUV;        // directional pan-blur half-extent in layer UV; 0 = none
-    float _pad0;
-    float _pad1;
+    float screenBlurSigmaPx;    // Gaussian veil sigma in pixels; 0 = no blur
+    float4 uvOpen;              // shutter-open UV remap (scale.xy, offset.zw)
+    float4 uvClose;             // shutter-close UV remap (scale.xy, offset.zw)
 };
 
 // Phase 3a background pass.
@@ -173,48 +174,48 @@ static inline float gradientNoise(float2 px) {
     return fract(52.9829189 * fract(0.06711056 * px.x + 0.00583715 * px.y));
 }
 
-// Directional camera-pan motion blur, film-style: adaptive tap count,
-// per-pixel dithered tap phase (kills ghost banding), ±0.75 px per-tap
-// perpendicular jitter (soft cross-section), trapezoid weights (uniform
-// shutter with soft ends). `blurUV` is the kernel half-extent in layer UV.
-// Collapses to the Gaussian path when the extent is under a pixel.
-static inline float4 screenMotionBlurSample(
+// TRUE temporal motion blur: integrate the SAME source frame under the
+// camera transform interpolated from shutter-open to shutter-close —
+// exactly what a physical shutter records of a moving camera over a static
+// scene. The per-pixel transform delta yields directional streaks during
+// pans AND radial streaks during the zoom scale change, with intensity
+// derived from real camera velocity. Uniform tap weights = box shutter;
+// per-pixel dithered phase kills banding. Collapses to the Gaussian veil
+// path when the local delta is under a pixel (still camera).
+static inline float4 temporalBlurSample(
     texture2d<float, access::sample> tex,
     sampler s,
     float2 uv,
     float2 layerSizePx,
-    float2 blurUV,
+    float4 uvOpen,
+    float4 uvClose,
     float sigmaPx,
     float2 fragPx
 ) {
-    float extentPx = length(blurUV * layerSizePx);
+    float2 uvA = uv * uvOpen.xy + uvOpen.zw;
+    float2 uvB = uv * uvClose.xy + uvClose.zw;
+    float extentPx = length((uvB - uvA) * layerSizePx);
     if (extentPx < 0.75) {
         return screenBlurSample(tex, s, uv, layerSizePx, sigmaPx);
     }
-    int taps = clamp(int(extentPx / 2.5), 9, 31);
+    int taps = clamp(int(extentPx / 2.0), 9, 31);
     float noise = gradientNoise(fragPx);
-    float2 dirPx = normalize(blurUV * layerSizePx);
-    float2 perpUV = float2(-dirPx.y, dirPx.x) * 0.75 / layerSizePx;
     float4 acc = float4(0.0);
-    float wSum = 0.0;
     for (int i = 0; i < taps; ++i) {
-        float t = ((float(i) + noise) / float(taps)) * 2.0 - 1.0;
-        float w = saturate((1.0 - abs(t)) * 4.0);
-        float pj = fract(noise + float(i) * 0.61803398875) * 2.0 - 1.0;
-        acc += tex.sample(s, uv + blurUV * t + perpUV * pj) * w;
-        wSum += w;
+        float t = (float(i) + noise) / float(taps);
+        acc += tex.sample(s, mix(uvA, uvB, t));
     }
-    return acc / wSum;
+    return acc / float(taps);
 }
 
-// BGRA fragment: motion/Gaussian-veiled sample, optional alpha mask.
+// BGRA fragment: temporal/Gaussian-veiled sample, optional alpha mask.
 fragment float4 bgraFragment(
     VertexOut in [[stage_in]],
     texture2d<float, access::sample> tex [[texture(0)]],
     constant LayerUniforms &u [[buffer(0)]]
 ) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float4 c = screenMotionBlurSample(tex, s, in.texCoord, u.layerSizePx, u.motionBlurUV, u.screenBlurSigmaPx, in.position.xy);
+    float4 c = temporalBlurSample(tex, s, in.texCoord, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
     c.a *= layerAlphaMask(in, u) * u.opacity;
     return c;
 }
@@ -279,8 +280,8 @@ fragment float4 nv12Fragment(
     constant LayerUniforms &u [[buffer(0)]]
 ) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float4 yAcc = screenMotionBlurSample(yPlane, s, in.texCoord, u.layerSizePx, u.motionBlurUV, u.screenBlurSigmaPx, in.position.xy);
-    float4 cbcrAcc = screenMotionBlurSample(cbcrPlane, s, in.texCoord, u.layerSizePx, u.motionBlurUV, u.screenBlurSigmaPx, in.position.xy);
+    float4 yAcc = temporalBlurSample(yPlane, s, in.texCoord, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
+    float4 cbcrAcc = temporalBlurSample(cbcrPlane, s, in.texCoord, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
     float y = yAcc.r;
     float2 cbcr = cbcrAcc.rg;
 

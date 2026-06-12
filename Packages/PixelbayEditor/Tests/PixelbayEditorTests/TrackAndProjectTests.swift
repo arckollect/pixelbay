@@ -134,4 +134,20 @@ final class TrackAndProjectTests: XCTestCase {
         decoded = try JSONDecoder().decode(Project.self, from: data)
         XCTAssertEqual(decoded.layout.background, .gradient(from: gradientFrom, to: gradientTo))
     }
+
+    // MARK: - SetTuningSettings
+
+    func test_setTuningSettings_replacesProjectTuning_andInverseRestoresPrior() throws {
+        var (project, _) = EditorFixture.minimalSingleClip()
+        XCTAssertEqual(project.tuning, .default)
+
+        let tuning = TuningSettings(cameraTau: 0.55, settle: 0.9, deadzoneFraction: 0.1)
+        let inverse = try SetTuningSettingsCommand(newSettings: tuning).apply(to: &project)
+        XCTAssertEqual(project.tuning, tuning)
+
+        let inverseAsSet = try XCTUnwrap(inverse as? SetTuningSettingsCommand)
+        XCTAssertEqual(inverseAsSet.newSettings, .default)
+        _ = try inverse.apply(to: &project)
+        XCTAssertEqual(project.tuning, .default)
+    }
 }

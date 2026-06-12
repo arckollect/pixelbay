@@ -96,6 +96,7 @@ public final class PreviewPlayer {
         wallpaperSource: WallpaperSource? = nil,
         wallpaperImageProvider: WallpaperImageProvider? = nil,
         cursorTrajectory: [MouseTrajectorySample]? = nil,
+        cursorClickTimes: [Double] = [],
         cursorSprite: CursorSpriteData? = nil
     ) async {
         // Presentation-only fast path. If the composition-affecting structure
@@ -115,6 +116,7 @@ public final class PreviewPlayer {
                 screenTrackID: ctx.screenTrackID,
                 webcamTrackID: ctx.webcamTrackID,
                 cursorTrajectory: cursorTrajectory,
+                cursorClickTimes: cursorClickTimes,
                 cursorSprite: cursorSprite,
                 wallpaperSource: wallpaperSource,
                 wallpaperImageProvider: wallpaperImageProvider
@@ -147,6 +149,7 @@ public final class PreviewPlayer {
                 wallpaperSource: wallpaperSource,
                 wallpaperImageProvider: wallpaperImageProvider,
                 cursorTrajectory: cursorTrajectory,
+                cursorClickTimes: cursorClickTimes,
                 cursorSprite: cursorSprite,
                 // Live preview composites at a capped size — full UHD is
                 // export-only (ExportSheet builds its own composition).

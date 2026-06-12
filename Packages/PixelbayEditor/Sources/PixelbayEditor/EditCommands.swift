@@ -1219,6 +1219,28 @@ public struct SetCursorSettingsCommand: EditCommand {
     }
 }
 
+// MARK: - SetTuningSettings
+
+/// Replaces the project-wide motion tuning (camera feel, cursor-path
+/// smoothing, motion blur) wholesale. The Motion Tuning panel commits one
+/// command per slider release so the undo stack gets one entry per gesture;
+/// live drag updates preview state without going through the command stack.
+public struct SetTuningSettingsCommand: EditCommand {
+    public let displayName = "Change Motion Tuning"
+    public let newSettings: TuningSettings
+
+    public init(newSettings: TuningSettings) {
+        self.newSettings = newSettings
+    }
+
+    @discardableResult
+    public func apply(to project: inout Project) throws -> any EditCommand {
+        let previous = project.tuning
+        project.tuning = newSettings
+        return SetTuningSettingsCommand(newSettings: previous)
+    }
+}
+
 // MARK: - RationalTime arithmetic helpers (editor-internal)
 
 extension RationalTime {

@@ -194,116 +194,63 @@ final class EffectKeyframeTests: XCTestCase {
         XCTAssertEqual(kf.easeOut, EffectKeyframe.defaultZoomEaseOut)
     }
 
-    func test_zoomFollowDefaults_areSmoothAndAdjustable() {
-        var kf = EffectKeyframe(
+    func test_strength_transitionSoftness_stretchesTheTails() {
+        let kf = EffectKeyframe(
             kind: .zoom,
-            timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2))
+            timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2)),
+            easeIn: .seconds(1.0),
+            easeOut: .seconds(0)
         )
-        XCTAssertEqual(kf.zoomFollowSafeZoneFraction, 0.38, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomFollowMotionBlur, 0.30, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomFollowMaxAnchorSpeed, 1.30, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomFollowLookaheadSeconds, 0.072, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomFollowTauRelaxed, 0.190, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomFollowTauTight, 0.060, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomFollowAnticipationHalfWindow, 0.152, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomPanBlurShutterSeconds, 1.0 / 24.0, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomPanBlurMaxUV, 0.006, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomPanBlurThresholdSpeed, 1.32, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomPanBlurFullSpeed, 0.80, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomCenterHandoffSeconds, 0.343, accuracy: 1e-9)
-
-        kf.zoomFollowSafeZoneFraction = 0.42
-        kf.zoomFollowMotionBlur = 1.8
-        kf.zoomFollowMaxAnchorSpeed = 1.4
-        kf.zoomFollowLookaheadSeconds = 0.08
-        kf.zoomFollowTauRelaxed = 0.12
-        kf.zoomFollowTauTight = 0.05
-        kf.zoomFollowAnticipationHalfWindow = 0.3
-        kf.zoomPanBlurShutterSeconds = 1.0 / 40.0
-        kf.zoomPanBlurMaxUV = 0.04
-        kf.zoomPanBlurThresholdSpeed = 0.2
-        kf.zoomPanBlurFullSpeed = 0.9
-        kf.zoomCenterHandoffSeconds = 0.24
-        XCTAssertEqual(kf.zoomFollowSafeZoneFraction, 0.42, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomFollowMotionBlur, 1.8, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomFollowMaxAnchorSpeed, 1.4, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomFollowLookaheadSeconds, 0.08, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomFollowTauRelaxed, 0.12, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomFollowTauTight, 0.05, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomFollowAnticipationHalfWindow, 0.3, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomPanBlurShutterSeconds, 1.0 / 40.0, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomPanBlurMaxUV, 0.04, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomPanBlurThresholdSpeed, 0.2, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomPanBlurFullSpeed, 0.9, accuracy: 1e-9)
-        XCTAssertEqual(kf.zoomCenterHandoffSeconds, 0.24, accuracy: 1e-9)
-        XCTAssertEqual(kf.extras["zoomFollowSafeZoneFraction"], .double(0.42))
-        XCTAssertEqual(kf.extras["zoomFollowMotionBlur"], .double(1.8))
-        XCTAssertEqual(kf.extras["zoomFollowMaxAnchorSpeed"], .double(1.4))
-        XCTAssertEqual(kf.extras["zoomFollowLookaheadSeconds"], .double(0.08))
-        XCTAssertEqual(kf.extras["zoomFollowTauRelaxed"], .double(0.12))
-        XCTAssertEqual(kf.extras["zoomFollowTauTight"], .double(0.05))
-        XCTAssertEqual(kf.extras["zoomFollowAnticipationHalfWindow"], .double(0.3))
-        XCTAssertEqual(kf.extras["zoomPanBlurShutterSeconds"], .double(1.0 / 40.0))
-        XCTAssertEqual(kf.extras["zoomPanBlurMaxUV"], .double(0.04))
-        XCTAssertEqual(kf.extras["zoomPanBlurThresholdSpeed"], .double(0.2))
-        XCTAssertEqual(kf.extras["zoomPanBlurFullSpeed"], .double(0.9))
-        XCTAssertEqual(kf.extras["zoomCenterHandoffSeconds"], .double(0.24))
+        // Endpoints and the hold are unchanged at any softness.
+        XCTAssertEqual(kf.strength(at: 0, transitionSoftness: 1), 0, accuracy: 1e-12)
+        XCTAssertEqual(kf.strength(at: 1.5, transitionSoftness: 1), 1, accuracy: 1e-12)
+        // Early in the ease the softened curve sits BELOW the quintic
+        // (longer tail near 0); late in the ease it sits ABOVE (longer
+        // tail near 1). Softness 0 is bit-identical to the historic ramp.
+        XCTAssertLessThan(
+            kf.strength(at: 0.25, transitionSoftness: 1),
+            kf.strength(at: 0.25, transitionSoftness: 0),
+            "softness must linger near 0 early in the ease"
+        )
+        XCTAssertGreaterThan(
+            kf.strength(at: 0.75, transitionSoftness: 1),
+            kf.strength(at: 0.75, transitionSoftness: 0),
+            "softness must approach 1 sooner-but-gentler late in the ease"
+        )
+        XCTAssertEqual(
+            kf.strength(at: 0.4, transitionSoftness: 0),
+            kf.strength(at: 0.4),
+            accuracy: 1e-12
+        )
     }
 
-    func test_zoomFollowSettings_clampAndClearAtDefaults() {
-        var kf = EffectKeyframe(
-            kind: .zoom,
-            timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2))
-        )
-        kf.zoomFollowSafeZoneFraction = 99
-        kf.zoomFollowMotionBlur = -5
-        kf.zoomFollowMaxAnchorSpeed = 99
-        kf.zoomFollowLookaheadSeconds = -1
-        kf.zoomFollowTauRelaxed = 99
-        kf.zoomFollowTauTight = -1
-        kf.zoomFollowAnticipationHalfWindow = 99
-        kf.zoomPanBlurShutterSeconds = 99
-        kf.zoomPanBlurMaxUV = 99
-        kf.zoomPanBlurThresholdSpeed = -1
-        kf.zoomPanBlurFullSpeed = 99
-        kf.zoomCenterHandoffSeconds = 99
-        XCTAssertEqual(kf.zoomFollowSafeZoneFraction, EffectKeyframe.zoomFollowSafeZoneRange.upperBound)
-        XCTAssertEqual(kf.zoomFollowMotionBlur, EffectKeyframe.zoomFollowMotionBlurRange.lowerBound)
-        XCTAssertEqual(kf.zoomFollowMaxAnchorSpeed, EffectKeyframe.zoomFollowMaxAnchorSpeedRange.upperBound)
-        XCTAssertEqual(kf.zoomFollowLookaheadSeconds, EffectKeyframe.zoomFollowLookaheadSecondsRange.lowerBound)
-        XCTAssertEqual(kf.zoomFollowTauRelaxed, EffectKeyframe.zoomFollowTauRelaxedRange.upperBound)
-        XCTAssertEqual(kf.zoomFollowTauTight, EffectKeyframe.zoomFollowTauTightRange.lowerBound)
-        XCTAssertEqual(kf.zoomFollowAnticipationHalfWindow, EffectKeyframe.zoomFollowAnticipationHalfWindowRange.upperBound)
-        XCTAssertEqual(kf.zoomPanBlurShutterSeconds, EffectKeyframe.zoomPanBlurShutterSecondsRange.upperBound)
-        XCTAssertEqual(kf.zoomPanBlurMaxUV, EffectKeyframe.zoomPanBlurMaxUVRange.upperBound)
-        XCTAssertEqual(kf.zoomPanBlurThresholdSpeed, EffectKeyframe.zoomPanBlurThresholdSpeedRange.lowerBound)
-        XCTAssertEqual(kf.zoomPanBlurFullSpeed, EffectKeyframe.zoomPanBlurFullSpeedRange.upperBound)
-        XCTAssertEqual(kf.zoomCenterHandoffSeconds, EffectKeyframe.zoomCenterHandoffSecondsRange.upperBound)
-
-        kf.zoomFollowSafeZoneFraction = EffectKeyframe.defaultZoomFollowSafeZoneFraction
-        kf.zoomFollowMotionBlur = EffectKeyframe.defaultZoomFollowMotionBlur
-        kf.zoomFollowMaxAnchorSpeed = EffectKeyframe.defaultZoomFollowMaxAnchorSpeed
-        kf.zoomFollowLookaheadSeconds = EffectKeyframe.defaultZoomFollowLookaheadSeconds
-        kf.zoomFollowTauRelaxed = EffectKeyframe.defaultZoomFollowTauRelaxed
-        kf.zoomFollowTauTight = EffectKeyframe.defaultZoomFollowTauTight
-        kf.zoomFollowAnticipationHalfWindow = EffectKeyframe.defaultZoomFollowAnticipationHalfWindow
-        kf.zoomPanBlurShutterSeconds = EffectKeyframe.defaultZoomPanBlurShutterSeconds
-        kf.zoomPanBlurMaxUV = EffectKeyframe.defaultZoomPanBlurMaxUV
-        kf.zoomPanBlurThresholdSpeed = EffectKeyframe.defaultZoomPanBlurThresholdSpeed
-        kf.zoomPanBlurFullSpeed = EffectKeyframe.defaultZoomPanBlurFullSpeed
-        kf.zoomCenterHandoffSeconds = EffectKeyframe.defaultZoomCenterHandoffSeconds
-        XCTAssertNil(kf.extras["zoomFollowSafeZoneFraction"])
-        XCTAssertNil(kf.extras["zoomFollowMotionBlur"])
-        XCTAssertNil(kf.extras["zoomFollowMaxAnchorSpeed"])
-        XCTAssertNil(kf.extras["zoomFollowLookaheadSeconds"])
-        XCTAssertNil(kf.extras["zoomFollowTauRelaxed"])
-        XCTAssertNil(kf.extras["zoomFollowTauTight"])
-        XCTAssertNil(kf.extras["zoomFollowAnticipationHalfWindow"])
-        XCTAssertNil(kf.extras["zoomPanBlurShutterSeconds"])
-        XCTAssertNil(kf.extras["zoomPanBlurMaxUV"])
-        XCTAssertNil(kf.extras["zoomPanBlurThresholdSpeed"])
-        XCTAssertNil(kf.extras["zoomPanBlurFullSpeed"])
-        XCTAssertNil(kf.extras["zoomCenterHandoffSeconds"])
+    func test_retiredZoomFollowExtras_areTolerated() throws {
+        // Pre-v6 projects may carry the retired camera-spring keys in
+        // `extras` (zoomFollowTauRelaxed etc.). They must decode cleanly
+        // and survive a round-trip as inert data.
+        let json = """
+        {
+            "id": "kf-stale",
+            "kind": "zoom",
+            "timelineRange": {"start": {"value": 0, "timescale": 600}, "duration": {"value": 1200, "timescale": 600}},
+            "zoomFactor": 1.5,
+            "centerX": 0.5,
+            "centerY": 0.5,
+            "easeIn": {"value": 120, "timescale": 600},
+            "easeOut": {"value": 120, "timescale": 600},
+            "extras": {
+                "zoomFollowSafeZoneFraction": 0.42,
+                "zoomFollowTauRelaxed": 0.12,
+                "zoomFollowRebound": 0.72,
+                "zoomFollowPullAcceleration": 4.4
+            }
+        }
+        """
+        let decoded = try JSONDecoder().decode(EffectKeyframe.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.extras["zoomFollowTauRelaxed"], .double(0.12))
+        let reencoded = try JSONEncoder().encode(decoded)
+        let roundTripped = try JSONDecoder().decode(EffectKeyframe.self, from: reencoded)
+        XCTAssertEqual(roundTripped.extras["zoomFollowSafeZoneFraction"], .double(0.42))
     }
 
     func test_strength_returnsZeroOutsideRange() {
