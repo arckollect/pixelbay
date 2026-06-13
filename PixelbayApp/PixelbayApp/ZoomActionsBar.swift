@@ -14,7 +14,7 @@ import SwiftUI
 // Three actions:
 //   • Add Zoom at Playhead  — primary, always available (falls back to a
 //     centred 0.5/0.5 anchor when there's no screen recording).
-//   • From Clicks           — one zoom per logged click (needs a clicks sidecar).
+//   • From Pauses           — one zoom per cursor dwell (needs cursor telemetry).
 //   • From Gestures         — one zoom per recorded shake / circle / ⌃⌘Z mark.
 //
 // All generation glue (reading the clicks sidecar, loading the recording's
@@ -30,7 +30,7 @@ struct ZoomActionsBar: View {
     let onApply: (any EditCommand) -> Void
     let onSeek: (RationalTime) -> Void
 
-    @State private var isGeneratingClicks: Bool = false
+    @State private var isGeneratingPauses: Bool = false
     @State private var isGeneratingGestures: Bool = false
     @State private var isAddingZoom: Bool = false
     @State private var lastError: String?
@@ -45,12 +45,12 @@ struct ZoomActionsBar: View {
             addZoomButton
             HStack(spacing: Theme.Spacing.sm) {
                 generatorTile(
-                    title: "From Clicks",
-                    systemImage: "cursorarrow.click.2",
+                    title: "From Pauses",
+                    systemImage: "cursorarrow.motionlines",
                     tint: Theme.Color.effectZoomAuto,
-                    isBusy: isGeneratingClicks,
-                    help: disabledReason ?? "Insert one zoom keyframe per logged click."
-                ) { Task { await generateAutoZoomFromClicks() } }
+                    isBusy: isGeneratingPauses,
+                    help: disabledReason ?? "Insert zoom keyframes where the cursor pauses."
+                ) { Task { await generateAutoZoomFromPauses() } }
 
                 generatorTile(
                     title: "From Gestures",
@@ -163,7 +163,7 @@ struct ZoomActionsBar: View {
         }
     }
 
-    private var anyGenerating: Bool { isGeneratingClicks || isGeneratingGestures || isAddingZoom }
+    private var anyGenerating: Bool { isGeneratingPauses || isGeneratingGestures || isAddingZoom }
 
     // MARK: - Generate auto-zoom
 
@@ -220,41 +220,54 @@ struct ZoomActionsBar: View {
         return nil
     }
 
-    private func generateAutoZoomFromClicks() async {
+    private func generateAutoZoomFromPauses() async {
         guard !availableAutoZoomPairs.isEmpty else { return }
-        isGeneratingClicks = true
+        isGeneratingPauses = true
         lastError = nil
         lastSuccess = nil
-        defer { isGeneratingClicks = false }
+        defer { isGeneratingPauses = false }
 
-        let aggregated = await aggregateAcrossPairs { sidecar, naturalSize in
+        let aggregated = await aggregateAcrossPairs { sidecar, naturalSize -> ([AutoZoomClick], [MouseTrajectorySample]) in
             (
-                AutoZoomService.autoZoomClicks(from: sidecar, screenPixelSize: naturalSize),
+                [],
                 AutoZoomService.mouseTrajectory(from: sidecar, screenPixelSize: naturalSize)
             )
         }
 
-        if aggregated.points.isEmpty {
+        if aggregated.trajectory.isEmpty {
             lastError = aggregated.firstError
-                ?? "No usable clicks across this project's screen recordings."
+                ?? "No cursor telemetry across this project's screen recordings."
             return
         }
 
-        // Intent-scoring path. Trajectory passes through even when it spans
-        // multiple scenes — IntentScorer does only local velocity calc
-        // around each click.
-        let candidates = IntentScorer.score(
-            rawClicks: aggregated.points,
-            trajectory: aggregated.trajectory
+        let manualZoomRanges = project.effects
+            .filter { $0.kind == .zoom && $0.origin == .manualHotkey }
+            .map(\.timelineRange)
+        let duration = projectDuration ?? aggregated.trajectory.last?.timelineTime ?? 0
+        let defaultDuration = EffectKeyframe.defaultZoomEaseIn.seconds
+            + 1.8
+            + EffectKeyframe.defaultZoomEaseOut.seconds
+        let telemetry = aggregated.trajectory.map {
+            CursorTelemetryPoint(
+                timeMs: $0.timelineTime * 1000.0,
+                cx: $0.centerX,
+                cy: $0.centerY
+            )
+        }
+        let autoClicks = AutoZoomService.dwellAutoZoomClicks(
+            cursorTelemetry: telemetry,
+            totalDuration: duration,
+            existingRegions: manualZoomRanges,
+            defaultDuration: defaultDuration
         )
-        let autoClicks = IntentScorer.selectFiring(candidates)
 
         if autoClicks.isEmpty {
-            lastError = "No usable clicks (all filtered or before capture start)."
+            lastError = "No cursor pauses long enough for auto-zoom."
             return
         }
         onApply(GenerateAutoZoomFromClicksCommand(
             clicks: autoClicks,
+            timelineDuration: duration,
             mouseTrajectory: aggregated.trajectory.isEmpty ? nil : aggregated.trajectory
         ))
         lastSuccess = "Generated \(autoClicks.count) zoom keyframe\(autoClicks.count == 1 ? "" : "s")."

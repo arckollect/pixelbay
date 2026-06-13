@@ -127,15 +127,10 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         XCTAssertNil(result[1].trajectory)
     }
 
-    // Follow-cursor zooms route only the camera anchor through an elastic
-    // slack spring. The visible cursor stays on the raw capture path, while
-    // the zoom frame ignores tiny pointer wiggles inside the slack radius.
-    func test_applyCursorTrajectory_followCursor_smallMotionInsideSlackKeepsAnchorStill() {
-        // Cursor wanders gently within ±0.04 of the start position. The
-        // default slack is much wider than that at zoom 1.5, so this
-        // should not make the camera chase every small jitter.
-        let zoomFactor = 1.5
-        let deadHalf = TuningSettings.default.deadzoneFraction / 2.0 / zoomFactor
+    // Follow-cursor zooms route the camera anchor through the reference
+    // adaptive follow layer. Small motion is damped, but there is no hard
+    // deadzone: the camera naturally converges instead of freezing.
+    func test_applyCursorTrajectory_followCursor_smallMotionIsDampedButNotFrozen() {
         let input: [MouseTrajectorySample] = (0...20).map { i in
             MouseTrajectorySample(
                 timelineTime: 1.0 + 0.05 * Double(i),
@@ -151,24 +146,15 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         let trajectory = result[0].trajectory ?? []
         XCTAssertEqual(trajectory.count, input.count,
                        "all input samples lie inside the keyframe range — none should be dropped")
-        let initialX = trajectory[0].x
-        let initialY = trajectory[0].y
-        for (cursorSample, anchor) in zip(input, trajectory) {
-            XCTAssertLessThanOrEqual(abs(cursorSample.centerX - initialX), deadHalf + 1e-9)
-            XCTAssertLessThanOrEqual(abs(cursorSample.centerY - initialY), deadHalf + 1e-9)
-            XCTAssertEqual(anchor.x, initialX, accuracy: 1e-9)
-            XCTAssertEqual(anchor.y, initialY, accuracy: 1e-9)
-        }
+        XCTAssertEqual(trajectory[0].x, input[0].centerX, accuracy: 1e-9)
+        XCTAssertEqual(trajectory[0].y, input[0].centerY, accuracy: 1e-9)
+        XCTAssertNotEqual(trajectory.last!.x, trajectory[0].x)
+        let rawPeakTravel = input.map { hypot($0.centerX - input[0].centerX, $0.centerY - input[0].centerY) }.max() ?? 0
+        let followedPeakTravel = trajectory.map { hypot($0.x - trajectory[0].x, $0.y - trajectory[0].y) }.max() ?? 0
+        XCTAssertLessThan(followedPeakTravel, rawPeakTravel)
     }
 
-    // Bounded-float contract: a sustained move makes the anchor track the
-    // cursor with visible-frame bounded lag. Confirms the
-    // windowed slice IS being piped through anchorFollow, not stored raw.
-    func test_applyCursorTrajectory_followCursor_anchorTracksWithBoundedLagOnSustainedMotion() {
-        // Linear sweep across 0.4 norm-units over 2.0s. The follow camera
-        // trails the cursor, but remains inside the visible zoomed viewport.
-        let zoomFactor = 1.5
-        let visibleHalf = 0.48 / zoomFactor
+    func test_applyCursorTrajectory_followCursor_anchorTrailsSustainedMotion() {
         let input: [MouseTrajectorySample] = (0...40).map { i in
             MouseTrajectorySample(
                 timelineTime: 1.0 + 0.05 * Double(i),
@@ -186,14 +172,11 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         let finalLag = input.last!.centerX - trajectory.last!.x
         XCTAssertGreaterThan(finalLag, 0.0,
                              "anchor must trail the cursor after a sustained move")
-        XCTAssertLessThanOrEqual(finalLag, visibleHalf + 1e-9,
-                                 "anchor lag must keep the cursor visible")
+        XCTAssertLessThan(finalLag, input.last!.centerX - input.first!.centerX,
+                          "anchor should still make meaningful progress toward the cursor")
     }
 
     func test_applyCursorTrajectory_fastSweep_allowsReadableCameraTrail() {
-        let zoomFactor = 1.5
-        let oldTightSafeHalf = 0.30 / 2.0 / zoomFactor
-        let visibleHalf = 0.48 / zoomFactor
         let input: [MouseTrajectorySample] = (0...12).map { i in
             MouseTrajectorySample(
                 timelineTime: 1.0 + 0.025 * Double(i),
@@ -211,14 +194,13 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         let maxLag = zip(input, trajectory).map { cursor, anchor in
             abs(cursor.centerX - anchor.x)
         }.max() ?? 0
-        XCTAssertGreaterThan(maxLag, oldTightSafeHalf,
-                             "fast sweeps should be allowed to trail beyond the old tight follow window")
-        XCTAssertLessThanOrEqual(maxLag, visibleHalf + 1e-9,
-                                 "fast sweeps must keep the cursor visible")
+        XCTAssertGreaterThan(maxLag, 0.05,
+                             "fast sweeps should be visibly damped by adaptive follow")
+        XCTAssertLessThan(maxLag, 0.50,
+                          "the anchor should still move toward the cursor during a fast sweep")
     }
 
-    func test_applyCursorTrajectory_tuningSpeedLimitsCameraMovement() {
-        let tuning = TuningSettings(maxPanSpeed: 0.45)
+    func test_applyCursorTrajectory_usesReferenceFollowParamsInsteadOfProjectTuning() {
         let input: [MouseTrajectorySample] = (0...12).map { i in
             MouseTrajectorySample(
                 timelineTime: 1.0 + 0.025 * Double(i),
@@ -227,23 +209,44 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
             )
         }
         let unpinned = makeZoom(start: 1.0, duration: 0.3, anchorMode: .followCursor)
-        let result = PreviewCompositionBuilder.applyCursorTrajectory(
+        let defaultResult = PreviewCompositionBuilder.applyCursorTrajectory(
+            to: [unpinned],
+            cursorTrajectory: input
+        )[0].trajectory ?? []
+        let tunedResult = PreviewCompositionBuilder.applyCursorTrajectory(
             to: [unpinned],
             cursorTrajectory: input,
-            tuning: tuning
-        )
-        let trajectory = result[0].trajectory ?? []
-        for i in 1..<trajectory.count {
-            let dt = trajectory[i].t - trajectory[i - 1].t
-            let dx = trajectory[i].x - trajectory[i - 1].x
-            let dy = trajectory[i].y - trajectory[i - 1].y
-            let distance = (dx * dx + dy * dy).squareRoot()
-            XCTAssertLessThanOrEqual(
-                distance,
-                tuning.maxPanSpeed * dt + 1e-9,
-                "tuning.maxPanSpeed must cap the camera's pan speed"
+            tuning: TuningSettings(
+                cameraTau: 0.10,
+                settle: 1.0,
+                deadzoneFraction: 0.6,
+                edgeCushion: 1.0,
+                maxPanSpeed: 0.05
+            )
+        )[0].trajectory ?? []
+        XCTAssertEqual(tunedResult, defaultResult,
+                       "reference adaptive follow uses ZoomMotionConstants.autoFollowParams in both preview and export")
+    }
+
+    func test_applyCursorTrajectory_matchesAdaptiveFollowHelper() {
+        let input: [MouseTrajectorySample] = (0...20).map { i in
+            MouseTrajectorySample(
+                timelineTime: 1.0 + 0.05 * Double(i),
+                centerX: 0.20 + 0.40 * Double(i) / 20.0,
+                centerY: 0.50
             )
         }
+        let zoom = makeZoom(start: 1.0, duration: 1.0, anchorMode: .followCursor)
+        let result = PreviewCompositionBuilder.applyCursorTrajectory(
+            to: [zoom],
+            cursorTrajectory: input
+        )[0].trajectory ?? []
+        let windowed = MouseTrajectory.window(input, timelineRange: zoom.timelineRange)
+        let expected = MouseTrajectory.adaptiveFollow(
+            windowed,
+            params: ZoomMotionConstants.autoFollowParams
+        )
+        XCTAssertEqual(result, expected)
     }
 
     func test_applyCursorTrajectory_leavesKeyframeExtrasUntouched() {
@@ -266,72 +269,6 @@ final class ApplyCursorTrajectoryTests: XCTestCase {
         XCTAssertEqual(result[0].extras, extrasBefore,
                        "applyCursorTrajectory must not stamp tuning onto keyframes")
         XCTAssertNotNil(result[0].trajectory, "trajectory should still be re-sliced and solved")
-    }
-
-    func test_applyCursorTrajectory_highSettleCarriesMoreMomentumPastALanding() {
-        // Sweep right for 0.5 s, then hold for 1.5 s. A critically damped
-        // camera (settle = 0) approaches the landing point without passing
-        // it; an underdamped one (settle = 1) keeps momentum and drifts
-        // further toward/past the target before easing back — its furthest
-        // point must exceed the critically damped camera's.
-        let dt = 1.0 / 60.0
-        var input: [MouseTrajectorySample] = []
-        for i in 0...30 {
-            input.append(MouseTrajectorySample(
-                timelineTime: 1.0 + Double(i) * dt,
-                centerX: 0.25 + 0.40 * Double(i) / 30.0,
-                centerY: 0.5
-            ))
-        }
-        for i in 1...90 {
-            input.append(MouseTrajectorySample(
-                timelineTime: 1.0 + Double(30 + i) * dt,
-                centerX: 0.65,
-                centerY: 0.5
-            ))
-        }
-        let zoom = makeZoom(start: 1.0, duration: 2.0, anchorMode: .followCursor)
-        let lowSettle = PreviewCompositionBuilder.applyCursorTrajectory(
-            to: [zoom],
-            cursorTrajectory: input,
-            tuning: TuningSettings(settle: 0.0)
-        )[0].trajectory ?? []
-        let highSettle = PreviewCompositionBuilder.applyCursorTrajectory(
-            to: [zoom],
-            cursorTrajectory: input,
-            tuning: TuningSettings(settle: 1.0)
-        )[0].trajectory ?? []
-
-        let lowMaxX = lowSettle.map(\.x).max() ?? 0
-        let highMaxX = highSettle.map(\.x).max() ?? 0
-        XCTAssertGreaterThan(highMaxX, lowMaxX + 0.001,
-                             "higher settle should carry the camera further on landing (elastic drift-past)")
-    }
-
-    func test_applyCursorTrajectory_lowCameraTauCatchesUpFasterThanHigh() {
-        let input: [MouseTrajectorySample] = (0...60).map { i in
-            MouseTrajectorySample(
-                timelineTime: 1.0 + 2.0 * Double(i) / 60.0,
-                centerX: 0.20 + 0.55 * Double(i) / 60.0,
-                centerY: 0.50
-            )
-        }
-        let zoom = makeZoom(start: 1.0, duration: 2.0, anchorMode: .followCursor)
-        let heavy = PreviewCompositionBuilder.applyCursorTrajectory(
-            to: [zoom],
-            cursorTrajectory: input,
-            tuning: TuningSettings(cameraTau: 0.80)
-        )[0].trajectory ?? []
-        let light = PreviewCompositionBuilder.applyCursorTrajectory(
-            to: [zoom],
-            cursorTrajectory: input,
-            tuning: TuningSettings(cameraTau: 0.10)
-        )[0].trajectory ?? []
-
-        let heavyFinalLag = abs(input.last!.centerX - heavy.last!.x)
-        let lightFinalLag = abs(input.last!.centerX - light.last!.x)
-        XCTAssertLessThan(lightFinalLag, heavyFinalLag,
-                          "a lighter cameraTau should track the cursor more tightly")
     }
 
     func test_blendByZoomStrength_rawOutsideZooms_smoothedInsideHold() {

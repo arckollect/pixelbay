@@ -33,10 +33,9 @@ private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "Curso
 enum CursorTrajectoryLoader {
 
     /// The master cursor trajectory plus the timeline-time instants of
-    /// every recorded click. Click times feed the click-pinning stage of
-    /// the shared smoothed cursor path; recordings whose sidecars predate
-    /// click capture simply produce an empty `clickTimes` (no pinning —
-    /// graceful degradation).
+    /// every recorded click. The trajectory is the raw post-production input
+    /// for cursor-follow zooms; click times are retained for compatibility
+    /// with older smoothing/export call sites.
     struct CursorData {
         var samples: [MouseTrajectorySample]
         var clickTimes: [Double]

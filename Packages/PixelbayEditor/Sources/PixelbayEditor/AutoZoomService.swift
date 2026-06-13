@@ -163,6 +163,63 @@ public enum AutoZoomService {
         }
     }
 
+    /// Convert the recorded move stream to the reference zoom/follow
+    /// telemetry shape: milliseconds in project timeline time, normalized
+    /// coordinates. This is the post-production camera input; recording
+    /// itself only writes raw video plus cursor telemetry.
+    public static func cursorTelemetry(
+        from sidecar: ClicksSidecar,
+        screenPixelSize: CGSize
+    ) -> [CursorTelemetryPoint] {
+        mouseTrajectory(from: sidecar, screenPixelSize: screenPixelSize).map {
+            CursorTelemetryPoint(
+                timeMs: $0.timelineTime * 1000.0,
+                cx: $0.centerX,
+                cy: $0.centerY
+            )
+        }
+    }
+
+    /// Dwell-based auto-zoom suggestions, matching the reference detector.
+    /// Existing regions are treated as reserved spans so auto suggestions
+    /// never overlap user-authored/manual zooms.
+    public static func dwellAutoZoomSuggestions(
+        cursorTelemetry: [CursorTelemetryPoint],
+        totalDuration: Double,
+        existingRegions: [TimeRange],
+        defaultDuration: Double
+    ) -> [AutoZoomSuggestion] {
+        AutoZoomDwellDetector.buildAutoZoomSuggestions(
+            cursorTelemetry: cursorTelemetry,
+            totalMs: totalDuration * 1000.0,
+            existingRegions: existingRegions,
+            defaultDurationMs: defaultDuration * 1000.0
+        )
+    }
+
+    /// Convenience bridge for the existing keyframe-generation command:
+    /// each accepted dwell suggestion becomes an `AutoZoomClick` at the
+    /// suggestion span center with the dwell's averaged focus.
+    public static func dwellAutoZoomClicks(
+        cursorTelemetry: [CursorTelemetryPoint],
+        totalDuration: Double,
+        existingRegions: [TimeRange],
+        defaultDuration: Double
+    ) -> [AutoZoomClick] {
+        dwellAutoZoomSuggestions(
+            cursorTelemetry: cursorTelemetry,
+            totalDuration: totalDuration,
+            existingRegions: existingRegions,
+            defaultDuration: defaultDuration
+        ).map { suggestion in
+            AutoZoomClick(
+                timelineTime: (suggestion.span.start.seconds + suggestion.span.end.seconds) / 2.0,
+                centerX: suggestion.focus.cx,
+                centerY: suggestion.focus.cy
+            )
+        }
+    }
+
     /// Slice `master` to the samples whose `timelineTime` falls inside
     /// `timelineRange`. Thin forwarder onto `PixelbayCore.MouseTrajectory.window`
     /// — the type + helper migrated to Core so `PixelbayPlayback` can re-slice

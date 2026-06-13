@@ -148,19 +148,10 @@ final class PreviewCompositionTests: XCTestCase {
             preview.videoComposition?.instructions.first as? PixelbayCompositionInstruction
         )
 
-        // The shared path runs a light de-jitter EMA before the zero-phase
-        // smoothing, so slow motion is no longer bit-identical to raw —
-        // but the deviation must stay far below perception (the speed
-        // gate keeps the heavy smoothing disengaged).
-        XCTAssertEqual(instruction.cursorTrajectory.count, rawTrajectory.count)
-        for (out, raw) in zip(instruction.cursorTrajectory, rawTrajectory) {
-            XCTAssertEqual(out.timelineTime, raw.timelineTime, accuracy: 1e-9)
-            XCTAssertEqual(out.centerX, raw.centerX, accuracy: 0.005)
-            XCTAssertEqual(out.centerY, raw.centerY, accuracy: 0.005)
-        }
+        XCTAssertEqual(instruction.cursorTrajectory, rawTrajectory)
     }
 
-    func test_build_syntheticCursorInstructionPolishesFastInteriorMotion() async throws {
+    func test_build_syntheticCursorInstructionPreservesFastRawMotion() async throws {
         let screenURL = bundleURL.appendingPathComponent("media/screen.mov")
         try writeSilentVideo(to: screenURL, durationSeconds: 0.5, size: CGSize(width: 640, height: 360))
 
@@ -195,17 +186,16 @@ final class PreviewCompositionTests: XCTestCase {
             preview.videoComposition?.instructions.first as? PixelbayCompositionInstruction
         )
 
-        // Violent 0.1 → 0.9 → 0.2 whip inside 20 ms: the shared path
-        // collapses the amplitude (Screen Studio behavior) — the rendered
-        // spread must shrink dramatically, not just shift.
+        // The reference architecture records raw cursor telemetry and
+        // smooths the zoom target/camera at render time. The synthetic cursor
+        // should therefore preserve even fast raw motion instead of hiding it
+        // behind a pre-polished path.
         let rawSpread = (rawTrajectory.map(\.centerX).max() ?? 0)
             - (rawTrajectory.map(\.centerX).min() ?? 0)
         let outXs = instruction.cursorTrajectory.map(\.centerX)
         let outSpread = (outXs.max() ?? 0) - (outXs.min() ?? 0)
-        XCTAssertLessThan(instruction.cursorTrajectory[1].centerX, rawTrajectory[1].centerX,
-                          "the whip's peak should be pulled toward the window mean")
-        XCTAssertLessThan(outSpread, rawSpread * 0.5,
-                          "fast spam should collapse in amplitude, not just smooth")
+        XCTAssertEqual(instruction.cursorTrajectory, rawTrajectory)
+        XCTAssertEqual(outSpread, rawSpread, accuracy: 1e-12)
     }
 
     // MARK: - Multi-clip / Phase-2 honouring

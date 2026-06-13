@@ -54,14 +54,6 @@ struct EffectsInspector: View {
     @State private var didCopyTuning = false
     @State private var previewCursorScale: Double?
     @State private var previewCursorZoomBoost: Double?
-    @State private var previewCursorVelocityBoost: Double?
-    @State private var previewCursorVelocityLow: Double?
-    @State private var previewCursorVelocityHigh: Double?
-    @State private var previewCursorBlurLow: Double?
-    @State private var previewCursorBlurHigh: Double?
-    @State private var previewCursorShutterMin: Double?
-    @State private var previewCursorShutterMax: Double?
-    @State private var previewCursorBlurCap: Double?
 
     private var sortedKeyframes: [EffectKeyframe] {
         project.effects.sorted { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
@@ -260,16 +252,14 @@ struct EffectsInspector: View {
 
     // MARK: - Motion Tuning
 
-    /// The raw tuning panel: every slider binds 1:1 onto one
-    /// `TuningSettings` field, and every field is authoritative — nothing
-    /// downstream resolves or overwrites these values. "Copy Values" puts a
-    /// Swift literal of the current settings on the pasteboard so a feel
-    /// worth keeping can be hardcoded as the new defaults.
+    /// Reference-style motion controls. The zoom follow constants now live in
+    /// `ZoomMotionConstants`; the inspector only exposes the authored zoom
+    /// transition and the two blur amounts that remain user-facing.
     private var motionTuningSection: some View {
         let tuning = previewTuning ?? project.tuning
         return VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             HStack(spacing: Theme.Spacing.sm) {
-                Text("Motion Tuning")
+                Text("Motion")
                     .font(Theme.Font.caption)
                     .foregroundStyle(Theme.Color.textSecondary)
                 Spacer()
@@ -281,54 +271,21 @@ struct EffectsInspector: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(Theme.Color.textTertiary)
-                    .help("Reset all motion tuning to defaults")
+                    .help("Reset motion settings")
                 }
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(project.tuning.swiftLiteral, forType: .string)
-                    withAnimation(.easeOut(duration: 0.15)) { didCopyTuning = true }
-                    Task {
-                        try? await Task.sleep(nanoseconds: 1_200_000_000)
-                        withAnimation(.easeIn(duration: 0.3)) { didCopyTuning = false }
-                    }
-                } label: {
-                    Image(systemName: didCopyTuning ? "checkmark" : "doc.on.doc")
-                        .foregroundStyle(didCopyTuning ? Theme.Color.accent : Theme.Color.textTertiary)
-                }
-                .buttonStyle(.plain)
-                .help("Copy values as a Swift literal")
             }
 
-            tuningGroup("Camera Feel") {
-                tuningSlider("Camera Weight", tuning, \.cameraTau, TuningSettings.cameraTauRange) { msText($0) }
-                tuningSlider("Settle", tuning, \.settle, TuningSettings.settleRange) { percentText($0) }
-                tuningSlider("Deadzone", tuning, \.deadzoneFraction, TuningSettings.deadzoneFractionRange,
-                             onDrag: { onFollowSafeZonePreview($0) }) { percentText($0) }
-                tuningSlider("Max Pan Speed", tuning, \.maxPanSpeed, TuningSettings.maxPanSpeedRange) {
-                    String(format: "%.2f/s", $0)
-                }
-                tuningSlider("Anticipation", tuning, \.lookaheadSeconds, TuningSettings.lookaheadSecondsRange) { msText($0) }
-            }
-
-            tuningGroup("Cursor Path") {
-                tuningSlider("Path Smoothness", tuning, \.pathWindowSeconds, TuningSettings.pathWindowSecondsRange) { msText($0) }
-                tuningSlider("Travel Collapse", tuning, \.travelCollapse, TuningSettings.travelCollapseRange) { percentText($0) }
-                tuningSlider("Click Snap", tuning, \.clickSnapWindow, TuningSettings.clickSnapWindowRange) { msText($0) }
-                smoothingScopePicker(tuning)
+            tuningGroup("Zoom") {
+                tuningSlider("Transition Softness", tuning, \.transitionSoftness, TuningSettings.transitionSoftnessRange) { percentText($0) }
             }
 
             tuningGroup("Motion Blur") {
-                tuningSlider("Shutter Angle", tuning, \.shutterAngle, TuningSettings.shutterAngleRange) {
-                    String(format: "%d°", Int($0.rounded()))
+                tuningSlider("Screen", tuning, \.blurStrength, TuningSettings.blurStrengthRange) {
+                    $0 <= 0.000_5 ? "Off" : String(format: "%.2f", $0)
                 }
-                tuningSlider("Blur Strength", tuning, \.blurStrength, TuningSettings.blurStrengthRange) {
-                    String(format: "%.2f×", $0)
+                tuningSlider("Cursor", tuning, \.cursorBlur, TuningSettings.cursorBlurRange) {
+                    $0 <= 0.000_5 ? "Off" : percentText($0)
                 }
-                tuningSlider("Cursor Blur", tuning, \.cursorBlur, TuningSettings.cursorBlurRange) { percentText($0) }
-            }
-
-            tuningGroup("Transition") {
-                tuningSlider("Transition Softness", tuning, \.transitionSoftness, TuningSettings.transitionSoftnessRange) { percentText($0) }
             }
         }
     }
@@ -465,14 +422,6 @@ struct EffectsInspector: View {
             Group {
                 cursorScaleSlider
                 cursorZoomBoostSlider
-                cursorVelocityBoostSlider
-                cursorVelocityLowSlider
-                cursorVelocityHighSlider
-                cursorBlurLowSlider
-                cursorBlurHighSlider
-                cursorShutterMinSlider
-                cursorShutterMaxSlider
-                cursorBlurCapSlider
             }
             .disabled(!cursorSettings.isEnabled)
             .opacity(cursorSettings.isEnabled ? 1 : 0.4)
@@ -508,142 +457,6 @@ struct EffectsInspector: View {
             commit: { final in
                 var next = cursorSettings
                 next.zoomScaleBoostPerZoomUnit = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private var cursorVelocityBoostSlider: some View {
-        cursorSettingSlider(
-            title: "Speed Size Boost",
-            liveValue: previewCursorVelocityBoost ?? cursorSettings.velocityScaleBoost,
-            committedValue: cursorSettings.velocityScaleBoost,
-            range: CursorSettings.velocityScaleBoostRange,
-            valueText: { String(format: "%.2f×", $0) },
-            currentPreview: { previewCursorVelocityBoost },
-            setPreview: { previewCursorVelocityBoost = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.velocityScaleBoost = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private var cursorVelocityLowSlider: some View {
-        cursorSettingSlider(
-            title: "Speed Boost Start",
-            liveValue: previewCursorVelocityLow ?? cursorSettings.velocityScaleLow,
-            committedValue: cursorSettings.velocityScaleLow,
-            range: CursorSettings.velocityScaleLowRange,
-            valueText: { String(format: "%.2f/s", $0) },
-            currentPreview: { previewCursorVelocityLow },
-            setPreview: { previewCursorVelocityLow = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.velocityScaleLow = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private var cursorVelocityHighSlider: some View {
-        cursorSettingSlider(
-            title: "Speed Boost Full",
-            liveValue: previewCursorVelocityHigh ?? cursorSettings.velocityScaleHigh,
-            committedValue: cursorSettings.velocityScaleHigh,
-            range: CursorSettings.velocityScaleHighRange,
-            valueText: { String(format: "%.2f/s", $0) },
-            currentPreview: { previewCursorVelocityHigh },
-            setPreview: { previewCursorVelocityHigh = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.velocityScaleHigh = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private var cursorBlurLowSlider: some View {
-        cursorSettingSlider(
-            title: "Blur Start Speed",
-            liveValue: previewCursorBlurLow ?? cursorSettings.blurSpeedLow,
-            committedValue: cursorSettings.blurSpeedLow,
-            range: CursorSettings.blurSpeedLowRange,
-            valueText: { String(format: "%.2f/s", $0) },
-            currentPreview: { previewCursorBlurLow },
-            setPreview: { previewCursorBlurLow = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.blurSpeedLow = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private var cursorBlurHighSlider: some View {
-        cursorSettingSlider(
-            title: "Blur Full Speed",
-            liveValue: previewCursorBlurHigh ?? cursorSettings.blurSpeedHigh,
-            committedValue: cursorSettings.blurSpeedHigh,
-            range: CursorSettings.blurSpeedHighRange,
-            valueText: { String(format: "%.2f/s", $0) },
-            currentPreview: { previewCursorBlurHigh },
-            setPreview: { previewCursorBlurHigh = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.blurSpeedHigh = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private var cursorShutterMinSlider: some View {
-        cursorSettingSlider(
-            title: "Min Shutter",
-            liveValue: previewCursorShutterMin ?? cursorSettings.blurShutterMin,
-            committedValue: cursorSettings.blurShutterMin,
-            range: CursorSettings.blurShutterMinRange,
-            valueText: shutterText,
-            currentPreview: { previewCursorShutterMin },
-            setPreview: { previewCursorShutterMin = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.blurShutterMin = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private var cursorShutterMaxSlider: some View {
-        cursorSettingSlider(
-            title: "Max Shutter",
-            liveValue: previewCursorShutterMax ?? cursorSettings.blurShutterMax,
-            committedValue: cursorSettings.blurShutterMax,
-            range: CursorSettings.blurShutterMaxRange,
-            valueText: shutterText,
-            currentPreview: { previewCursorShutterMax },
-            setPreview: { previewCursorShutterMax = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.blurShutterMax = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private var cursorBlurCapSlider: some View {
-        cursorSettingSlider(
-            title: "Trail Cap",
-            liveValue: previewCursorBlurCap ?? cursorSettings.blurMaxUV,
-            committedValue: cursorSettings.blurMaxUV,
-            range: CursorSettings.blurMaxUVRange,
-            valueText: { String(format: "%.2f sprite", $0) },
-            currentPreview: { previewCursorBlurCap },
-            setPreview: { previewCursorBlurCap = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.blurMaxUV = final
                 onCursorChange(next)
             }
         )

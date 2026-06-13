@@ -241,24 +241,13 @@ public enum PreviewCompositionBuilder {
         } else {
             cursorMaster = []
         }
-        // THE shared cursor path (Screen Studio architecture): one heavily-
-        // smoothable, click-pinned, amplitude-collapsing rewrite of the raw
-        // recording, consumed by BOTH the rendered cursor sprite and the
-        // zoom camera's target. The camera never sees violent raw motion —
-        // the input is tamed upstream, which is what makes the follow feel
-        // effortless instead of panicky on fast sweeps.
-        let sharedPath: [MouseTrajectorySample] = cursorMaster.isEmpty
-            ? []
-            : MouseTrajectory.clickPinnedSmoothed(
-                MouseTrajectory.spriteSmoothed(cursorMaster),  // light de-jitter first
-                windowSeconds: project.tuning.pathWindowSeconds,
-                travelCollapse: project.tuning.travelCollapse,
-                clickTimes: cursorClickTimes,
-                clickSnapWindow: project.tuning.clickSnapWindow
-            )
+        // Reference architecture: recording stores the raw cursor telemetry;
+        // zoom follow resolves and smooths it at render time. Do not rewrite
+        // the path up front with Pixelbay-specific path-taming knobs, or the
+        // camera no longer feels like the OpenScreen reference.
         let effects = applyCursorTrajectory(
             to: project.effects,
-            cursorTrajectory: sharedPath.isEmpty ? nil : sharedPath,
+            cursorTrajectory: cursorMaster.isEmpty ? nil : cursorMaster,
             tuning: project.tuning
         )
         // Phase 3c — only enable the synthetic cursor pass when the screen
@@ -267,25 +256,7 @@ public enum PreviewCompositionBuilder {
         let cursorSyntheticallyRendered = project.assets.contains { asset in
             asset.kind == .display && asset.cursorRenderedSynthetically
         }
-        // Sprite path scope: `.fullRecording` renders the smoothed path
-        // everywhere; `.zoomsOnly` keeps the cursor true to the raw
-        // recording outside zoom segments, blending the stylized path in
-        // with each zoom's strength.
-        let cursorTrajectoryForRender: [MouseTrajectorySample]
-        if cursorSyntheticallyRendered {
-            switch project.tuning.smoothingScope {
-            case .fullRecording:
-                cursorTrajectoryForRender = sharedPath
-            case .zoomsOnly:
-                cursorTrajectoryForRender = blendByZoomStrength(
-                    raw: cursorMaster,
-                    smoothed: sharedPath,
-                    effects: project.effects
-                )
-            }
-        } else {
-            cursorTrajectoryForRender = []
-        }
+        let cursorTrajectoryForRender = cursorSyntheticallyRendered ? cursorMaster : []
         return makeVideoComposition(
             duration: duration,
             outputSize: outputSize,
@@ -522,31 +493,29 @@ public enum PreviewCompositionBuilder {
     // MARK: - Helpers
 
     /// Replace each `.zoom` keyframe's stored `trajectory` slice with a
-    /// fresh slice taken from the (pre-smoothed) master cursor trajectory
+    /// fresh slice taken from the raw master cursor trajectory
     /// against the keyframe's CURRENT timeline range. This is what makes
     /// "drag the right edge to extend" actually extend cursor-follow —
     /// the slice baked in at generate-time only covers the original
     /// range, so without re-slicing the evaluator clamps to the last
     /// stored sample for the extended portion.
     ///
-    /// `buildVideoComposition()` passes THE shared smoothed cursor path
-    /// here — the same click-pinned, amplitude-collapsed path the rendered
-    /// sprite consumes. Camera and cursor agree by construction; the spring
-    /// below adds the camera's weight/lag on top of an already-tame input.
+    /// `buildVideoComposition()` passes the raw recorded cursor telemetry
+    /// here. The cursor-follow keyframe receives a keyframe-local slice, and
+    /// the reference adaptive-follow layer smooths that target in content
+    /// time before the compositor spring smooths the final camera transform.
     ///
-    /// **Camera glide.** After windowing each cursor-follow keyframe's
-    /// slice, it is routed through `MouseTrajectory.glideFollow` — a
-    /// constant-weight spring with a true deadzone, soft full recenter,
-    /// settle-controlled damping, and an emergency visible-frame clamp.
+    /// **Camera follow.** After windowing each cursor-follow keyframe's
+    /// slice, it is routed through `MouseTrajectory.adaptiveFollow` — the
+    /// reference distance-adaptive, frame-rate-independent cursor-follow
+    /// layer. Preview and export both build through this same composition
+    /// path, so they share `ZoomMotionConstants.autoFollowParams`.
     ///
     /// Pinned (gesture) keyframes still short-circuit before this stage —
     /// they want a locked anchor, not a slack follow.
     ///
-    /// Motion parameters come from `tuning` (the project-wide
-    /// `TuningSettings`) and are passed straight into the solver — nothing
-    /// is stamped onto the keyframes. The retired `ZoomFollowStyle` resolver
-    /// used to overwrite per-keyframe values here on every rebuild, which is
-    /// why the old advanced sliders never had any effect.
+    /// The follow parameters are the shared OpenScreen constants in
+    /// `ZoomMotionConstants`, so preview and export do not diverge.
     ///
     /// Non-zoom and pinned keyframes pass through untouched. When
     /// `cursorTrajectory` is nil or empty, cursor-follow zooms keep their
@@ -591,28 +560,9 @@ public enum PreviewCompositionBuilder {
                 next.trajectory = windowed
                 return next
             }
-            // The zoom camera uses slack + elastic tension. Small cursor
-            // movement inside the slack radius should not make the camera
-            // chase jitter; larger movement stretches a soft bungee before
-            // the emergency visible-frame clamp ever has to intervene.
-            //
-            // The spring's target is the offline ANTICIPATED path — a
-            // forward-biased window average of the cursor's real future
-            // (rendering is post-hoc, so the future is known). This replaced
-            // the old velocity-extrapolated, decel-gated lookahead: the
-            // window average leads sweeps, corner-cuts direction changes,
-            // and converges onto landing points by construction, while the
-            // emergency visible-frame clamp inside anchorFollow still keys
-            // off the real cursor so anticipation can never push it out of
-            // frame.
-            let followed = MouseTrajectory.glideFollow(
+            let followed = MouseTrajectory.adaptiveFollow(
                 windowed,
-                zoomFactor: next.zoomFactor,
-                cameraTau: tuning.cameraTau,
-                settle: tuning.settle,
-                deadzoneFraction: tuning.deadzoneFraction,
-                maxPanSpeed: tuning.maxPanSpeed,
-                lookaheadSeconds: tuning.lookaheadSeconds
+                params: ZoomMotionConstants.autoFollowParams
             )
             next.trajectory = followed
             return next

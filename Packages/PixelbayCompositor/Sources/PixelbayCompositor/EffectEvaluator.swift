@@ -9,11 +9,9 @@ import PixelbayCore
 //
 // Per-frame contract:
 //   - Walk the keyframe array, skip those whose strength(at: t) is 0.
-//   - For .zoom: multiply the screen rect by `1 + (zoomFactor - 1) * s`,
-//     then position the rect so (centerX, centerY) lands at the visual
-//     centre of the original screen rect — clamped so the larger rect
-//     still fully covers the original (no black gaps at the edges).
-//     Equivalent to CSS object-fit: cover with a focal point.
+//   - For .zoom: compute the OpenScreen-style focus transform from the
+//     keyframe's cursor focus, zoom factor, and animated progress. The
+//     compositor then spring-smooths that per-frame camera target.
 //   - For .talkingHeadSwap: the webcam rect is reparented onto the screen
 //     rect with `webcamOpacity = s`, so the webcam crossfades in on top of
 //     the still-rendered screen layer as the keyframe's strength ramps
@@ -136,21 +134,6 @@ public enum EffectEvaluator {
         return SIMD4<Float>(Float(scaleX), Float(scaleY), Float(offsetX), Float(offsetY))
     }
 
-    // Edge-aware framing constants. When the raw anchor sits inside the
-    // 15 % `deadzone` margin, `frameAnchor` blends it toward the screen
-    // centre so the cursor doesn't slide all the way into a corner of the
-    // zoomed frame; a deep-corner anchor additionally backs the zoom factor
-    // off. The hard clamp below stays as a safety net.
-    private static let edgeDeadzone: Double = 0.15
-    private static let edgeBlendStrength: Double = 0.6
-    private static let cornerCutoff: Double = 0.08
-    private static let cornerFactorScale: Double = 0.7
-    /// Short centre handoff after ease-in. The zoom scale reaches 100% at the
-    /// end of the ease window; if the follow trajectory moved while the centre
-    /// was locked, jumping to that trajectory on the next frame reads as a
-    /// last-second placement snap. Blend the focal point onto the live path
-    /// over a handful of frames instead.
-
     private static func applyZoom(
         _ kf: EffectKeyframe,
         strength: Double,
@@ -162,128 +145,69 @@ public enum EffectEvaluator {
 
         let screen = layout.screen
         let center = zoomCenter(for: kf, atTime: t)
-        let rawCx = max(0, min(1, center.x))
-        let rawCy = max(0, min(1, center.y))
-        // Edge-blending only applies to STATIC anchors (pinned-gesture marks,
-        // single-click auto-zooms with no trajectory). Cursor-following
-        // zooms keep the raw anchor — the natural clamp below produces the
-        // snap-to-edge framing that keeps the cursor visible at viewport
-        // edges. Blending toward centre on cursor-follow would shift the
-        // rect just inside the clamp and render the cursor sprite outside
-        // the visible viewport.
-        let isCursorFollow = kf.anchorMode != .pinned
-            && (kf.trajectory?.isEmpty == false)
-        let (cx, cy, factorAtFull): (Double, Double, CGFloat)
-        if isCursorFollow {
-            (cx, cy, factorAtFull) = (rawCx, rawCy, CGFloat(factorAtFullStrength))
-        } else {
-            (cx, cy, factorAtFull) = frameAnchor(rawCx: rawCx, rawCy: rawCy, baseFactor: CGFloat(factorAtFullStrength))
-        }
-
-        // currentFactor must use the (possibly corner-backed-off) factorAtFull,
-        // not the raw zoomFactor — otherwise the deep-corner backoff is
-        // silently overridden by the linear strength ramp.
-        let currentFactor = 1.0 + (Double(factorAtFull) - 1.0) * strength
-        guard currentFactor > 1.0001 else { return layout }
-
-        // Phase 3d — interpolate the cursor's screen position, not the rect
-        // origin. The old path applied `currentFactor` to the rect size
-        // then clamped the origin to fit the viewport; at low zoom factors
-        // (early in ease-in) the clamp was so tight that even a "centred"
-        // computation barely moved the cursor's screen position — the
-        // cursor would stay near its pre-zoom location until the rect grew
-        // enough to loosen the clamp, then "snap" toward the framed
-        // position. With this lerp the cursor glides smoothly from its
-        // natural unzoomed screen position to its fully-framed position
-        // over the ease curve.
-        //
-        // 1. Compute the cursor's screen position at FULL zoom (where it
-        //    lands at strength=1, fully clamped to keep the rect inside
-        //    the viewport).
-        let framedWidth = screen.size.width * factorAtFull
-        let framedHeight = screen.size.height * factorAtFull
-        let viewportCenterX = screen.minX + screen.size.width / 2
-        let viewportCenterY = screen.minY + screen.size.height / 2
-        let framedUnclampedOriginX = viewportCenterX - framedWidth * CGFloat(cx)
-        let framedUnclampedOriginY = viewportCenterY - framedHeight * CGFloat(cy)
-        let framedMinOriginX = screen.maxX - framedWidth
-        let framedMinOriginY = screen.maxY - framedHeight
-        let framedOriginX = max(framedMinOriginX, min(screen.minX, framedUnclampedOriginX))
-        let framedOriginY = max(framedMinOriginY, min(screen.minY, framedUnclampedOriginY))
-        let framedCursorX = framedOriginX + framedWidth * CGFloat(cx)
-        let framedCursorY = framedOriginY + framedHeight * CGFloat(cy)
-
-        // 2. Natural cursor position at strength=0 (no zoom): cursor sits
-        //    at (cx, cy) within the original screen rect.
-        let naturalCursorX = screen.minX + screen.size.width * CGFloat(cx)
-        let naturalCursorY = screen.minY + screen.size.height * CGFloat(cy)
-
-        // 3. Lerp via the keyframe's eased strength.
-        let s = CGFloat(strength)
-        let currentCursorX = naturalCursorX + (framedCursorX - naturalCursorX) * s
-        let currentCursorY = naturalCursorY + (framedCursorY - naturalCursorY) * s
-
-        // 4. Size the rect at currentFactor and place it so the cursor
-        //    lands at the interpolated screen position. Apply the safe-
-        //    coverage clamp as a no-op safety net (it shouldn't bite at
-        //    strength=0 or strength=1 by construction; intermediate
-        //    strengths stay inside the convex hull of those endpoints).
-        let newWidth = screen.size.width * CGFloat(currentFactor)
-        let newHeight = screen.size.height * CGFloat(currentFactor)
-        let unclampedOriginX = currentCursorX - newWidth * CGFloat(cx)
-        let unclampedOriginY = currentCursorY - newHeight * CGFloat(cy)
-        let minOriginX = screen.maxX - newWidth
-        let minOriginY = screen.maxY - newHeight
-        let newOriginX = max(minOriginX, min(screen.minX, unclampedOriginX))
-        let newOriginY = max(minOriginY, min(screen.minY, unclampedOriginY))
+        let focus = clampFocusToScale(
+            x: center.x,
+            y: center.y,
+            zoomScale: factorAtFullStrength
+        )
+        let transform = computeReferenceZoomTransform(
+            stageSize: layout.outputSize,
+            baseScreen: screen,
+            zoomScale: factorAtFullStrength,
+            progress: strength,
+            focusX: focus.x,
+            focusY: focus.y
+        )
 
         var next = layout
         next.screen = LayerRect(
-            origin: CGPoint(x: newOriginX, y: newOriginY),
-            size: CGSize(width: newWidth, height: newHeight)
+            origin: CGPoint(
+                x: screen.origin.x * CGFloat(transform.scale) + CGFloat(transform.x),
+                y: screen.origin.y * CGFloat(transform.scale) + CGFloat(transform.y)
+            ),
+            size: CGSize(
+                width: screen.size.width * CGFloat(transform.scale),
+                height: screen.size.height * CGFloat(transform.scale)
+            )
         )
         return next
     }
 
-    /// Edge-aware anchor blending: when the raw anchor sits in the 15 %
-    /// deadzone near an edge, pull it toward the screen centre with strength
-    /// 0.6 at the very edge tapering to 0 at the deadzone boundary. In a
-    /// deep corner (within 8 % on both axes) additionally back the zoom
-    /// factor off by `cornerFactorScale`. Without this, a corner click would
-    /// hit the hard clamp and the cursor would visibly slide to a corner of
-    /// the zoomed frame; with it, the cursor stays near (not exactly at)
-    /// frame centre and the framing feels deliberate.
-    private static func frameAnchor(
-        rawCx: Double,
-        rawCy: Double,
-        baseFactor: CGFloat
-    ) -> (cx: Double, cy: Double, factor: CGFloat) {
-        func axisBlend(_ v: Double) -> Double {
-            let dEdge = min(v, 1 - v)
-            guard dEdge < edgeDeadzone else { return v }
-            let t = dEdge / edgeDeadzone           // 1 at boundary, 0 at edge
-            let pull = edgeBlendStrength * (1 - t) // 0 outside, 0.6 at edge
-            return v + (0.5 - v) * pull
-        }
-        let cx = axisBlend(rawCx)
-        let cy = axisBlend(rawCy)
-        let inCornerX = min(rawCx, 1 - rawCx) < cornerCutoff
-        let inCornerY = min(rawCy, 1 - rawCy) < cornerCutoff
-        let factor = (inCornerX && inCornerY)
-            ? max(1.0, 1.0 + (baseFactor - 1.0) * cornerFactorScale)
-            : baseFactor
-        return (cx, cy, factor)
+    private static func clampFocusToScale(
+        x: Double,
+        y: Double,
+        zoomScale: Double
+    ) -> (x: Double, y: Double) {
+        let margin = min(0.5, 1.0 / (2.0 * max(1.0, zoomScale)))
+        return (
+            x: min(max(x, margin), 1.0 - margin),
+            y: min(max(y, margin), 1.0 - margin)
+        )
     }
 
-    /// Per-frame zoom centre: the LIVE camera path, sampled at `t` — during
-    /// the ease windows too. The zoom-in tracks the (already buttery)
-    /// glide-follow camera as it ramps instead of freezing at the trigger
-    /// point and snapping to the live path afterwards; the old ease-lock +
-    /// centre-handoff machinery existed to hide wobble from near-raw
-    /// trajectories, which the shared click-pinned smoothed path and the
-    /// constant-weight camera spring eliminated at the source. Ease-out
-    /// glides the same way: the trajectory's last sample (where the camera
-    /// came to rest) holds the centre while the rect shrinks.
+    private static func computeReferenceZoomTransform(
+        stageSize: CGSize,
+        baseScreen: LayerRect,
+        zoomScale: Double,
+        progress: Double,
+        focusX: Double,
+        focusY: Double
+    ) -> AppliedZoomTransform {
+        let p = min(1.0, max(0.0, progress))
+        let focusStageX = Double(baseScreen.origin.x + baseScreen.size.width * CGFloat(focusX))
+        let focusStageY = Double(baseScreen.origin.y + baseScreen.size.height * CGFloat(focusY))
+        let stageCenterX = Double(stageSize.width) / 2.0
+        let stageCenterY = Double(stageSize.height) / 2.0
+        let scale = 1.0 + (zoomScale - 1.0) * p
+        let finalX = stageCenterX - focusStageX * zoomScale
+        let finalY = stageCenterY - focusStageY * zoomScale
+        return AppliedZoomTransform(scale: scale, x: finalX * p, y: finalY * p)
+    }
+
+    /// Per-frame zoom centre: the cursor-follow path, sampled at `t` during
+    /// the ease windows too. The target focus is already distance-adaptive
+    /// and frame-rate-independent; the compositor's zoom spring then removes
+    /// velocity discontinuities from the camera transform itself.
     ///
     /// Catmull-Rom sampling: non-uniform Barry-Goldman across `(t, x, y)`
     /// waypoints. Non-uniform parameterisation is load-bearing — captured

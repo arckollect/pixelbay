@@ -92,6 +92,13 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
     private var renderContext: AVVideoCompositionRenderContext?
     private var cancelled = false
     private let renderGraph: MetalRenderGraph?
+    private var zoomSpringState = ZoomSpring.createZoomSpringState()
+    private var previousZoomTimeSeconds: Double?
+    private var previousSprungScreen: LayerRect?
+    private static let screenMotionBlurPeakVelocityPPS: Double = 1400
+    private static let screenMotionBlurMaxPx: Double = 14
+    private static let screenMotionBlurVelocityThresholdPPS: Double = 12
+    private static let screenMotionBlurMaxAmountBoost: Double = 2.2
 
     /// Half-window for the cursor-velocity finite difference. Matches the
     /// `ClickLogger.moveDecimationInterval` default (1/120s) so each side
@@ -101,6 +108,125 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
     /// Cursor scale/velocity boost values are project-tunable through
     /// `CursorSettings`. The compositor reads them per frame so Effects-tab
     /// slider changes immediately affect preview/export without code changes.
+
+    private func applyReferenceZoomSpring(
+        targetLayout: ResolvedLayout,
+        baseLayout: ResolvedLayout,
+        atTime timeSeconds: Double,
+        motionBlurAmount: Double
+    ) -> ResolvedLayout {
+        let target = zoomTransform(from: baseLayout.screen, to: targetLayout.screen)
+        let previousTime = previousZoomTimeSeconds
+        let dtMs = previousTime.map { (timeSeconds - $0) * 1000.0 } ?? 0
+        let shouldReset = previousTime == nil || !(dtMs > 0) || dtMs > 80
+        let transform: AppliedZoomTransform
+
+        if shouldReset {
+            ZoomSpring.resetZoomSpring(state: &zoomSpringState, target: target)
+            transform = target
+        } else {
+            transform = ZoomSpring.stepZoomSpring(
+                state: &zoomSpringState,
+                target: target,
+                deltaMs: dtMs
+            )
+        }
+
+        var layout = targetLayout
+        layout.screen = screenRect(base: baseLayout.screen, transform: transform)
+        if motionBlurAmount > 0,
+           !shouldReset,
+           let previousSprungScreen,
+           let shutterOpen = referenceMotionBlurOpenRect(
+                current: layout.screen,
+                previous: previousSprungScreen,
+                base: baseLayout.screen,
+                outputSize: baseLayout.outputSize,
+                dtMs: dtMs,
+                amount: motionBlurAmount
+           ) {
+            layout.screenUVOpen = EffectEvaluator.uvTransform(from: layout.screen, to: shutterOpen)
+            layout.screenUVClose = ResolvedLayout.identityUVTransform
+        } else {
+            layout.screenUVOpen = ResolvedLayout.identityUVTransform
+            layout.screenUVClose = ResolvedLayout.identityUVTransform
+        }
+
+        previousZoomTimeSeconds = timeSeconds
+        previousSprungScreen = layout.screen
+        return layout
+    }
+
+    private func referenceMotionBlurOpenRect(
+        current: LayerRect,
+        previous: LayerRect,
+        base: LayerRect,
+        outputSize: CGSize,
+        dtMs: Double,
+        amount: Double
+    ) -> LayerRect? {
+        guard dtMs > 0 else { return nil }
+        let dtSeconds = max(0.001, min(0.080, dtMs / 1000.0))
+        let currentTransform = zoomTransform(from: base, to: current)
+        let previousTransform = zoomTransform(from: base, to: previous)
+        let dx = currentTransform.x - previousTransform.x
+        let dy = currentTransform.y - previousTransform.y
+        let dScale = currentTransform.scale - previousTransform.scale
+        let velocityX = dx / dtSeconds
+        let velocityY = dy / dtSeconds
+        let maxStageDimension = max(Double(outputSize.width), Double(outputSize.height))
+        let scaleVelocity = abs(dScale / dtSeconds) * maxStageDimension * 0.5
+        let speed = hypot(velocityX, velocityY) + scaleVelocity
+        guard speed >= Self.screenMotionBlurVelocityThresholdPPS else { return nil }
+
+        let amountResponse = referenceMotionBlurAmountResponse(amount)
+        let normalizedSpeed = min(1.0, speed / Self.screenMotionBlurPeakVelocityPPS)
+        let targetBlurPx = normalizedSpeed
+            * normalizedSpeed
+            * Self.screenMotionBlurMaxPx
+            * amountResponse
+        guard targetBlurPx >= 0.75 else { return nil }
+
+        let frameTravelPx = hypot(dx, dy) + abs(dScale) * maxStageDimension * 0.5
+        guard frameTravelPx > 0.000_1 else { return nil }
+        let exposureFraction = min(1.0, targetBlurPx / frameTravelPx)
+        let openTransform = AppliedZoomTransform(
+            scale: currentTransform.scale + (previousTransform.scale - currentTransform.scale) * exposureFraction,
+            x: currentTransform.x + (previousTransform.x - currentTransform.x) * exposureFraction,
+            y: currentTransform.y + (previousTransform.y - currentTransform.y) * exposureFraction
+        )
+        return screenRect(base: base, transform: openTransform)
+    }
+
+    private func referenceMotionBlurAmountResponse(_ amount: Double) -> Double {
+        let clamped = min(1.0, max(0.0, amount))
+        return clamped * (1.0 + (Self.screenMotionBlurMaxAmountBoost - 1.0) * clamped)
+    }
+
+    private func zoomTransform(from base: LayerRect, to rect: LayerRect) -> AppliedZoomTransform {
+        let scaleX = base.size.width > 0 ? rect.size.width / base.size.width : 1
+        let scaleY = base.size.height > 0 ? rect.size.height / base.size.height : 1
+        let averagedScale = Double((scaleX + scaleY) / 2.0)
+        let safeScale = averagedScale.isFinite ? averagedScale : 1
+        return AppliedZoomTransform(
+            scale: safeScale,
+            x: Double(rect.origin.x) - Double(base.origin.x) * safeScale,
+            y: Double(rect.origin.y) - Double(base.origin.y) * safeScale
+        )
+    }
+
+    private func screenRect(base: LayerRect, transform: AppliedZoomTransform) -> LayerRect {
+        LayerRect(
+            origin: CGPoint(
+                x: CGFloat(Double(base.origin.x) * transform.scale + transform.x),
+                y: CGFloat(Double(base.origin.y) * transform.scale + transform.y)
+            ),
+            size: CGSize(
+                width: CGFloat(Double(base.size.width) * transform.scale),
+                height: CGFloat(Double(base.size.height) * transform.scale)
+            )
+        )
+    }
 
     private func handle(request: AVAsynchronousVideoCompositionRequest) {
         if cancelled {
@@ -120,28 +246,25 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
         // `request.compositionTime` is in the composition's time domain;
         // EffectKeyframe stores its ranges in the same domain, so we use
         // the raw seconds directly.
-        let layout: ResolvedLayout
+        let t = CMTimeGetSeconds(request.compositionTime)
+        let targetLayout: ResolvedLayout
         if instruction.effects.isEmpty {
-            layout = baseLayout
+            targetLayout = baseLayout
         } else {
-            let t = CMTimeGetSeconds(request.compositionTime)
-            // Temporal-blur exposure window: film-convention shutter angle
-            // (180° = open half the frame interval) scaled by the master
-            // blur strength. 0 on either knob disables the multi-transform
-            // sampling entirely.
-            let frameDuration = request.renderContext.videoComposition.frameDuration
-            let frameSeconds = frameDuration.isNumeric ? CMTimeGetSeconds(frameDuration) : 1.0 / 60.0
-            let shutterSeconds = frameSeconds
-                * (instruction.tuning.shutterAngle / 360.0)
-                * instruction.tuning.blurStrength
-            layout = EffectEvaluator.apply(
+            targetLayout = EffectEvaluator.apply(
                 keyframes: instruction.effects,
                 baseLayout: baseLayout,
                 atTime: t,
-                shutterSeconds: shutterSeconds,
+                shutterSeconds: 0,
                 transitionSoftness: instruction.tuning.transitionSoftness
             )
         }
+        let layout = applyReferenceZoomSpring(
+            targetLayout: targetLayout,
+            baseLayout: baseLayout,
+            atTime: t,
+            motionBlurAmount: instruction.tuning.blurStrength * (instruction.tuning.shutterAngle / 360.0)
+        )
         var sources: [LayerKind: CVPixelBuffer] = [:]
         for (trackID, kind) in instruction.layerMapping {
             if let buffer = request.sourceFrame(byTrackID: trackID) {

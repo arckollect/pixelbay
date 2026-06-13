@@ -58,12 +58,11 @@ final class EffectEvaluatorTests: XCTestCase {
         XCTAssertEqual(result.screen.origin.y, -540, accuracy: 1)
     }
 
-    func test_apply_zoomAtTopLeftCenter_blendsAnchorAndBacksOffZoom() {
+    func test_apply_zoomAtTopLeftCenter_clampsFocusAndKeepsRequestedScale() {
         let base = baseLayout()
-        // Zoom focused at (0, 0) — top-left corner. The Phase 3c
-        // `frameAnchor` pulls each axis 60 % toward 0.5 at the very edge,
-        // landing at (0.3, 0.3); the deep-corner backoff also drops the
-        // 2.0× factor to 1 + (2 - 1) * 0.7 = 1.7×.
+        // OpenScreen-style transform: focus is clamped to the visible
+        // half-frame margin for the zoom scale, but the requested zoom scale
+        // is preserved. At 2×, the focus margin is 0.25.
         let kf = EffectKeyframe(
             kind: .zoom,
             timelineRange: TimeRange(start: .seconds(0), duration: .seconds(2)),
@@ -74,16 +73,10 @@ final class EffectEvaluatorTests: XCTestCase {
             easeOut: .seconds(0)
         )
         let result = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 1)
-        // 1920 × 1.7 = 3264, 1080 × 1.7 = 1836.
-        XCTAssertEqual(result.screen.size.width, 3264, accuracy: 1)
-        XCTAssertEqual(result.screen.size.height, 1836, accuracy: 1)
-        // X: targetX = 960, unclampedX = 960 - 3264·0.3 = -19.2.
-        //    minOriginX = 1920 - 3264 = -1344, no clamp bite.
-        // Y: targetY = 540, unclampedY = 540 - 1836·0.3 = -10.8.
-        //    minOriginY = 1080 - 1836 = -756, no clamp bite.
-        // (Non-square screen → X and Y offsets differ even though cx=cy.)
-        XCTAssertEqual(result.screen.origin.x, -19.2, accuracy: 0.5)
-        XCTAssertEqual(result.screen.origin.y, -10.8, accuracy: 0.5)
+        XCTAssertEqual(result.screen.size.width, 3840, accuracy: 1)
+        XCTAssertEqual(result.screen.size.height, 2160, accuracy: 1)
+        XCTAssertEqual(result.screen.origin.x, 0, accuracy: 1)
+        XCTAssertEqual(result.screen.origin.y, 0, accuracy: 1)
     }
 
     func test_apply_zoomNearEdge_clampsSoRectStillCoversScreen() {
@@ -123,11 +116,10 @@ final class EffectEvaluatorTests: XCTestCase {
         XCTAssertLessThan(result.screen.size.width, base.screen.size.width * 2)
     }
 
-    // MARK: - Edge-aware framing (Phase 3c)
+    // MARK: - OpenScreen Focus Transform
 
     func test_applyZoom_centerAnchor_unchanged() {
-        // Regression guard: a centred anchor sits well outside the deadzone
-        // and the deep-corner condition, so frameAnchor must be a no-op.
+        // Regression guard: a centered anchor remains the identity focus case.
         let base = baseLayout()
         let kf = EffectKeyframe(
             kind: .zoom,
@@ -145,12 +137,8 @@ final class EffectEvaluatorTests: XCTestCase {
         XCTAssertEqual(result.screen.origin.y, -540, accuracy: 1)
     }
 
-    func test_applyZoom_edgeAnchor_blendsTowardCenter() {
-        // rawCx = 0.01: dEdge = 0.01, t = 0.01/0.15 ≈ 0.0667,
-        // pull = 0.6 * (1 - 0.0667) ≈ 0.560,
-        // cx = 0.01 + (0.5 - 0.01) * 0.560 ≈ 0.2844.
-        // newWidth = 3840, targetX = 960, unclampedX = 960 - 3840 * 0.2844 ≈ -132.1.
-        // minOriginX = 1920 - 3840 = -1920, so the clamp doesn't bite.
+    func test_applyZoom_edgeAnchor_clampsToVisibleFocusMargin() {
+        // rawCx = 0.01 clamps to 0.25 at 2×, producing origin.x = 0.
         let base = baseLayout()
         let kf = EffectKeyframe(
             kind: .zoom,
@@ -163,12 +151,11 @@ final class EffectEvaluatorTests: XCTestCase {
         )
         let result = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 1)
         XCTAssertEqual(result.screen.size.width, 3840, accuracy: 1)
-        XCTAssertEqual(result.screen.origin.x, -132.1, accuracy: 1.0)
+        XCTAssertEqual(result.screen.origin.x, 0, accuracy: 1.0)
     }
 
-    func test_applyZoom_deepCorner_scalesFactor() {
-        // (0.02, 0.02): both within cornerCutoff (0.08), so factor scales
-        // from 2.0 to 1 + (2 - 1) * 0.7 = 1.7×. newWidth = 1920 * 1.7 = 3264.
+    func test_applyZoom_deepCorner_keepsRequestedScale() {
+        // The reference does not reduce zoom scale in deep corners.
         let base = baseLayout()
         let kf = EffectKeyframe(
             kind: .zoom,
@@ -180,13 +167,14 @@ final class EffectEvaluatorTests: XCTestCase {
             easeOut: .seconds(0)
         )
         let result = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 1)
-        XCTAssertEqual(result.screen.size.width, 3264, accuracy: 1)
-        XCTAssertEqual(result.screen.size.height, 1836, accuracy: 1)
+        XCTAssertEqual(result.screen.size.width, 3840, accuracy: 1)
+        XCTAssertEqual(result.screen.size.height, 2160, accuracy: 1)
+        XCTAssertEqual(result.screen.origin.x, 0, accuracy: 1)
+        XCTAssertEqual(result.screen.origin.y, 0, accuracy: 1)
     }
 
-    func test_applyZoom_outsideDeadzone_noBlend() {
-        // rawCx = 0.20: dEdge = 0.20 > deadzone (0.15), so blend is skipped
-        // and the anchor stays at 0.20. Likewise for cy = 0.5.
+    func test_applyZoom_insideVisibleMargin_clampsToMargin() {
+        // rawCx = 0.20 is inside the 0.25 margin at 2×, so it clamps to 0.25.
         let base = baseLayout()
         let kf = EffectKeyframe(
             kind: .zoom,
@@ -198,8 +186,6 @@ final class EffectEvaluatorTests: XCTestCase {
             easeOut: .seconds(0)
         )
         let result = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 1)
-        // newWidth = 3840, targetX = 960, unclampedX = 960 - 3840 * 0.20 = 192.
-        // minOriginX = -1920, so newOriginX = max(-1920, min(0, 192)) = 0.
         XCTAssertEqual(result.screen.size.width, 3840, accuracy: 1)
         XCTAssertEqual(result.screen.origin.x, 0, accuracy: 1)
     }
@@ -235,10 +221,9 @@ final class EffectEvaluatorTests: XCTestCase {
         XCTAssertEqual(result.screen.origin.x, 0, accuracy: 1)
     }
 
-    func test_applyZoom_pinnedAnchor_atCornerSrcStillBlends() {
-        // Pinned (gesture-anchored) keyframes keep the edge-aware blend
-        // so a corner-anchored zoom still frames the area "deliberately"
-        // rather than slamming the cursor into the corner of the frame.
+    func test_applyZoom_pinnedAnchor_atCornerUsesReferenceClamp() {
+        // Pinned/manual keyframes use the same focus transform as
+        // cursor-follow keyframes.
         let base = baseLayout()
         let kf = EffectKeyframe(
             kind: .zoom,
@@ -251,10 +236,10 @@ final class EffectEvaluatorTests: XCTestCase {
             anchorMode: .pinned
         )
         let result = EffectEvaluator.apply(keyframes: [kf], baseLayout: base, atTime: 1)
-        // Same as test_apply_zoomAtTopLeftCenter_blendsAnchorAndBacksOffZoom
-        // — pinned anchors keep the blend + corner backoff (factor 1.7×).
-        XCTAssertEqual(result.screen.size.width, 3264, accuracy: 1)
-        XCTAssertEqual(result.screen.size.height, 1836, accuracy: 1)
+        XCTAssertEqual(result.screen.size.width, 3840, accuracy: 1)
+        XCTAssertEqual(result.screen.size.height, 2160, accuracy: 1)
+        XCTAssertEqual(result.screen.origin.x, 0, accuracy: 1)
+        XCTAssertEqual(result.screen.origin.y, 0, accuracy: 1)
     }
 
     // MARK: - Zoom trajectory
