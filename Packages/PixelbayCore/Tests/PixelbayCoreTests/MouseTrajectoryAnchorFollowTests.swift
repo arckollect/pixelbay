@@ -233,6 +233,77 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
                              "speed limiting should preserve forward momentum instead of zeroing velocity")
     }
 
+    func test_glideFollow_lowMaxPanSpeedProducesSlowerNormalMovement() {
+        let dt = 1.0 / 60.0
+        let samples: [ZoomTrajectorySample] = (0...90).map { i in
+            ZoomTrajectorySample(
+                t: Double(i) * dt,
+                x: 0.35 + 0.25 * Double(i) / 90.0,
+                y: 0.5
+            )
+        }
+        let slow = MouseTrajectory.glideFollow(
+            samples,
+            zoomFactor: 1.0,
+            cameraTau: 0.20,
+            settle: 0.0,
+            deadzoneFraction: 0.0,
+            edgeCushion: 0.0,
+            maxPanSpeed: 0.08
+        )
+        let fast = MouseTrajectory.glideFollow(
+            samples,
+            zoomFactor: 1.0,
+            cameraTau: 0.20,
+            settle: 0.0,
+            deadzoneFraction: 0.0,
+            edgeCushion: 0.0,
+            maxPanSpeed: 2.5
+        )
+        XCTAssertLessThan(
+            slow.last!.x - slow.first!.x,
+            (fast.last!.x - fast.first!.x) * 0.75,
+            "a very low pan-speed limit must visibly slow normal follow movement"
+        )
+    }
+
+    func test_glideFollow_edgeCushionStartsCatchupBeforeHardClamp() {
+        let dt = 1.0 / 60.0
+        let samples: [ZoomTrajectorySample] = (0...60).map { i in
+            ZoomTrajectorySample(
+                t: Double(i) * dt,
+                x: 0.50 + 0.22 * Double(i) / 60.0,
+                y: 0.5
+            )
+        }
+        let plain = MouseTrajectory.glideFollow(
+            samples,
+            zoomFactor: 2.0,
+            cameraTau: 0.45,
+            settle: 0.0,
+            deadzoneFraction: 0.0,
+            edgeCushion: 0.0,
+            maxPanSpeed: 2.5
+        )
+        let cushioned = MouseTrajectory.glideFollow(
+            samples,
+            zoomFactor: 2.0,
+            cameraTau: 0.45,
+            settle: 0.0,
+            deadzoneFraction: 0.0,
+            edgeCushion: 1.0,
+            maxPanSpeed: 2.5
+        )
+        XCTAssertGreaterThan(
+            cushioned[45].x,
+            plain[45].x + 0.004,
+            "edge cushion should begin catch-up before the emergency clamp is required"
+        )
+        for (cursor, anchor) in zip(samples, cushioned) {
+            XCTAssertLessThanOrEqual(abs(cursor.x - anchor.x), hVisibleAtZoom2 + 1e-9)
+        }
+    }
+
     // MARK: - Monotonicity under sustained motion
 
     func test_glideFollow_monotoneInput_producesMonotoneCamera() {
@@ -422,6 +493,107 @@ final class MouseTrajectoryAnchorFollowTests: XCTestCase {
         }
         XCTAssertGreaterThan(interiorAmplitude(honest), rawAmplitude * 0.80,
                              "collapse = 0 should preserve nearly all raw amplitude")
+    }
+
+    func test_fastMotionSensitivityControlsWhenSmoothingEngages() {
+        let samples: [MouseTrajectorySample] = (0...40).map { i in
+            MouseTrajectorySample(
+                timelineTime: 0.025 * Double(i),
+                centerX: 0.35 + 0.25 * Double(i) / 40.0,
+                centerY: 0.5 + 0.04 * sin(Double(i) * 0.7)
+            )
+        }
+        func smoothedDeviation(sensitivity: Double) -> Double {
+            let gates = TuningSettings.smoothingSpeedGates(for: sensitivity)
+            let out = MouseTrajectory.clickPinnedSmoothed(
+                samples,
+                windowSeconds: 0.35,
+                travelCollapse: 1.0,
+                speedLow: gates.low,
+                speedHigh: gates.high
+            )
+            return zip(samples, out).map { raw, smooth in
+                let dx = smooth.centerX - raw.centerX
+                let dy = smooth.centerY - raw.centerY
+                return (dx * dx + dy * dy).squareRoot()
+            }.reduce(0, +) / Double(samples.count)
+        }
+        XCTAssertGreaterThan(
+            smoothedDeviation(sensitivity: 1.0),
+            smoothedDeviation(sensitivity: 0.0) + 0.005,
+            "higher sensitivity should make the path smoother engage on less extreme motion"
+        )
+    }
+
+    func test_clickPinnedSmoothed_largerPathWindowTamesMoreTravel() {
+        let samples: [MouseTrajectorySample] = (0...60).map { i in
+            MouseTrajectorySample(
+                timelineTime: 0.016 * Double(i),
+                centerX: 0.5 + 0.35 * sin(Double(i) * 0.45),
+                centerY: 0.5
+            )
+        }
+        let gates = TuningSettings.smoothingSpeedGates(for: 1.0)
+        let short = MouseTrajectory.clickPinnedSmoothed(
+            samples,
+            windowSeconds: 0.12,
+            travelCollapse: 1.0,
+            speedLow: gates.low,
+            speedHigh: gates.high
+        )
+        let long = MouseTrajectory.clickPinnedSmoothed(
+            samples,
+            windowSeconds: 0.50,
+            travelCollapse: 1.0,
+            speedLow: gates.low,
+            speedHigh: gates.high
+        )
+        func amplitude(_ path: [MouseTrajectorySample]) -> Double {
+            let xs = path.dropFirst(5).dropLast(5).map(\.centerX)
+            return (xs.max() ?? 0) - (xs.min() ?? 0)
+        }
+        XCTAssertLessThan(amplitude(long), amplitude(short) * 0.75)
+    }
+
+    func test_pathTamingReducesCameraTravelOnViolentLeap() {
+        let raw: [MouseTrajectorySample] = (0...24).map { i in
+            MouseTrajectorySample(
+                timelineTime: 0.0125 * Double(i),
+                centerX: 0.10 + 0.80 * Double(i) / 24.0,
+                centerY: 0.5
+            )
+        }
+        let gates = TuningSettings.smoothingSpeedGates(for: 1.0)
+        let smoothed = MouseTrajectory.clickPinnedSmoothed(
+            raw,
+            windowSeconds: 0.45,
+            travelCollapse: 1.0,
+            clickSnapWindow: 0.12,
+            speedLow: gates.low,
+            speedHigh: gates.high
+        )
+        func followedTravel(_ path: [MouseTrajectorySample]) -> Double {
+            let zoomPath = path.map { ZoomTrajectorySample(t: $0.timelineTime, x: $0.centerX, y: $0.centerY) }
+            let followed = MouseTrajectory.glideFollow(
+                zoomPath,
+                zoomFactor: 2.0,
+                cameraTau: 0.65,
+                settle: 0.0,
+                deadzoneFraction: 0.0,
+                edgeCushion: 0.55,
+                maxPanSpeed: 0.35
+            )
+            return zip(followed, followed.dropFirst()).map { a, b in
+                let dx = b.x - a.x
+                let dy = b.y - a.y
+                return (dx * dx + dy * dy).squareRoot()
+            }.reduce(0, +)
+        }
+        XCTAssertLessThan(
+            followedTravel(smoothed),
+            followedTravel(raw) * 0.6,
+            "violent cursor leaps should be tamed upstream so the camera travels less"
+        )
     }
 
     func test_clickPinnedSmoothed_pixelExactAtClickInstant() {

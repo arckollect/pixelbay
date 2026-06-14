@@ -74,6 +74,81 @@ final class LiveCaptureBackendTests: XCTestCase {
         )
     }
 
+    func test_cappedCaptureDimensions_preservesNativeSizeBelowUHDMaxEdge() {
+        let dimensions = LiveCaptureBackend.cappedCaptureDimensions(
+            nativeWidth: 3024,
+            nativeHeight: 1964
+        )
+
+        XCTAssertEqual(dimensions.nativeWidth, 3024)
+        XCTAssertEqual(dimensions.nativeHeight, 1964)
+        XCTAssertEqual(dimensions.width, 3024)
+        XCTAssertEqual(dimensions.height, 1964)
+        XCTAssertEqual(dimensions.downscale, 1.0, accuracy: 0.0001)
+    }
+
+    func test_cappedCaptureDimensions_scales5KDisplayToUHDMaxEdge() {
+        let dimensions = LiveCaptureBackend.cappedCaptureDimensions(
+            nativeWidth: 5120,
+            nativeHeight: 2880
+        )
+
+        XCTAssertEqual(dimensions.width, 3840)
+        XCTAssertEqual(dimensions.height, 2160)
+        XCTAssertEqual(dimensions.downscale, 5120.0 / 3840.0, accuracy: 0.0001)
+    }
+
+    func test_cappedCaptureDimensions_roundsToEvenEncoderDimensions() {
+        let dimensions = LiveCaptureBackend.cappedCaptureDimensions(
+            nativeWidth: 3001,
+            nativeHeight: 2001
+        )
+
+        XCTAssertEqual(dimensions.width, 3000)
+        XCTAssertEqual(dimensions.height, 2000)
+    }
+
+    func test_nativeDisplayDimensions_prefersRetinaModePixelsOverScaledDisplayMode() {
+        let dimensions = LiveCaptureBackend.nativeDisplayDimensions(
+            cgWidth: 1728,
+            cgHeight: 1117,
+            modePixelWidth: 3456,
+            modePixelHeight: 2234,
+            scDisplayWidth: 1728,
+            scDisplayHeight: 1117,
+            scaleFactor: 2
+        )
+
+        XCTAssertEqual(dimensions.width, 3456)
+        XCTAssertEqual(dimensions.height, 2234)
+    }
+
+    func test_nativeDisplayDimensions_preservesNonRetinaPixels() {
+        let dimensions = LiveCaptureBackend.nativeDisplayDimensions(
+            cgWidth: 1920,
+            cgHeight: 1080,
+            modePixelWidth: 1920,
+            modePixelHeight: 1080,
+            scDisplayWidth: 1920,
+            scDisplayHeight: 1080,
+            scaleFactor: 1
+        )
+
+        XCTAssertEqual(dimensions.width, 1920)
+        XCTAssertEqual(dimensions.height, 1080)
+    }
+
+    func test_displayScaleFactor_usesBackingPixelRatio() {
+        XCTAssertEqual(
+            LiveCaptureBackend.displayScaleFactor(modePixelWidth: 3456, modePointWidth: 1728),
+            2
+        )
+        XCTAssertEqual(
+            LiveCaptureBackend.displayScaleFactor(modePixelWidth: 1920, modePointWidth: 1920),
+            1
+        )
+    }
+
     func test_start_window_throwsSourceUnavailable() async {
         let plan = makePlan(source: .window(windowID: 42))
         do {

@@ -455,8 +455,10 @@ public enum MouseTrajectory {
     /// and eases back — felt weight, never bounce. `cameraTau` is the one
     /// time constant, identical at every cursor speed. `maxPanSpeed` caps
     /// velocity during integration (inertia preserved, not position-
-    /// clamped). `lookaheadSeconds` aims the spring at the path's actual
-    /// future position (rendering is post-hoc — the future is known).
+    /// clamped). `edgeCushion` adds preemptive catch-up pressure near the
+    /// visible viewport edge before the hard safety clamp has to intervene.
+    /// `lookaheadSeconds` aims the spring at the path's actual future
+    /// position (rendering is post-hoc — the future is known).
     ///
     /// The emergency visible-frame clamp (cursor can never leave the
     /// zoomed viewport) and the scenes-merge boundary snap are preserved
@@ -470,6 +472,7 @@ public enum MouseTrajectory {
         cameraTau: Double = 0.35,
         settle: Double = 0.25,
         deadzoneFraction: Double = 0.35,
+        edgeCushion: Double = 0.55,
         maxPanSpeed: Double = 0.9,
         lookaheadSeconds: Double = 0.0
     ) -> [ZoomTrajectorySample] {
@@ -489,6 +492,7 @@ public enum MouseTrajectory {
         let omega = 1.0 / tau
         let stiffness = omega * omega
         let damping = 2.0 * dampingRatio * omega
+        let cushion = min(1.0, max(0.0, edgeCushion))
         let speedLimit = maxPanSpeed.isFinite ? max(0.0, maxPanSpeed) : .infinity
         let lookahead = max(0.0, lookaheadSeconds)
         let engageRampSeconds = 0.2
@@ -530,6 +534,15 @@ public enum MouseTrajectory {
                 vy -= radialVelocity * unitY
             }
             capVector(&vx, &vy, to: speedLimit)
+        }
+
+        func edgePressure(cursorX: Double, cursorY: Double) -> Double {
+            guard cushion > 0 else { return 0 }
+            let dx = cursorX - anchorX
+            let dy = cursorY - anchorY
+            let distance = (dx * dx + dy * dy).squareRoot()
+            let start = visibleHalfExtent * (1.0 - 0.75 * cushion)
+            return MouseTrajectory.smoothstep(start, visibleHalfExtent, distance)
         }
 
         /// The path's actual position `lookahead` seconds after sample
@@ -616,13 +629,16 @@ public enum MouseTrajectory {
                 // Smoothstep the engagement so the spring force fades in —
                 // exiting the deadzone must never read as a kick.
                 let engage = MouseTrajectory.smoothstep(0.0, 1.0, engagement)
-                var ax = (stiffness * (target.x - anchorX) - damping * vx) * engage
-                var ay = (stiffness * (target.y - anchorY) - damping * vy) * engage
+                let pressure = edgePressure(cursorX: s.x, cursorY: s.y)
+                let effectiveEngage = max(engage, pressure * cushion)
+                let edgeBoost = 1.0 + 4.0 * pressure * cushion
+                var ax = (stiffness * edgeBoost * (target.x - anchorX) - damping * vx) * effectiveEngage
+                var ay = (stiffness * edgeBoost * (target.y - anchorY) - damping * vy) * effectiveEngage
                 // Damping always acts at full strength on existing
                 // velocity so the ramp can't leave momentum unmanaged.
-                if engage < 1.0 {
-                    ax -= damping * vx * (1.0 - engage)
-                    ay -= damping * vy * (1.0 - engage)
+                if effectiveEngage < 1.0 {
+                    ax -= damping * vx * (1.0 - effectiveEngage)
+                    ay -= damping * vy * (1.0 - effectiveEngage)
                 }
                 vx += ax * step
                 vy += ay * step

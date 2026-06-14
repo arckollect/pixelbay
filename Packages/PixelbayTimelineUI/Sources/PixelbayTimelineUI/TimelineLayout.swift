@@ -277,6 +277,9 @@ public enum TimelineLayoutCalculator {
     /// Default per-track lane height, used unless the host overrides via
     /// `TimelineViewport.trackHeight`.
     public static let defaultTrackHeight: CGFloat = 56
+    /// Editor default when the preview should own more vertical space while
+    /// keeping timeline labels and thumbnails usable.
+    public static let compactTrackHeight: CGFloat = 36
     /// Compact lower bound — clip names still legible, waveforms reduced
     /// to a single bar.
     public static let minTrackHeight: CGFloat = 24

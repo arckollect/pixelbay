@@ -29,6 +29,14 @@ private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "LiveC
 //
 // Single-use per the protocol contract: a fresh instance per recording.
 public actor LiveCaptureBackend: CaptureBackend {
+    internal struct CaptureDimensions: Equatable {
+        var nativeWidth: Int
+        var nativeHeight: Int
+        var width: Int
+        var height: Int
+        var downscale: Double
+    }
+
     public nonisolated let errors: AsyncStream<CaptureError>
     private let errorContinuation: AsyncStream<CaptureError>.Continuation
 
@@ -105,20 +113,36 @@ public actor LiveCaptureBackend: CaptureBackend {
 
         let config = SCStreamConfiguration()
         // Capture at native pixel resolution, then cap at UHD max edge.
-        // SCDisplay's width/height are in points; ×2 is Retina-native.
+        // Prefer the display mode's backing-pixel size. On scaled Retina
+        // modes, `CGDisplayPixelsWide` can report the "looks like" width
+        // (e.g. 1728) while `CGDisplayMode.pixelWidth` has the real backing
+        // pixels (e.g. 3456). We also keep SCDisplay×scale as a fallback.
         // The old 1920 max edge made Retina UI text and cursor edges look
         // soft before the compositor/export path got a chance to preserve
         // them. UHD keeps a clean source while avoiding raw 5K/6K frames that
         // still put unnecessary pressure on the real-time H.264 writer.
-        let nativeWidth = display.width * 2
-        let nativeHeight = display.height * 2
-        let maxEdge = 3840
-        let downscale = max(1.0, max(Double(nativeWidth), Double(nativeHeight)) / Double(maxEdge))
-        // Round to even — H.264 chroma subsampling (YUV420) requires
-        // even-numbered width/height. Off-by-one odd dimensions can be
-        // implicated in encoder rejection.
-        config.width = (Int(Double(nativeWidth) / downscale) / 2) * 2
-        config.height = (Int(Double(nativeHeight) / downscale) / 2) * 2
+        let displayMode = CGDisplayCopyDisplayMode(display.displayID)
+        let modePixelWidth = displayMode?.pixelWidth ?? 0
+        let modePixelHeight = displayMode?.pixelHeight ?? 0
+        let modePointWidth = displayMode?.width ?? 0
+        let scaleFactor = Self.displayScaleFactor(
+            modePixelWidth: modePixelWidth,
+            modePointWidth: modePointWidth
+        )
+        let native = Self.nativeDisplayDimensions(
+            cgWidth: Int(CGDisplayPixelsWide(display.displayID)),
+            cgHeight: Int(CGDisplayPixelsHigh(display.displayID)),
+            modePixelWidth: modePixelWidth,
+            modePixelHeight: modePixelHeight,
+            scDisplayWidth: display.width,
+            scDisplayHeight: display.height,
+            scaleFactor: scaleFactor
+        )
+        let nativeWidth = native.width
+        let nativeHeight = native.height
+        let dimensions = Self.cappedCaptureDimensions(nativeWidth: nativeWidth, nativeHeight: nativeHeight)
+        config.width = dimensions.width
+        config.height = dimensions.height
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         // Pixel format: bi-planar NV12 (luma + interleaved chroma) is what
         // the H.264 encoder consumes natively. SCStream's default is BGRA,
@@ -143,7 +167,7 @@ public actor LiveCaptureBackend: CaptureBackend {
         // compositor skips the synthetic pass for them, avoiding a double
         // cursor.
         config.showsCursor = false
-        log.info("SCStreamConfiguration native=\(nativeWidth)x\(nativeHeight) capped=\(config.width)x\(config.height) (downscale=\(downscale)) pixelFormat=NV12-videoRange showsCursor=false")
+        log.info("SCStreamConfiguration native=\(dimensions.nativeWidth)x\(dimensions.nativeHeight) capped=\(config.width)x\(config.height) (downscale=\(dimensions.downscale)) pixelFormat=NV12-videoRange showsCursor=false")
         let excludedApps: [SCRunningApplication]
         if plan.excludedBundleIdentifiers.isEmpty {
             excludedApps = []
@@ -472,6 +496,52 @@ public actor LiveCaptureBackend: CaptureBackend {
         for w in waiters {
             w.resume(throwing: CaptureError.streamFailed(message: "No AVCaptureSession sample observed within \(timeout)s of session.startRunning()"))
         }
+    }
+
+    nonisolated static func cappedCaptureDimensions(
+        nativeWidth: Int,
+        nativeHeight: Int,
+        maxEdge: Int = 3840
+    ) -> CaptureDimensions {
+        let safeNativeWidth = max(2, nativeWidth)
+        let safeNativeHeight = max(2, nativeHeight)
+        let safeMaxEdge = max(2, maxEdge)
+        let downscale = max(
+            1.0,
+            max(Double(safeNativeWidth), Double(safeNativeHeight)) / Double(safeMaxEdge)
+        )
+        return CaptureDimensions(
+            nativeWidth: safeNativeWidth,
+            nativeHeight: safeNativeHeight,
+            width: evenDimension(Double(safeNativeWidth) / downscale),
+            height: evenDimension(Double(safeNativeHeight) / downscale),
+            downscale: downscale
+        )
+    }
+
+    nonisolated static func nativeDisplayDimensions(
+        cgWidth: Int,
+        cgHeight: Int,
+        modePixelWidth: Int,
+        modePixelHeight: Int,
+        scDisplayWidth: Int,
+        scDisplayHeight: Int,
+        scaleFactor: Int
+    ) -> (width: Int, height: Int) {
+        let scale = max(1, scaleFactor)
+        return (
+            width: max(2, cgWidth, modePixelWidth, scDisplayWidth * scale, scDisplayWidth),
+            height: max(2, cgHeight, modePixelHeight, scDisplayHeight * scale, scDisplayHeight)
+        )
+    }
+
+    nonisolated static func displayScaleFactor(modePixelWidth: Int, modePointWidth: Int) -> Int {
+        guard modePixelWidth > 0, modePointWidth > 0 else { return 1 }
+        return max(1, modePixelWidth / modePointWidth)
+    }
+
+    private nonisolated static func evenDimension(_ value: Double) -> Int {
+        max(2, (Int(value) / 2) * 2)
     }
 
     static func mapSCStreamStartError(_ error: Error) -> CaptureError {

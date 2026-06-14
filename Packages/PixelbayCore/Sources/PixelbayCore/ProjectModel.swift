@@ -29,7 +29,11 @@ import Foundation
 // produces a normal timeline-editable project and clears the field back to
 // nil). The migrator is a no-op because the field is optional — pre-v5
 // projects decode cleanly with `scenesSession == nil`.
-public let currentSchemaVersion: Int = 6
+//
+// v6 → v7 (2026-06-12): adds `fastMotionSensitivity` and `edgeCushion` to
+// `TuningSettings`, widens camera ranges, and changes the default motion feel
+// to a slower hybrid zoom-follow.
+public let currentSchemaVersion: Int = 7
 
 // Bumped on any breaking change to the .pixelbay directory layout itself
 // (e.g. renaming the media/ folder, splitting sidecars into a new subdirectory).

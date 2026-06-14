@@ -522,14 +522,7 @@ public final class AssetWriterPipeline: CaptureSink, @unchecked Sendable {
             throw RecordingError.missingFormatDescription
         }
         let dims = CMVideoFormatDescriptionGetDimensions(format)
-        // Bitrate: screen recordings need more bits than camera footage
-        // because text and UI edges show compression immediately. Use a
-        // higher bpp/frame ladder and a larger cap now that capture can keep
-        // UHD frames. This yields ≈22 Mbps at 1080p60, ≈40 Mbps at 1440p60,
-        // and ≈90 Mbps at 4K60, while still staying below the runaway rates
-        // that caused the early encoder failures.
-        let pixelCount = Int(dims.width) * Int(dims.height)
-        let bitrate = min(Int(Double(pixelCount) * 60 * 0.18), 120_000_000)
+        let bitrate = Self.videoBitrate(width: Int(dims.width), height: Int(dims.height))
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: Int(dims.width),
@@ -554,6 +547,27 @@ public final class AssetWriterPipeline: CaptureSink, @unchecked Sendable {
         )
         input.expectsMediaDataInRealTime = true
         return input
+    }
+
+    static func videoBitrate(width: Int, height: Int, fps: Int = 60) -> Int {
+        let safeWidth = max(2, width)
+        let safeHeight = max(2, height)
+        let pixelCount = safeWidth * safeHeight
+        // Screen recordings need more bits than camera footage because code,
+        // menus, and text edges show compression immediately. Match the
+        // OpenScreen-style ladder as a floor, then allow higher bpp for dense
+        // Retina/UHD frames while staying below the encoder-stability cap.
+        let highFrameRateBoost = fps >= 60 ? 1.7 : 1.0
+        let ladderFloor: Double
+        if pixelCount >= 3_840 * 2_160 {
+            ladderFloor = 45_000_000 * highFrameRateBoost
+        } else if pixelCount >= 2_560 * 1_440 {
+            ladderFloor = 28_000_000 * highFrameRateBoost
+        } else {
+            ladderFloor = 18_000_000 * highFrameRateBoost
+        }
+        let densityTarget = Double(pixelCount) * Double(max(1, fps)) * 0.18
+        return min(Int(max(ladderFloor, densityTarget).rounded()), 120_000_000)
     }
 
     private func makeAudioInput(

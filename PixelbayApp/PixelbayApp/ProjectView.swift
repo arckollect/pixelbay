@@ -31,16 +31,25 @@ struct ProjectView: View {
     @State private var editingName: String = ""
     @FocusState private var isEditingName: Bool
     @State private var pixelsPerSecond: CGFloat = TimelineLayoutCalculator.defaultPixelsPerSecond
-    @State private var trackHeight: CGFloat = TimelineLayoutCalculator.defaultTrackHeight
+    @State private var trackHeight: CGFloat = TimelineLayoutCalculator.compactTrackHeight
     /// Which inspector tab the right-rail is showing. Independent of clip /
     /// keyframe selection, except that selecting an effect keyframe in the
     /// timeline auto-switches here to `.zoom` (the only surface that edits
     /// it). The per-clip volume/speed drag-preview state now lives inside
     /// `AudioInspector`.
     @State private var selectedTab: InspectorTab = .layout
-    /// Preview fit (letterbox) vs fill (crop). Toggled from the transport's
-    /// aspect button; defaults to fit so nothing is cropped on open.
-    @State private var previewFill: Bool = false
+    /// Preview fit (letterbox) vs fill (crop). The editor defaults to fit so
+    /// recorded UI is never cropped while inspecting detail.
+    private let previewFill: Bool = false
+    /// Editor preview sharpness. HD matches the UHD export render cap, then is
+    /// clamped to the visible backing-pixel size so enlarging the viewer asks
+    /// the compositor for a larger, crisper frame instead of stretching.
+    private let previewQuality: PreviewPlayer.PreviewQuality = .hd
+    /// Backing-pixel size of the visible video pane. OpenScreen renders its
+    /// Pixi canvas at the viewport's DPR-scaled size; this gives Pixelbay's
+    /// native preview the same moving target instead of stretching an older
+    /// composition when the timeline is resized smaller.
+    @State private var previewBackingSize: CGSize = .zero
     /// Slice A.3 — controls the timeline-end "+" popover. Hosting the
     /// popover state here (rather than inside TimelineView) keeps the
     /// invasive change off `TimelineView.swift` so the parallel Branch B
@@ -92,7 +101,12 @@ struct ProjectView: View {
         // changes only show up in the timeline, not in playback. Save
         // doesn't bump revision (content unchanged) so the preview
         // doesn't reload then either.
-        .task(id: ProjectViewKey(bundleURL: document.bundleURL, revision: document.revision)) {
+        .task(id: ProjectViewKey(
+            bundleURL: document.bundleURL,
+            revision: document.revision,
+            previewQuality: previewQuality,
+            previewRenderSize: previewRenderSizeKey
+        )) {
             // Debounce preview rebuilds. Every committed edit bumps `revision`
             // and re-keys this task; rapid edits — e.g. clicking through the
             // background-swatch gallery — would otherwise spawn a fresh
@@ -115,7 +129,7 @@ struct ProjectView: View {
             guard !Task.isCancelled else { return }
             cachedCursorData = cursorData
             await player.load(
-                project: document.project,
+                project: editorPreviewProject(from: document.project),
                 bundleURL: document.bundleURL,
                 wallpaperSource: .live,
                 wallpaperImageProvider: .live(
@@ -124,7 +138,9 @@ struct ProjectView: View {
                 ),
                 cursorTrajectory: cursorData?.samples,
                 cursorClickTimes: cursorData?.clickTimes ?? [],
-                cursorSprite: SystemCursorSprite.make()
+                cursorSprite: SystemCursorSprite.make(),
+                quality: previewQuality,
+                maxOutputSize: previewMaxOutputSize
             )
             guard !Task.isCancelled else { return }
             editingName = document.project.name
@@ -267,100 +283,81 @@ struct ProjectView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Theme.Color.bgBase)
         case .ready:
-            VStack(spacing: Theme.Spacing.sm) {
-                ZStack {
-                    PreviewPlayerView(player: player, fill: previewFill)
-                    if let fraction = zoomFollowSafeZoneOverlayFraction {
-                        ZoomFollowSafeZoneOverlay(
-                            fraction: fraction,
-                            videoSize: player.outputSize,
-                            fill: previewFill,
-                            color: .blue
-                        )
-                        .allowsHitTesting(false)
-                        .transition(.opacity)
+            ZStack {
+                PreviewPlayerView(
+                    player: player,
+                    fill: previewFill,
+                    onBackingSizeChange: { size in
+                        DispatchQueue.main.async {
+                            guard abs(size.width - previewBackingSize.width) >= 2
+                                || abs(size.height - previewBackingSize.height) >= 2 else { return }
+                            previewBackingSize = size
+                        }
                     }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Theme.Color.bgBase, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.medium)
-                        .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
                 )
-                transportBar
+                if let fraction = zoomFollowSafeZoneOverlayFraction {
+                    ZoomFollowSafeZoneOverlay(
+                        fraction: fraction,
+                        videoSize: player.outputSize,
+                        fill: previewFill,
+                        color: .blue
+                    )
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.Color.bgBase, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                    .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+            )
             .padding(Theme.Spacing.lg)
         }
     }
 
-    // Industry-standard transport: a clean control strip BELOW the viewer
-    // (not glass floating over the footage — that read as choppy and blended
-    // into the video). Transport cluster · current/total timecode · scrubber
-    // · fit-fill toggle.
-    private var transportBar: some View {
-        HStack(spacing: Theme.Spacing.md) {
-            HStack(spacing: Theme.Spacing.xs) {
-                transportButton("backward.end.fill", help: "Jump to start") { player.seekToStart() }
-                transportButton("backward.frame.fill", help: "Step back one frame") { player.stepFrame(by: -1) }
-                Button {
-                    player.togglePlayPause()
-                } label: {
-                    Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.Color.textPrimary)
-                        .frame(width: 32, height: 32)
-                        .background(Theme.Color.bgElevated, in: Circle())
-                        .overlay(Circle().strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline))
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut(.space, modifiers: [])
-                .help(player.isPlaying ? "Pause" : "Play")
-                transportButton("forward.frame.fill", help: "Step forward one frame") { player.stepFrame(by: 1) }
-                transportButton("forward.end.fill", help: "Jump to end") { player.seekToEnd() }
+    private var timelinePlaybackControls: some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            timelineControlButton("backward.end.fill", help: "Jump to start") {
+                player.seekToStart()
             }
-
-            Text(Timecode.clock(player.currentTime.seconds))
-                .font(Theme.Font.monoTimecode)
-                .foregroundStyle(Theme.Color.textPrimary)
-                .frame(width: 44, alignment: .trailing)
-            PBSlider(
-                value: Binding<Double>(
-                    get: {
-                        guard player.duration.seconds > 0 else { return 0 }
-                        return player.currentTime.seconds / player.duration.seconds
-                    },
-                    set: { player.seekFraction($0) }
-                ),
-                in: 0...1,
-                size: .mini
-            )
-            Text(Timecode.clock(player.duration.seconds))
-                .font(Theme.Font.monoTimecode)
-                .foregroundStyle(Theme.Color.textSecondary)
-                .frame(width: 44, alignment: .leading)
-
+            timelineControlButton("backward.frame.fill", help: "Step back one frame") {
+                player.stepFrame(by: -1)
+            }
             Button {
-                previewFill.toggle()
+                player.togglePlayPause()
             } label: {
-                Image(systemName: previewFill
-                      ? "rectangle.arrowtriangle.2.inward"
-                      : "rectangle.arrowtriangle.2.outward")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Theme.Color.textSecondary)
-                    .frame(width: 26, height: 26)
+                Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textPrimary)
+                    .frame(width: 34, height: 30)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(previewFill ? "Fit (letterbox)" : "Fill (crop)")
+            .keyboardShortcut(.space, modifiers: [])
+            .help(player.isPlaying ? "Pause" : "Play")
+            timelineControlButton("forward.frame.fill", help: "Step forward one frame") {
+                player.stepFrame(by: 1)
+            }
+            timelineControlButton("forward.end.fill", help: "Jump to end") {
+                player.seekToEnd()
+            }
+            Text("\(Timecode.clock(player.currentTime.seconds)) / \(Timecode.clock(player.duration.seconds))")
+                .font(Theme.Font.monoTimecode)
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: 96, alignment: .leading)
         }
-        .frame(height: 40)
+        .padding(.horizontal, Theme.Spacing.sm)
+        .padding(.vertical, 3)
+        .background(Theme.Color.bgElevated, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline))
     }
 
-    private func transportButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
+    private func timelineControlButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.Color.textSecondary)
                 .frame(width: 26, height: 26)
                 .contentShape(Rectangle())
@@ -384,6 +381,7 @@ struct ProjectView: View {
                 Text("Timeline")
                     .font(Theme.Font.cardTitle)
                     .foregroundStyle(Theme.Color.textSecondary)
+                timelinePlaybackControls
                 Spacer()
                 // Track-height (row size) control. Lets the user condense
                 // tracks when the project has many of them (so they all
@@ -648,6 +646,7 @@ struct ProjectView: View {
                     guard !Task.isCancelled else { return }
                     var previewProject = document.project
                     previewProject.tuning = tuning
+                    previewProject = editorPreviewProject(from: previewProject)
                     // Structure (tracks/clips/assets) is unchanged, so
                     // PreviewPlayer's fast path rebuilds ONLY the
                     // videoComposition against the existing player item —
@@ -662,7 +661,9 @@ struct ProjectView: View {
                         ),
                         cursorTrajectory: cachedCursorData?.samples,
                         cursorClickTimes: cachedCursorData?.clickTimes ?? [],
-                        cursorSprite: SystemCursorSprite.make()
+                        cursorSprite: SystemCursorSprite.make(),
+                        quality: previewQuality,
+                        maxOutputSize: previewMaxOutputSize
                     )
                 }
             }
@@ -674,6 +675,32 @@ struct ProjectView: View {
     private func rationalTime(_ cmTime: CMTime) -> RationalTime? {
         guard cmTime.isValid, !cmTime.isIndefinite else { return nil }
         return RationalTime(value: cmTime.value, timescale: cmTime.timescale)
+    }
+
+    private var previewMaxOutputSize: CGSize {
+        guard previewBackingSize.width >= 2, previewBackingSize.height >= 2 else {
+            return previewQuality.maxOutputSize
+        }
+        let maxSize = previewQuality.maxOutputSize
+        return CGSize(
+            width: max(2, min(maxSize.width, previewBackingSize.width)),
+            height: max(2, min(maxSize.height, previewBackingSize.height))
+        )
+    }
+
+    private var previewRenderSizeKey: PreviewRenderSizeKey {
+        PreviewRenderSizeKey(size: previewMaxOutputSize)
+    }
+
+    private func editorPreviewProject(from project: Project) -> Project {
+        var previewProject = project
+        // The editor is an inspection surface: temporal blur makes paused and
+        // scrubbed frames look soft, especially when the preview is enlarged.
+        // Keep the authored blur settings in the document/export path, but
+        // render the live editor preview crisp.
+        previewProject.tuning.blurStrength = 0
+        previewProject.tuning.cursorBlur = 0
+        return previewProject
     }
 }
 
@@ -757,6 +784,25 @@ private struct ZoomFollowSafeZoneOverlay: View {
 private struct ProjectViewKey: Hashable {
     let bundleURL: URL
     let revision: Int
+    let previewQuality: PreviewPlayer.PreviewQuality
+    let previewRenderSize: PreviewRenderSizeKey
+}
+
+private struct PreviewRenderSizeKey: Hashable {
+    let width: Int
+    let height: Int
+
+    init(size: CGSize) {
+        // Quantize to 64 px so live pane drags coalesce, then the existing
+        // preview-load debounce settles on the final visible size.
+        width = Self.quantized(size.width)
+        height = Self.quantized(size.height)
+    }
+
+    private static func quantized(_ value: CGFloat) -> Int {
+        let clamped = max(2, Int(value.rounded()))
+        return max(2, ((clamped + 63) / 64) * 64)
+    }
 }
 
 /// The right-rail inspector categories, surfaced as a vertical icon-tab rail.
@@ -786,13 +832,13 @@ enum InspectorTab: Hashable {
 struct ResizableVSplit<Top: View, Bottom: View>: View {
     /// Minimum height reserved for the `top` pane (the preview never
     /// shrinks below this, even when the window is short).
-    var minTopHeight: CGFloat = 240
+    var minTopHeight: CGFloat = 360
     /// Minimum height for the `bottom` pane (the timeline floor).
-    var minBottomHeight: CGFloat = 160
+    var minBottomHeight: CGFloat = 132
     @ViewBuilder var top: () -> Top
     @ViewBuilder var bottom: () -> Bottom
 
-    @State private var bottomHeight: CGFloat = 320
+    @State private var bottomHeight: CGFloat = 190
     /// Bottom height captured at the start of a resize drag; nil when idle.
     @State private var dragStartHeight: CGFloat?
     /// Hover state for the grabber (drives the cursor + accent).

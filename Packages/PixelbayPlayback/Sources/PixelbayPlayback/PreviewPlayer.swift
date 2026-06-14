@@ -30,11 +30,26 @@ public final class PreviewPlayer {
         case failed(message: String)
     }
 
+    public enum PreviewQuality: String, CaseIterable, Sendable, Hashable {
+        case balanced
+        case hd
+
+        public var maxOutputSize: CGSize {
+            switch self {
+            case .balanced:
+                return PreviewCompositionBuilder.previewMaxOutputSize
+            case .hd:
+                return PreviewCompositionBuilder.defaultOutputSize
+            }
+        }
+    }
+
     public private(set) var status: Status = .idle
     public private(set) var duration: CMTime = .zero
     public private(set) var outputSize: CGSize = .zero
     public private(set) var currentTime: CMTime = .zero
     public private(set) var isPlaying: Bool = false
+    public private(set) var previewQuality: PreviewQuality = .hd
 
     private let player: AVPlayer
     private var timeObserver: Any?
@@ -53,6 +68,8 @@ public final class PreviewPlayer {
         var duration: CMTime
         var screenTrackID: CMPersistentTrackID
         var webcamTrackID: CMPersistentTrackID?
+        var previewQuality: PreviewQuality
+        var maxOutputSize: CGSize
     }
     private var lastBuilt: BuiltContext?
 
@@ -97,8 +114,11 @@ public final class PreviewPlayer {
         wallpaperImageProvider: WallpaperImageProvider? = nil,
         cursorTrajectory: [MouseTrajectorySample]? = nil,
         cursorClickTimes: [Double] = [],
-        cursorSprite: CursorSpriteData? = nil
+        cursorSprite: CursorSpriteData? = nil,
+        quality: PreviewQuality = .hd,
+        maxOutputSize: CGSize? = nil
     ) async {
+        let resolvedMaxOutputSize = maxOutputSize ?? quality.maxOutputSize
         // Presentation-only fast path. If the composition-affecting structure
         // (tracks / clips / assets) is unchanged since the last build, the edit
         // only touched layout / background / effects / cursor — which live in
@@ -108,6 +128,8 @@ public final class PreviewPlayer {
         // / VRP / CustomVideoCompositor error storms during rapid edits).
         if let item = player.currentItem,
            let ctx = lastBuilt,
+           ctx.previewQuality == quality,
+           ctx.maxOutputSize == resolvedMaxOutputSize,
            sameStructure(ctx.project, project) {
             let videoComposition = await PreviewCompositionBuilder.buildVideoComposition(
                 project: project,
@@ -124,6 +146,7 @@ public final class PreviewPlayer {
             guard !Task.isCancelled else { return }
             item.videoComposition = videoComposition
             lastBuilt?.project = project
+            previewQuality = quality
             // A paused item won't re-render on its own when the
             // videoComposition changes — nudge a zero-distance seek to force a
             // recompose. (A playing item picks up the new VC on the next frame.)
@@ -151,21 +174,24 @@ public final class PreviewPlayer {
                 cursorTrajectory: cursorTrajectory,
                 cursorClickTimes: cursorClickTimes,
                 cursorSprite: cursorSprite,
-                // Live preview composites at a capped size — full UHD is
-                // export-only (ExportSheet builds its own composition).
-                // Keeps the GPU comfortably at 60 fps during heavy
-                // motion-blur pans and shrinks the buffer pools.
-                maxOutputSize: PreviewCompositionBuilder.previewMaxOutputSize
+                // Balanced live preview keeps the compositor at 1620p for
+                // smoother editing; HD preview uses the same UHD render size
+                // as export when the user wants maximum source sharpness.
+                maxOutputSize: resolvedMaxOutputSize
             )
             guard !Task.isCancelled else { return }
             install(preview: preview)
+            log.info("Preview build quality=\(quality.rawValue, privacy: .public) max=\(Int(resolvedMaxOutputSize.width))x\(Int(resolvedMaxOutputSize.height)) output=\(Int(preview.outputSize.width))x\(Int(preview.outputSize.height))")
             lastBuilt = BuiltContext(
                 project: project,
                 outputSize: preview.outputSize,
                 duration: preview.duration,
                 screenTrackID: preview.screenTrackID,
-                webcamTrackID: preview.webcamTrackID
+                webcamTrackID: preview.webcamTrackID,
+                previewQuality: quality,
+                maxOutputSize: resolvedMaxOutputSize
             )
+            previewQuality = quality
             // Restore playhead within the new duration. If the new
             // duration is shorter than the previous time (user trimmed
             // the tail), clamp to the new duration.
@@ -342,31 +368,42 @@ public final class PreviewPlayer {
 public struct PreviewPlayerView: NSViewRepresentable {
     let player: PreviewPlayer
     let videoGravity: AVLayerVideoGravity
+    let onBackingSizeChange: (CGSize) -> Void
 
     /// `fill: false` (default) letterboxes the video to fit (`.resizeAspect`);
-    /// `fill: true` crops it to fill the frame (`.resizeAspectFill`). Driven
-    /// by the preview transport's fit/fill toggle.
-    public init(player: PreviewPlayer, fill: Bool = false) {
+    /// `fill: true` crops it to fill the frame (`.resizeAspectFill`).
+    public init(
+        player: PreviewPlayer,
+        fill: Bool = false,
+        onBackingSizeChange: @escaping (CGSize) -> Void = { _ in }
+    ) {
         self.player = player
         self.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+        self.onBackingSizeChange = onBackingSizeChange
     }
 
     public func makeNSView(context: Context) -> PlayerLayerHostingView {
         let view = PlayerLayerHostingView()
+        view.onBackingSizeChange = onBackingSizeChange
         view.attach(player: player.underlyingPlayer)
         view.setVideoGravity(videoGravity)
         return view
     }
 
     public func updateNSView(_ nsView: PlayerLayerHostingView, context: Context) {
+        nsView.onBackingSizeChange = onBackingSizeChange
         nsView.attach(player: player.underlyingPlayer)
         nsView.setVideoGravity(videoGravity)
+        nsView.reportBackingSizeIfNeeded()
     }
 }
 
 /// Layer-backed NSView whose backing CALayer is an AVPlayerLayer. Used by
 /// PreviewPlayerView as a low-level replacement for AVPlayerView.
 public final class PlayerLayerHostingView: NSView {
+    var onBackingSizeChange: ((CGSize) -> Void)?
+    private var lastReportedBackingSize: CGSize = .zero
+
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -381,6 +418,9 @@ public final class PlayerLayerHostingView: NSView {
     public override func makeBackingLayer() -> CALayer {
         let layer = AVPlayerLayer()
         layer.videoGravity = .resizeAspect
+        layer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        layer.magnificationFilter = .nearest
+        layer.minificationFilter = .linear
         // Disable implicit animations so the video re-fits INSTANTLY on every
         // resize. Without this, AVPlayerLayer animates the gravity re-fit over
         // ~0.25s, and during a live pane-divider drag each tick starts a fresh
@@ -397,6 +437,23 @@ public final class PlayerLayerHostingView: NSView {
 
     private var playerLayer: AVPlayerLayer? { layer as? AVPlayerLayer }
 
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateLayerScale()
+        reportBackingSizeIfNeeded()
+    }
+
+    public override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateLayerScale()
+        reportBackingSizeIfNeeded()
+    }
+
+    public override func layout() {
+        super.layout()
+        reportBackingSizeIfNeeded()
+    }
+
     func attach(player: AVPlayer) {
         guard let playerLayer else { return }
         if playerLayer.player !== player {
@@ -407,6 +464,23 @@ public final class PlayerLayerHostingView: NSView {
     func setVideoGravity(_ gravity: AVLayerVideoGravity) {
         guard let playerLayer, playerLayer.videoGravity != gravity else { return }
         playerLayer.videoGravity = gravity
+    }
+
+    private func updateLayerScale() {
+        guard let playerLayer else { return }
+        playerLayer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+    }
+
+    func reportBackingSizeIfNeeded() {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let size = CGSize(
+            width: max(0, floor(bounds.width * scale)),
+            height: max(0, floor(bounds.height * scale))
+        )
+        guard abs(size.width - lastReportedBackingSize.width) >= 2
+            || abs(size.height - lastReportedBackingSize.height) >= 2 else { return }
+        lastReportedBackingSize = size
+        onBackingSizeChange?(size)
     }
 }
 #endif

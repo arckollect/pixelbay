@@ -70,6 +70,29 @@ final class AssetWriterPipelineTests: XCTestCase {
         )
     }
 
+    // MARK: - Screen video quality
+
+    func test_videoBitrate_usesOpenScreenStyleFloorFor1080p60Text() {
+        XCTAssertEqual(
+            AssetWriterPipeline.videoBitrate(width: 1920, height: 1080),
+            30_600_000
+        )
+    }
+
+    func test_videoBitrate_usesQHDFloorBeforeDensityTargetCatchesUp() {
+        XCTAssertEqual(
+            AssetWriterPipeline.videoBitrate(width: 2560, height: 1440),
+            47_600_000
+        )
+    }
+
+    func test_videoBitrate_allowsDenseRetinaFramesAboveLadderFloor() {
+        XCTAssertEqual(
+            AssetWriterPipeline.videoBitrate(width: 3456, height: 2234),
+            83_383_603
+        )
+    }
+
     // MARK: - Marker file
 
     func test_constructor_createsRecordingMarkerFile() throws {

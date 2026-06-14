@@ -118,6 +118,8 @@ final class ProjectModelTests: XCTestCase {
             cameraTau: 0.55,
             settle: 0.8,
             deadzoneFraction: 0.2,
+            edgeCushion: 0.7,
+            fastMotionSensitivity: 0.4,
             smoothingScope: .zoomsOnly,
             shutterAngle: 270
         )
@@ -133,19 +135,25 @@ final class ProjectModelTests: XCTestCase {
             cameraTau: 99,
             settle: -1,
             deadzoneFraction: 99,
+            edgeCushion: -1,
             maxPanSpeed: 0,
+            fastMotionSensitivity: 99,
             shutterAngle: 999
         )
         XCTAssertEqual(tuning.cameraTau, TuningSettings.cameraTauRange.upperBound)
         XCTAssertEqual(tuning.settle, TuningSettings.settleRange.lowerBound)
         XCTAssertEqual(tuning.deadzoneFraction, TuningSettings.deadzoneFractionRange.upperBound)
+        XCTAssertEqual(tuning.edgeCushion, TuningSettings.edgeCushionRange.lowerBound)
         XCTAssertEqual(tuning.maxPanSpeed, TuningSettings.maxPanSpeedRange.lowerBound)
+        XCTAssertEqual(tuning.fastMotionSensitivity, TuningSettings.fastMotionSensitivityRange.upperBound)
         XCTAssertEqual(tuning.shutterAngle, TuningSettings.shutterAngleRange.upperBound)
 
         tuning.pathWindowSeconds = 99
         tuning.travelCollapse = -5
+        tuning.edgeCushion = 99
         XCTAssertEqual(tuning.pathWindowSeconds, TuningSettings.pathWindowSecondsRange.upperBound)
         XCTAssertEqual(tuning.travelCollapse, TuningSettings.travelCollapseRange.lowerBound)
+        XCTAssertEqual(tuning.edgeCushion, TuningSettings.edgeCushionRange.upperBound)
     }
 
     func test_tuningSettings_decodeMissingFields_usesDefaults() throws {
@@ -159,6 +167,8 @@ final class ProjectModelTests: XCTestCase {
         XCTAssertEqual(partial.cameraTau, 0.6, accuracy: 1e-9)
         XCTAssertEqual(partial.smoothingScope, .zoomsOnly)
         XCTAssertEqual(partial.settle, TuningSettings.default.settle)
+        XCTAssertEqual(partial.fastMotionSensitivity, TuningSettings.default.fastMotionSensitivity)
+        XCTAssertEqual(partial.edgeCushion, TuningSettings.default.edgeCushion)
     }
 
     func test_migrator_v5ToV6_dropsZoomFollowStyleKey() throws {
@@ -184,6 +194,79 @@ final class ProjectModelTests: XCTestCase {
         decoder.dateDecodingStrategy = .iso8601
         let project = try decoder.decode(Project.self, from: data)
         XCTAssertEqual(project.tuning, .default)
+    }
+
+    func test_migrator_v6ToV7_replacesExactOldDefaultTuningWithNewDefault() throws {
+        let v6: [String: Any] = [
+            "schemaVersion": 6,
+            "bundleVersion": 1,
+            "id": "p6-default",
+            "name": "v6 default tuning",
+            "createdAt": "2026-06-01T00:00:00Z",
+            "modifiedAt": "2026-06-01T00:00:00Z",
+            "assets": [],
+            "tracks": [],
+            "sourceSegments": [],
+            "extras": [:],
+            "tuning": [
+                "cameraTau": 0.35,
+                "settle": 0.25,
+                "deadzoneFraction": 0.35,
+                "maxPanSpeed": 0.9,
+                "lookaheadSeconds": 0.04,
+                "pathWindowSeconds": 0.35,
+                "travelCollapse": 0.7,
+                "clickSnapWindow": 0.15,
+                "smoothingScope": "fullRecording",
+                "shutterAngle": 180,
+                "blurStrength": 1.0,
+                "cursorBlur": 0.6,
+                "transitionSoftness": 0.5
+            ]
+        ]
+        let migrated = try MigrationRegistry.standard.migrate(v6)
+        XCTAssertEqual(migrated["schemaVersion"] as? Int, currentSchemaVersion)
+
+        let data = try JSONSerialization.data(withJSONObject: migrated, options: .sortedKeys)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let project = try decoder.decode(Project.self, from: data)
+        XCTAssertEqual(project.tuning, .default)
+    }
+
+    func test_migrator_v6ToV7_preservesCustomizedTuningAndAddsNewFields() throws {
+        let v6: [String: Any] = [
+            "schemaVersion": 6,
+            "bundleVersion": 1,
+            "id": "p6-custom",
+            "name": "v6 custom tuning",
+            "createdAt": "2026-06-01T00:00:00Z",
+            "modifiedAt": "2026-06-01T00:00:00Z",
+            "assets": [],
+            "tracks": [],
+            "sourceSegments": [],
+            "extras": [:],
+            "tuning": [
+                "cameraTau": 0.7,
+                "settle": 0.25,
+                "deadzoneFraction": 0.35,
+                "maxPanSpeed": 0.9,
+                "lookaheadSeconds": 0.04,
+                "pathWindowSeconds": 0.35,
+                "travelCollapse": 0.7,
+                "clickSnapWindow": 0.15,
+                "smoothingScope": "fullRecording",
+                "shutterAngle": 180,
+                "blurStrength": 1.0,
+                "cursorBlur": 0.6,
+                "transitionSoftness": 0.5
+            ]
+        ]
+        let migrated = try MigrationRegistry.standard.migrate(v6)
+        let tuning = try XCTUnwrap(migrated["tuning"] as? [String: Any])
+        XCTAssertEqual(tuning["cameraTau"] as? Double, 0.7)
+        XCTAssertEqual(tuning["fastMotionSensitivity"] as? Double, TuningSettings.default.fastMotionSensitivity)
+        XCTAssertEqual(tuning["edgeCushion"] as? Double, TuningSettings.default.edgeCushion)
     }
 
     func test_decodeLegacySourceSegment_missingExtras_usesEmptyExtras() throws {

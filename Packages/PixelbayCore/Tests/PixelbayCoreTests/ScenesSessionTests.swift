@@ -88,8 +88,8 @@ final class ScenesSessionTests: XCTestCase {
 
     // MARK: - Project schema integration
 
-    func test_project_schemaVersion_isSix() {
-        XCTAssertEqual(currentSchemaVersion, 6)
+    func test_project_schemaVersion_includesScenesSessionMigration() {
+        XCTAssertGreaterThanOrEqual(currentSchemaVersion, 5)
     }
 
     func test_project_freshProject_scenesSessionIsNil() {

@@ -8,15 +8,14 @@ import Foundation
 // the user-facing knobs that control that pass — currently just size. Color,
 // click-press animation, and cursor-shape tracking are reserved for v2.
 //
-// The default `scale = 3.25` chosen so the cursor reads clearly when the
-// recording is viewed at typical screencast sizes (half-window playback,
-// embedded video). 1.75× tested too small — viewers reported losing the
-// cursor on busy UI. 3.25× yields ~104 px on 1080p, matching the rough
-// scale Screen Studio defaults to.
+// The default `scale = 3.25` is paired with the compositor's smaller 18px
+// base cursor height, yielding a ~58 px SVG box on 1080p output. The actual
+// arrow shape sits inside that box, so the pointer stays readable without
+// feeling oversized while the camera is not zoomed.
 
 public struct CursorSettings: Codable, Sendable, Equatable {
     public static let defaultScale: Double = 3.25
-    public static let defaultZoomScaleBoostPerZoomUnit: Double = 0.75
+    public static let defaultZoomScaleBoostPerZoomUnit: Double = 0.15
     public static let defaultVelocityScaleBoost: Double = 0.12
     public static let defaultVelocityScaleLow: Double = 0.15
     public static let defaultVelocityScaleHigh: Double = 1.20

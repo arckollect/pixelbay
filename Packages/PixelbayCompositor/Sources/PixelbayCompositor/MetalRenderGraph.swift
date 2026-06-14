@@ -574,13 +574,12 @@ public final class MetalRenderGraph: @unchecked Sendable {
     // MARK: - Cursor pass (Phase 3c)
 
     /// Base output-height fraction the cursor occupies at `scale = 1.0`.
-    /// At 1080p output a scale-1.0 cursor renders ~32 px tall; the
-    /// `CursorSettings.default.scale` of 3.25 yields ~104 px — visibly
-    /// larger than the OS cursor (~16 px on standard DPI) so a viewer
-    /// can track it without straining at typical screencast playback
-    /// sizes. Cursor aspect ratio is preserved from `pointSize`, so a
-    /// taller/wider sprite scales proportionally.
-    private static let cursorBaseFractionOfOutputHeight: CGFloat = 32.0 / 1080.0
+    /// At 1080p output a scale-1.0 cursor renders ~18 px tall; the
+    /// `CursorSettings.default.scale` of 3.25 yields a ~58 px SVG box, with
+    /// the actual arrow shape reading around the mid-40 px range. This keeps
+    /// saved projects with the old 3.25× setting from looking huge before any
+    /// zoom effect is active.
+    private static let cursorBaseFractionOfOutputHeight: CGFloat = 18.0 / 1080.0
 
     private func drawCursor(
         encoder: MTLRenderCommandEncoder,

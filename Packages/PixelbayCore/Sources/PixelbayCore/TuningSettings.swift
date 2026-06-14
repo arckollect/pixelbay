@@ -39,6 +39,12 @@ public struct TuningSettings: Codable, Sendable, Equatable {
     public var deadzoneFraction: Double {
         didSet { deadzoneFraction = deadzoneFraction.clamped(to: Self.deadzoneFractionRange) }
     }
+    /// Preemptive pressure as the cursor approaches the zoomed viewport edge.
+    /// This starts catch-up before the emergency visible-frame clamp has to
+    /// intervene; 0 = no edge pressure, 1 = strongest near-edge urgency.
+    public var edgeCushion: Double {
+        didSet { edgeCushion = edgeCushion.clamped(to: Self.edgeCushionRange) }
+    }
     /// Camera pan speed cap in normalized screen-units per second.
     public var maxPanSpeed: Double {
         didSet { maxPanSpeed = maxPanSpeed.clamped(to: Self.maxPanSpeedRange) }
@@ -56,6 +62,12 @@ public struct TuningSettings: Codable, Sendable, Equatable {
     /// Larger windows both slow AND shrink fast motion (amplitude collapse).
     public var pathWindowSeconds: Double {
         didSet { pathWindowSeconds = pathWindowSeconds.clamped(to: Self.pathWindowSecondsRange) }
+    }
+    /// How readily the path smoother treats motion as "fast" and stylizes it.
+    /// Higher = smoothing engages at lower cursor speeds; lower = only truly
+    /// violent movement is rewritten.
+    public var fastMotionSensitivity: Double {
+        didSet { fastMotionSensitivity = fastMotionSensitivity.clamped(to: Self.fastMotionSensitivityRange) }
     }
     /// How much fast travel may deviate from the raw path, 0 = stay honest,
     /// 1 = fully collapse edge-to-edge spam into the window mean.
@@ -97,12 +109,14 @@ public struct TuningSettings: Codable, Sendable, Equatable {
 
     // MARK: Ranges
 
-    public static let cameraTauRange: ClosedRange<Double> = 0.10...0.80
+    public static let cameraTauRange: ClosedRange<Double> = 0.10...1.50
     public static let settleRange: ClosedRange<Double> = 0.0...1.0
     public static let deadzoneFractionRange: ClosedRange<Double> = 0.0...0.6
-    public static let maxPanSpeedRange: ClosedRange<Double> = 0.3...2.5
+    public static let edgeCushionRange: ClosedRange<Double> = 0.0...1.0
+    public static let maxPanSpeedRange: ClosedRange<Double> = 0.05...2.5
     public static let lookaheadSecondsRange: ClosedRange<Double> = 0.0...0.15
     public static let pathWindowSecondsRange: ClosedRange<Double> = 0.0...0.6
+    public static let fastMotionSensitivityRange: ClosedRange<Double> = 0.0...1.0
     public static let travelCollapseRange: ClosedRange<Double> = 0.0...1.0
     public static let clickSnapWindowRange: ClosedRange<Double> = 0.05...0.4
     public static let shutterAngleRange: ClosedRange<Double> = 0.0...360.0
@@ -113,14 +127,16 @@ public struct TuningSettings: Codable, Sendable, Equatable {
     public static let `default` = TuningSettings()
 
     public init(
-        cameraTau: Double = 0.35,
-        settle: Double = 0.25,
-        deadzoneFraction: Double = 0.35,
-        maxPanSpeed: Double = 0.9,
-        lookaheadSeconds: Double = 0.04,
-        pathWindowSeconds: Double = 0.35,
-        travelCollapse: Double = 0.7,
-        clickSnapWindow: Double = 0.15,
+        cameraTau: Double = 0.65,
+        settle: Double = 0.18,
+        deadzoneFraction: Double = 0.20,
+        edgeCushion: Double = 0.55,
+        maxPanSpeed: Double = 0.35,
+        lookaheadSeconds: Double = 0.02,
+        pathWindowSeconds: Double = 0.45,
+        fastMotionSensitivity: Double = 0.72,
+        travelCollapse: Double = 0.85,
+        clickSnapWindow: Double = 0.12,
         smoothingScope: SmoothingScope = .fullRecording,
         shutterAngle: Double = 180,
         blurStrength: Double = 1.0,
@@ -130,9 +146,11 @@ public struct TuningSettings: Codable, Sendable, Equatable {
         self.cameraTau = cameraTau.clamped(to: Self.cameraTauRange)
         self.settle = settle.clamped(to: Self.settleRange)
         self.deadzoneFraction = deadzoneFraction.clamped(to: Self.deadzoneFractionRange)
+        self.edgeCushion = edgeCushion.clamped(to: Self.edgeCushionRange)
         self.maxPanSpeed = maxPanSpeed.clamped(to: Self.maxPanSpeedRange)
         self.lookaheadSeconds = lookaheadSeconds.clamped(to: Self.lookaheadSecondsRange)
         self.pathWindowSeconds = pathWindowSeconds.clamped(to: Self.pathWindowSecondsRange)
+        self.fastMotionSensitivity = fastMotionSensitivity.clamped(to: Self.fastMotionSensitivityRange)
         self.travelCollapse = travelCollapse.clamped(to: Self.travelCollapseRange)
         self.clickSnapWindow = clickSnapWindow.clamped(to: Self.clickSnapWindowRange)
         self.smoothingScope = smoothingScope
@@ -146,9 +164,11 @@ public struct TuningSettings: Codable, Sendable, Equatable {
         case cameraTau
         case settle
         case deadzoneFraction
+        case edgeCushion
         case maxPanSpeed
         case lookaheadSeconds
         case pathWindowSeconds
+        case fastMotionSensitivity
         case travelCollapse
         case clickSnapWindow
         case smoothingScope
@@ -165,9 +185,11 @@ public struct TuningSettings: Codable, Sendable, Equatable {
             cameraTau: try c.decodeIfPresent(Double.self, forKey: .cameraTau) ?? d.cameraTau,
             settle: try c.decodeIfPresent(Double.self, forKey: .settle) ?? d.settle,
             deadzoneFraction: try c.decodeIfPresent(Double.self, forKey: .deadzoneFraction) ?? d.deadzoneFraction,
+            edgeCushion: try c.decodeIfPresent(Double.self, forKey: .edgeCushion) ?? d.edgeCushion,
             maxPanSpeed: try c.decodeIfPresent(Double.self, forKey: .maxPanSpeed) ?? d.maxPanSpeed,
             lookaheadSeconds: try c.decodeIfPresent(Double.self, forKey: .lookaheadSeconds) ?? d.lookaheadSeconds,
             pathWindowSeconds: try c.decodeIfPresent(Double.self, forKey: .pathWindowSeconds) ?? d.pathWindowSeconds,
+            fastMotionSensitivity: try c.decodeIfPresent(Double.self, forKey: .fastMotionSensitivity) ?? d.fastMotionSensitivity,
             travelCollapse: try c.decodeIfPresent(Double.self, forKey: .travelCollapse) ?? d.travelCollapse,
             clickSnapWindow: try c.decodeIfPresent(Double.self, forKey: .clickSnapWindow) ?? d.clickSnapWindow,
             smoothingScope: try c.decodeIfPresent(SmoothingScope.self, forKey: .smoothingScope) ?? d.smoothingScope,
@@ -187,9 +209,11 @@ public struct TuningSettings: Codable, Sendable, Equatable {
             cameraTau: \(formatted(cameraTau)),
             settle: \(formatted(settle)),
             deadzoneFraction: \(formatted(deadzoneFraction)),
+            edgeCushion: \(formatted(edgeCushion)),
             maxPanSpeed: \(formatted(maxPanSpeed)),
             lookaheadSeconds: \(formatted(lookaheadSeconds)),
             pathWindowSeconds: \(formatted(pathWindowSeconds)),
+            fastMotionSensitivity: \(formatted(fastMotionSensitivity)),
             travelCollapse: \(formatted(travelCollapse)),
             clickSnapWindow: \(formatted(clickSnapWindow)),
             smoothingScope: .\(smoothingScope.rawValue),
@@ -203,6 +227,20 @@ public struct TuningSettings: Codable, Sendable, Equatable {
 
     private func formatted(_ value: Double) -> String {
         String(format: "%.3f", value)
+    }
+
+    /// Internal speed gates for the cursor-path smoother. One user-facing
+    /// sensitivity slider controls both thresholds so path-window size,
+    /// amplitude collapse, and "when smoothing starts" remain independent.
+    public static func smoothingSpeedGates(for sensitivity: Double) -> (low: Double, high: Double) {
+        let s = sensitivity.clamped(to: fastMotionSensitivityRange)
+        let low = 0.16 + (0.02 - 0.16) * s
+        let high = 1.45 + (0.35 - 1.45) * s
+        return (low: low, high: max(low + 0.05, high))
+    }
+
+    public var smoothingSpeedGates: (low: Double, high: Double) {
+        Self.smoothingSpeedGates(for: fastMotionSensitivity)
     }
 }
 

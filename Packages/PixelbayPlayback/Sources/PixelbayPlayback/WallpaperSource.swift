@@ -17,6 +17,7 @@ import AppKit
 // NSScreen. The compositor architecture (LayerLayout.swift's
 // `resolveBackground`) leaves `.systemWallpaper` to the app boundary;
 // this shim is what the app uses to convert the user's desktop image
+
 // into a gradient that the existing background pipeline can render —
 // no new shader / pipeline state needed at v0.1.
 public struct WallpaperSource: Sendable {

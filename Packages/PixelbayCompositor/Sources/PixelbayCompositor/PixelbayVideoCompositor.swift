@@ -306,10 +306,10 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
             // EffectEvaluator: that keeps the compositor stateless about
             // keyframe geometry and naturally tracks the ease in/out
             // (factor=1.0 at idle → no boost, ramps up mid-ease, peaks at
-            // hold, then ramps back down). The coefficient is tuned so a
-            // 1.6× zoom (the default auto-zoom) yields ~1.45× cursor —
-            // deliberately ahead of the UI's own scale-up so the cursor
-            // stays easy to locate while zoomed in.
+            // hold, then ramps back down). The coefficient is deliberately
+            // gentle: a 1.6× zoom yields ~1.09× cursor, enough emphasis to
+            // keep it findable without making the pointer balloon during
+            // zoom-follow.
             let zoomFactor = baseLayout.screen.size.width > 0
                 ? layout.screen.size.width / baseLayout.screen.size.width
                 : 1.0
