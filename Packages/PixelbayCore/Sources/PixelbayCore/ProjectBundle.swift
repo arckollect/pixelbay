@@ -31,8 +31,32 @@ public struct ProjectBundle: Sendable {
     public var thumbnailsDirectoryURL: URL { url.appendingPathComponent(Self.thumbnailsDirectoryName) }
     public var voiceoversDirectoryURL: URL { url.appendingPathComponent(Self.voiceoversDirectoryName) }
 
-    public func mediaURL(for asset: MediaAsset) -> URL {
-        url.appendingPathComponent(asset.relativePath)
+    public func mediaURL(for asset: MediaAsset) throws -> URL {
+        try url(forRelativePath: asset.relativePath)
+    }
+
+    public func url(forRelativePath relativePath: String) throws -> URL {
+        guard Self.isSafeRelativePath(relativePath) else {
+            throw ProjectBundleError.unsafeRelativePath(relativePath)
+        }
+        return relativePath
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .reduce(url) { partialURL, component in
+                partialURL.appendingPathComponent(String(component))
+            }
+    }
+
+    public static func isSafeRelativePath(_ relativePath: String) -> Bool {
+        guard !relativePath.isEmpty,
+              !relativePath.hasPrefix("/"),
+              !relativePath.contains("\\"),
+              !relativePath.contains("\0")
+        else { return false }
+
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false)
+        return components.allSatisfy { component in
+            !component.isEmpty && component != "." && component != ".."
+        }
     }
 }
 
@@ -40,6 +64,7 @@ public enum ProjectBundleError: Error, CustomStringConvertible {
     case bundleAlreadyExists(URL)
     case projectFileMissing(URL)
     case projectFileMalformed(underlying: Error)
+    case unsafeRelativePath(String)
 
     public var description: String {
         switch self {
@@ -49,6 +74,8 @@ public enum ProjectBundleError: Error, CustomStringConvertible {
             return "project.json not found at \(url.path)"
         case .projectFileMalformed(let underlying):
             return "project.json could not be decoded: \(underlying)"
+        case .unsafeRelativePath(let path):
+            return "project file path is not bundle-relative: \(path)"
         }
     }
 }

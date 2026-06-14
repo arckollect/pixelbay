@@ -460,8 +460,8 @@ final class ScenesSessionModel {
         in bundle: ProjectBundle
     ) async -> String? {
         let relativePath = "media/thumb-\(sessionID).png"
-        let outputURL = bundle.url.appendingPathComponent(relativePath)
         do {
+            let outputURL = try bundle.url(forRelativePath: relativePath)
             try await Self.writeFirstFrameThumbnail(
                 screenURL: screenURL,
                 outputURL: outputURL
@@ -486,8 +486,8 @@ final class ScenesSessionModel {
     ) async -> String? {
         guard let preview = await takePreviewComposition(forSceneAt: index) else { return nil }
         let relativePath = "media/thumb-\(sessionID).png"
-        let outputURL = bundle.url.appendingPathComponent(relativePath)
         do {
+            let outputURL = try bundle.url(forRelativePath: relativePath)
             try await Self.writeCompositeThumbnail(preview: preview, outputURL: outputURL)
             return relativePath
         } catch {
@@ -802,8 +802,10 @@ final class ScenesSessionModel {
         from sourceBundleURL: URL,
         to targetBundleURL: URL
     ) throws {
-        let srcURL = sourceBundleURL.appendingPathComponent(asset.relativePath)
-        let dstURL = targetBundleURL.appendingPathComponent(asset.relativePath)
+        let sourceBundle = ProjectBundle(url: sourceBundleURL)
+        let targetBundle = ProjectBundle(url: targetBundleURL)
+        let srcURL = try sourceBundle.url(forRelativePath: asset.relativePath)
+        let dstURL = try targetBundle.url(forRelativePath: asset.relativePath)
         if FileManager.default.fileExists(atPath: dstURL.path) {
             return
         }
@@ -832,9 +834,11 @@ final class ScenesSessionModel {
             "media/clicks-\(sessionPrefix).json",
             "media/thumb-\(sessionPrefix).png"
         ]
+        let sourceBundle = ProjectBundle(url: sourceBundleURL)
+        let targetBundle = ProjectBundle(url: targetBundleURL)
         for relative in candidates {
-            let srcURL = sourceBundleURL.appendingPathComponent(relative)
-            let dstURL = targetBundleURL.appendingPathComponent(relative)
+            let srcURL = try sourceBundle.url(forRelativePath: relative)
+            let dstURL = try targetBundle.url(forRelativePath: relative)
             if !FileManager.default.fileExists(atPath: srcURL.path) { continue }
             if FileManager.default.fileExists(atPath: dstURL.path) { continue }
             try FileManager.default.createDirectory(

@@ -49,6 +49,37 @@ final class ProjectBundleTests: XCTestCase {
         XCTAssertEqual(reloaded.assets[0].relativePath, "media/screen-001.mov")
     }
 
+    func test_bundleRelativeURL_allowsNormalNestedPaths() throws {
+        let bundle = ProjectBundle(url: tempDirectory.appendingPathComponent("Safe.pixelbay"))
+
+        let url = try bundle.url(forRelativePath: "media/screen-001.mov")
+
+        XCTAssertEqual(url, bundle.url.appendingPathComponent("media/screen-001.mov"))
+    }
+
+    func test_bundleRelativeURL_rejectsPathTraversalAndAbsolutePaths() {
+        let bundle = ProjectBundle(url: tempDirectory.appendingPathComponent("Unsafe.pixelbay"))
+        let unsafePaths = [
+            "",
+            "/tmp/escape.mov",
+            "../escape.mov",
+            "media/../escape.mov",
+            "media//screen.mov",
+            "media/./screen.mov",
+            "media\\screen.mov",
+            "media/screen.mov\u{0}"
+        ]
+
+        for path in unsafePaths {
+            XCTAssertThrowsError(try bundle.url(forRelativePath: path), path) { error in
+                guard case ProjectBundleError.unsafeRelativePath(let rejected) = error else {
+                    return XCTFail("expected .unsafeRelativePath for \(path), got \(error)")
+                }
+                XCTAssertEqual(rejected, path)
+            }
+        }
+    }
+
     // MARK: - Atomic save
 
     func test_writeProject_isAtomic_doesNotLeaveTempArtifacts() throws {

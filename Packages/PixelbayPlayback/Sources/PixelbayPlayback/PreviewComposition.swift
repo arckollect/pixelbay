@@ -325,9 +325,10 @@ public enum PreviewCompositionBuilder {
         var firstNaturalSize: CGSize = .zero
         var firstTransform: CGAffineTransform = .identity
         var inserted = false
+        let bundle = ProjectBundle(url: bundleURL)
         for clip in track.clips {
             guard let asset = project.assets.first(where: { $0.id == clip.assetID }) else { continue }
-            let url = bundleURL.appendingPathComponent(asset.relativePath)
+            let url = try bundle.mediaURL(for: asset)
             guard FileManager.default.fileExists(atPath: url.path) else {
                 throw PreviewCompositionError.fileNotFound(url)
             }
@@ -408,6 +409,7 @@ public enum PreviewCompositionBuilder {
         }
         var inserted = false
         let inputParams = AVMutableAudioMixInputParameters(track: mutableTrack)
+        let bundle = ProjectBundle(url: bundleURL)
         // Defensive: AVMutableScheduledAudioParameters throws
         // NSInvalidArgumentException ("The timeRange of a ramp must not
         // overlap the timeRange of an existing ramp") if two clips on
@@ -420,7 +422,7 @@ public enum PreviewCompositionBuilder {
         var previousRampEnd: CMTime?
         for clip in track.clips {
             guard let asset = project.assets.first(where: { $0.id == clip.assetID }) else { continue }
-            let url = bundleURL.appendingPathComponent(asset.relativePath)
+            let url = try bundle.mediaURL(for: asset)
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
             let assetObj = AVURLAsset(url: url)
             let audioTracks = try await assetObj.loadTracks(withMediaType: .audio)

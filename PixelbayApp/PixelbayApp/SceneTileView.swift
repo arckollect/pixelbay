@@ -128,7 +128,9 @@ struct SceneTileView: View {
     /// for a normal capture, but guard so the sheet degrades gracefully).
     private var activeTakeScreenURL: URL? {
         guard let take = scene.activeTake else { return nil }
-        let url = model.bundle.url.appendingPathComponent("media/screen-\(take.sessionID).mov")
+        guard let url = try? model.bundle.url(forRelativePath: "media/screen-\(take.sessionID).mov") else {
+            return nil
+        }
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
@@ -408,7 +410,7 @@ struct SceneTileView: View {
     /// missing (recording-in-progress race). NSImage caches recently-loaded
     /// URLs so per-render calls are cheap.
     private func loadThumbnail(relativePath: String) -> NSImage? {
-        let url = model.bundle.url.appendingPathComponent(relativePath)
+        guard let url = try? model.bundle.url(forRelativePath: relativePath) else { return nil }
         return NSImage(contentsOf: url)
     }
 

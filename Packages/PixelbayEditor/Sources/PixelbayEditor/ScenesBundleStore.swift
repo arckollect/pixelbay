@@ -348,7 +348,7 @@ public enum ScenesBundleStore {
 
         for id in distinctRemovedIDs {
             guard let asset = assetByID[id] else { continue }
-            let mediaURL = bundle.url.appendingPathComponent(asset.relativePath)
+            guard let mediaURL = try? bundle.url(forRelativePath: asset.relativePath) else { continue }
             if fileManager.fileExists(atPath: mediaURL.path) {
                 removedFilePaths.append(asset.relativePath)
             }
@@ -404,8 +404,9 @@ public enum ScenesBundleStore {
         bundleURL: URL,
         fileManager: FileManager = .default
     ) throws {
+        let bundle = ProjectBundle(url: bundleURL)
         for relativePath in report.removedFilePaths {
-            let url = bundleURL.appendingPathComponent(relativePath)
+            let url = try bundle.url(forRelativePath: relativePath)
             if fileManager.fileExists(atPath: url.path) {
                 try fileManager.removeItem(at: url)
             }

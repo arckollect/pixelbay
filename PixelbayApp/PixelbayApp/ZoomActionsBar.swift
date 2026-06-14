@@ -480,7 +480,7 @@ struct ZoomActionsBar: View {
         sidecarURL: URL
     ) async throws -> (ClicksSidecar, CGSize) {
         let sidecar = try ClicksSidecarStore.read(from: sidecarURL)
-        let assetURL = bundleURL.appendingPathComponent(asset.relativePath)
+        let assetURL = try ProjectBundle(url: bundleURL).mediaURL(for: asset)
         let avAsset = AVURLAsset(url: assetURL)
         let videoTracks = try await avAsset.loadTracks(withMediaType: .video)
         guard let firstTrack = videoTracks.first else {

@@ -70,7 +70,7 @@ enum CursorTrajectoryLoader {
                 let sidecar = try ClicksSidecarStore.read(from: sidecarURL)
                 guard !sidecar.moves.isEmpty else { continue }
                 let naturalSize = try await naturalPixelSize(
-                    for: bundleURL.appendingPathComponent(asset.relativePath)
+                    for: try ProjectBundle(url: bundleURL).mediaURL(for: asset)
                 )
                 let perAsset = AutoZoomService.mouseTrajectory(
                     from: sidecar,

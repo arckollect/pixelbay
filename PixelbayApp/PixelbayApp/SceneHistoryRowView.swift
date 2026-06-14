@@ -120,7 +120,9 @@ struct SceneHistoryRowView: View {
 
     private func loadThumbnail(relativePath: String) -> NSImage? {
         guard let appendTarget = model.appendTarget else { return nil }
-        let url = appendTarget.bundleURL.appendingPathComponent(relativePath)
+        guard let url = try? ProjectBundle(url: appendTarget.bundleURL).url(forRelativePath: relativePath) else {
+            return nil
+        }
         return NSImage(contentsOf: url)
     }
 

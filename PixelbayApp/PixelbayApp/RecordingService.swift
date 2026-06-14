@@ -287,8 +287,6 @@ final class RecordingService {
         captureStart: Double,
         bundle: ProjectBundle
     ) {
-        let url = bundle.mediaDirectoryURL
-            .appendingPathComponent(ClicksSidecarStore.filename(for: sessionID))
         let sidecar = ClicksSidecar(
             sessionID: sessionID,
             captureStart: captureStart,
@@ -297,6 +295,9 @@ final class RecordingService {
             marks: marks
         )
         do {
+            let url = try bundle.url(
+                forRelativePath: "media/\(ClicksSidecarStore.filename(for: sessionID))"
+            )
             try ClicksSidecarStore.write(sidecar, to: url)
             log.info("clicks sidecar written clicks=\(clicks.count) moves=\(moves.count) marks=\(marks.count) url=\(url.path, privacy: .public)")
         } catch {
@@ -649,7 +650,13 @@ final class RecordingService {
         let bundlePath = bundle.url.standardizedFileURL.path
         let abs = url.standardizedFileURL.path
         if abs.hasPrefix(bundlePath + "/") {
-            return String(abs.dropFirst(bundlePath.count + 1))
+            let relativePath = String(abs.dropFirst(bundlePath.count + 1))
+            guard ProjectBundle.isSafeRelativePath(relativePath) else {
+                throw CaptureError.bundleUnavailable(
+                    message: "recording output produced an unsafe project-relative path: \(relativePath)"
+                )
+            }
+            return relativePath
         }
         throw CaptureError.bundleUnavailable(
             message: "recording output was written outside the project bundle: \(abs)"

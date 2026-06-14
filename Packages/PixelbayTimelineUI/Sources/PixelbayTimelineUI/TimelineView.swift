@@ -910,7 +910,7 @@ public final class TimelineNSView: NSView {
         guard let project, let bundleURL else { return }
         guard let modelClip = project.tracks.flatMap(\.clips).first(where: { $0.id == clip.id }) else { return }
         guard let asset = project.assets.first(where: { $0.id == modelClip.assetID }) else { return }
-        let assetURL = bundleURL.appendingPathComponent(asset.relativePath)
+        guard let assetURL = try? ProjectBundle(url: bundleURL).mediaURL(for: asset) else { return }
 
         let inset: CGFloat = 4
         let stripFrame = CGRect(
@@ -992,7 +992,7 @@ public final class TimelineNSView: NSView {
         guard let project, let bundleURL else { return }
         guard let modelClip = project.tracks.flatMap(\.clips).first(where: { $0.id == clip.id }) else { return }
         guard let asset = project.assets.first(where: { $0.id == modelClip.assetID }) else { return }
-        let assetURL = bundleURL.appendingPathComponent(asset.relativePath)
+        guard let assetURL = try? ProjectBundle(url: bundleURL).mediaURL(for: asset) else { return }
         let waveform = WaveformLayer()
         // Inset the waveform inside the clip frame so the rounded clip
         // border still shows around the edges.

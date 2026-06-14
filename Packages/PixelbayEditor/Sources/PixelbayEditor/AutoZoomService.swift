@@ -50,9 +50,8 @@ public enum AutoZoomService {
     ) -> URL? {
         guard asset.kind == .display else { return nil }
         guard let id = sessionID(fromScreenRelativePath: asset.relativePath) else { return nil }
-        return bundleURL
-            .appendingPathComponent("media", isDirectory: true)
-            .appendingPathComponent(ClicksSidecarStore.filename(for: id))
+        return try? ProjectBundle(url: bundleURL)
+            .url(forRelativePath: "media/\(ClicksSidecarStore.filename(for: id))")
     }
 
     // MARK: - Project lookup

@@ -69,6 +69,16 @@ final class AutoZoomServiceTests: XCTestCase {
         XCTAssertNil(AutoZoomService.clicksSidecarURL(forScreenAsset: asset, in: bundle))
     }
 
+    func test_clicksSidecarURL_returnsNilWhenDerivedPathUnsafe() {
+        let bundle = URL(fileURLWithPath: "/tmp/proj.pixelbay", isDirectory: true)
+        let asset = MediaAsset(
+            kind: .display,
+            relativePath: "media/screen-bad\\id.mov",
+            nativeDuration: RationalTime(value: 600, timescale: 600)
+        )
+        XCTAssertNil(AutoZoomService.clicksSidecarURL(forScreenAsset: asset, in: bundle))
+    }
+
     // MARK: - screenAsset(in:)
 
     func test_screenAsset_returnsFirstDisplayKind() {

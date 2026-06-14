@@ -381,8 +381,10 @@ struct BackgroundInspector: View {
             presentUploadPanel()
         } content: {
             if let ref = currentUploadRef, let rel = ref.relativePath {
-                WallpaperThumbnail(url: bundleURL.appendingPathComponent(rel))
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous))
+                if let url = try? ProjectBundle(url: bundleURL).url(forRelativePath: rel) {
+                    WallpaperThumbnail(url: url)
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous))
+                }
             } else {
                 RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
                     .fill(Theme.Color.bgElevated)
@@ -604,8 +606,8 @@ struct BackgroundInspector: View {
     private func importUpload(from src: URL) {
         let ext = src.pathExtension.isEmpty ? "png" : src.pathExtension
         let relativePath = "backgrounds/\(UUID().uuidString).\(ext)"
-        let dest = bundleURL.appendingPathComponent(relativePath)
         do {
+            let dest = try ProjectBundle(url: bundleURL).url(forRelativePath: relativePath)
             try FileManager.default.createDirectory(
                 at: dest.deletingLastPathComponent(),
                 withIntermediateDirectories: true

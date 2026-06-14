@@ -35,7 +35,7 @@ public extension WallpaperImageProvider {
             if let id = ref.builtinID {
                 url = builtinURL(id)
             } else if let rel = ref.relativePath {
-                url = bundleURL.appendingPathComponent(rel)
+                url = try? ProjectBundle(url: bundleURL).url(forRelativePath: rel)
             } else {
                 url = nil
             }
