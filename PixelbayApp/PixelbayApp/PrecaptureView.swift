@@ -216,7 +216,7 @@ struct PrecaptureView: View {
     var onClose: () -> Void = {}
 
     private enum ToolbarControl: Hashable {
-        case source, camera, mic, systemAudio, close, record, overflow
+        case source, camera, mic, systemAudio, scenes, close, record, overflow
     }
 
     // Screen-Studio-style floating hover bar. The launcher window is restyled
@@ -233,6 +233,7 @@ struct PrecaptureView: View {
             micControl
             systemAudioControl
             barDivider
+            scenesButton
             recordButton
             barDivider
             overflowMenu
@@ -436,6 +437,32 @@ struct PrecaptureView: View {
         .help(model.includeSystemAudio ? "System audio will be recorded" : "System audio is off")
     }
 
+    // Direct entry to the multi-take Scenes panel — surfaced on the bar so it's
+    // one click away rather than buried in the overflow menu. A plain action
+    // button (not a mode toggle): one click opens the panel.
+    private var scenesButton: some View {
+        Button(action: onSceneRecording) {
+            Image(systemName: "rectangle.stack.badge.play.fill")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(hoveredControl == .scenes ? Theme.Color.textPrimary : Theme.Color.textSecondary)
+                .frame(width: 40, height: 44)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
+                        .fill(Color.white.opacity(hoveredControl == .scenes ? 0.13 : 0.001))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
+                        .strokeBorder(Color.white.opacity(hoveredControl == .scenes ? 0.18 : 0),
+                                      lineWidth: Theme.Stroke.hairline)
+                )
+                .scaleEffect(hoveredControl == .scenes ? 1.05 : 1)
+                .animation(.easeOut(duration: 0.14), value: hoveredControl == .scenes)
+                .onHover { setHovered(.scenes, $0) }
+        }
+        .buttonStyle(.plain)
+        .help("Scene recording — capture multiple takes")
+    }
+
     private var recordButton: some View {
         Button(action: onRecord) {
             HStack(spacing: Theme.Spacing.xs) {
@@ -476,12 +503,9 @@ struct PrecaptureView: View {
     }
 
     private func makeOverflowMenu() -> NSMenu {
+        // Scene Recording moved out to the `scenesToggle` bar button.
         let menu = NSMenu()
         menu.autoenablesItems = false   // respect our explicit isEnabled (disabled toggle)
-        let scene = menuItem("Scene Recording", checked: false) { onSceneRecording() }
-        scene.image = NSImage(systemSymbolName: "rectangle.stack.badge.play", accessibilityDescription: nil)
-        menu.addItem(scene)
-        menu.addItem(.separator())
         menu.addItem(menuItem("Track cursor (zoom follow + auto-zoom)",
                               checked: model.logClicks,
                               enabled: accessibilityGranted) {
