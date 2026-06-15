@@ -25,17 +25,16 @@ final class RecordingHUDController {
         }
         let view = RecordingHUDView(service: service)
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 384, height: 76),
+            contentRect: NSRect(x: 0, y: 0, width: 348, height: 68),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
         // Host the SwiftUI view with NSHostingView (NOT NSHostingController +
         // contentViewController) and clear `sizingOptions`, so the view NEVER
-        // pushes a size up to the window. The HUD body runs a 10×/s
-        // TimelineView(.periodic(by: 0.1)); if the host is allowed to drive
+        // pushes a size up to the window. If the host is allowed to drive
         // window size, that size-push fires inside AppKit's layout pass on
-        // every tick and AppKit aborts with NSGenericException ("more Update
+        // every timer tick and AppKit aborts with NSGenericException ("more Update
         // Constraints in Window passes than there are views"). The panel owns a
         // fixed size; the hosting view fills it via autoresizing + the SwiftUI
         // root's maxWidth/maxHeight. (The old .titled/.hudWindow panel happened
@@ -43,7 +42,7 @@ final class RecordingHUDController {
         // be disabled explicitly.)
         let hostingView = NSHostingView(rootView: view)
         hostingView.sizingOptions = []
-        hostingView.frame = NSRect(origin: .zero, size: NSSize(width: 384, height: 76))
+        hostingView.frame = NSRect(origin: .zero, size: NSSize(width: 348, height: 68))
         hostingView.autoresizingMask = [.width, .height]
         panel.contentView = hostingView
         panel.isFloatingPanel = true
@@ -87,6 +86,7 @@ final class RecordingHUDController {
 private struct RecordingHUDView: View {
     @Bindable var service: RecordingService
     @State private var pulse = false
+    @State private var confirmDiscard = false
 
     private var barShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
@@ -113,10 +113,18 @@ private struct RecordingHUDView: View {
         // The white hairline stroke above provides all the edge separation
         // the bar needs — we want only the toolbar visible.
         .padding(Theme.Spacing.sm)   // transparent margin inside the panel
+        .confirmationDialog("Discard this recording?", isPresented: $confirmDiscard) {
+            Button("Discard Recording", role: .destructive) {
+                Task { await service.discard() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This deletes the in-progress recording.")
+        }
     }
 
     private func liveBody(startedAt: Date) -> some View {
-        HStack(spacing: Theme.Spacing.md) {
+        HStack(spacing: Theme.Spacing.sm) {
             // Timer group: pulsing record dot + (scene label) + elapsed time.
             HStack(spacing: Theme.Spacing.sm) {
                 Circle()
@@ -131,21 +139,23 @@ private struct RecordingHUDView: View {
                     Text(sceneLabel)
                         .font(Theme.Font.cardTitle)
                         .foregroundStyle(Theme.Color.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
-                TimelineView(.periodic(from: startedAt, by: 0.1)) { context in
+                TimelineView(.periodic(from: startedAt, by: 1)) { context in
                     Text(formatElapsed(startedAt: startedAt, now: context.date))
                         .font(Theme.Font.monoTimecodeLarge)
                         .foregroundStyle(service.sceneLabel == nil ? Theme.Color.textPrimary : Theme.Color.textSecondary)
                         .monospacedDigit()
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             PBDivider(.vertical).frame(height: 28)
 
             // Actions group. Scenes records into a shared bundle, so Discard /
             // Restart (which delete the recording) are omitted there — only
-            // Stop. Normal single recordings get the full Restart · Discard ·
-            // Stop set.
+            // Stop. Normal single recordings keep retry/delete one click away.
             HStack(spacing: Theme.Spacing.sm) {
                 if service.sceneLabel == nil {
                     Button {
@@ -157,7 +167,7 @@ private struct RecordingHUDView: View {
                     .help("Restart — discard this take and start over")
 
                     Button {
-                        Task { await service.discard() }
+                        confirmDiscard = true
                     } label: {
                         Image(systemName: "trash")
                     }
@@ -188,9 +198,10 @@ private struct RecordingHUDView: View {
 
     private func formatElapsed(startedAt: Date, now: Date) -> String {
         let total = max(0, now.timeIntervalSince(startedAt))
-        let minutes = Int(total) / 60
-        let seconds = total - Double(minutes * 60)
-        return String(format: "%02d:%05.2f", minutes, seconds)
+        let wholeSeconds = Int(total.rounded(.down))
+        let minutes = wholeSeconds / 60
+        let seconds = wholeSeconds % 60
+        return String(format: "%02d:%02d", minutes, seconds)
     }
 }
 

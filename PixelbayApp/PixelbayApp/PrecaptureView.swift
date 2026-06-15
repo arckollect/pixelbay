@@ -16,6 +16,7 @@ private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "Preca
 /// instance each session otherwise, which used to reset the toggle to OFF
 /// every time).
 private let logClicksDefaultsKey = "precapture.logClicks"
+private let selectedCameraDefaultsKey = "precapture.selectedCameraID"
 
 // §4.10's pre-capture picker. Replaces SmokeRecorderView's recording surface
 // with a real source / camera / mic picker before the user clicks Record.
@@ -50,7 +51,15 @@ final class PrecaptureModel {
     var microphones: [DeviceChoice] = []
 
     var selectedDisplayID: CGDirectDisplayID?
-    var selectedCameraID: String?     // nil = "None"
+    var selectedCameraID: String? = UserDefaults.standard.string(forKey: selectedCameraDefaultsKey) {
+        didSet {
+            if let selectedCameraID {
+                UserDefaults.standard.set(selectedCameraID, forKey: selectedCameraDefaultsKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: selectedCameraDefaultsKey)
+            }
+        }
+    }
     var selectedMicrophoneID: String? // nil = "None"
     var includeSystemAudio: Bool = true
     // Cursor logging (HANDOFF §6.7 + §4.7). The CGEventTap behind this
@@ -107,9 +116,6 @@ final class PrecaptureModel {
         }
         if let prior = selectedCameraID, !cameras.contains(where: { $0.id == prior }) {
             selectedCameraID = nil
-        }
-        if selectedCameraID == nil {
-            selectedCameraID = cameras.first(where: { !$0.isVirtualLoopback })?.id
         }
 
         let micSession = AVCaptureDevice.DiscoverySession(
@@ -186,6 +192,7 @@ struct PrecaptureView: View {
     // breaks the Liquid Glass backdrop mid-drag.
     @State private var hostWindow: NSWindow?
     @State private var dragAnchor: (window: CGPoint, mouse: CGPoint)?
+    @State private var hoveredControl: ToolbarControl?
     /// True iff the user has granted the Accessibility permission. The
     /// click-logger Toggle is shown either way so users discover the
     /// feature, but it's disabled (with a "Grant in Settings" hint) when
@@ -208,28 +215,31 @@ struct PrecaptureView: View {
     /// status item's "Show Pixelbay" brings it back.
     var onClose: () -> Void = {}
 
+    private enum ToolbarControl: Hashable {
+        case source, camera, mic, systemAudio, close, record, overflow
+    }
+
     // Screen-Studio-style floating hover bar. The launcher window is restyled
     // (borderless, floating, bottom-centred) by `LauncherWindowChrome` while
     // this view is on screen; here we just render the bar itself with a
     // transparent margin so the drop shadow has room.
     var body: some View {
-        HStack(spacing: Theme.Spacing.sm) {
+        HStack(spacing: Theme.Spacing.md) {
             closeButton
             barDivider
-            sourceSegment
+            sourceControl
             barDivider
             cameraControl
             micControl
             systemAudioControl
             barDivider
-            sceneButton
             recordButton
             barDivider
             overflowMenu
         }
-        .padding(.horizontal, Theme.Spacing.md)
+        .padding(.horizontal, Theme.Spacing.sm)
         .padding(.vertical, Theme.Spacing.sm)
-        .frame(height: 64)
+        .frame(height: 68)
         // Liquid Glass (macOS 26): a translucent, dark-tinted glass panel —
         // not a flat fill — so the desktop reads faintly through it. The
         // bar window is borderless + clear (LauncherWindowChrome), so the
@@ -287,7 +297,7 @@ struct PrecaptureView: View {
     }
 
     private var barDivider: some View {
-        PBDivider(.vertical).frame(height: 34)
+        PBDivider(.vertical).frame(height: 36)
     }
 
     private var closeButton: some View {
@@ -297,100 +307,116 @@ struct PrecaptureView: View {
                 .foregroundStyle(Theme.Color.bgElevated)
                 .frame(width: 28, height: 28)
                 .background(Circle().fill(Theme.Color.textPrimary))
+                .scaleEffect(hoveredControl == .close ? 1.08 : 1)
+                .animation(.easeOut(duration: 0.14), value: hoveredControl == .close)
+                .onHover { setHovered(.close, $0) }
         }
         .buttonStyle(.plain)
         .help("Close — reopen from the menu bar")
     }
 
-    // Source-type segment. Only Display records today; Window / Area / Device
-    // are Phase-4 deferred so they render dimmed + non-interactive with a
-    // "coming soon" tooltip (matches the Screen Studio layout).
-    private var sourceSegment: some View {
-        HStack(spacing: Theme.Spacing.xs) {
-            Menu {
-                if model.displays.isEmpty {
-                    Text("No displays available")
-                }
-                ForEach(model.displays) { display in
-                    Button {
-                        model.selectedDisplayID = display.id
-                    } label: {
-                        sourceMenuItem(display.localizedName, checked: display.id == model.selectedDisplayID)
-                    }
-                }
-            } label: {
-                sourceTile(icon: "display", title: "Display", selected: true, enabled: true)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Choose which display to record")
-
-            sourceTile(icon: "macwindow", title: "Window", selected: false, enabled: false)
-                .help("Window capture — coming soon")
-            sourceTile(icon: "rectangle.dashed", title: "Area", selected: false, enabled: false)
-                .help("Area capture — coming soon")
-            sourceTile(icon: "iphone", title: "Device", selected: false, enabled: false)
-                .help("Device capture — coming soon")
+    // The three pickers are `Button`s that pop a native `NSMenu`, NOT SwiftUI
+    // `Menu`s. A `.borderlessButton` Menu is backed by an AppKit pop-up control
+    // that swallows SwiftUI hover tracking across its whole area, so no hover
+    // highlight ever appeared (only the plain-Button systemAudio control did).
+    // A real Button gets `.onHover`, and `NSMenu.popUp` reproduces the dropdown.
+    private var sourceControl: some View {
+        BarMenuControl(width: 132, makeMenu: makeSourceMenu, onHoverChange: { setHovered(.source, $0) }) {
+            inlineControl(
+                icon: "display",
+                title: sourceTitle,
+                color: model.selectedDisplayID == nil ? Theme.Color.textSecondary : Theme.Color.textPrimary,
+                width: 132,
+                isHovered: hoveredControl == .source
+            )
         }
-    }
-
-    private func sourceTile(icon: String, title: String, selected: Bool, enabled: Bool) -> some View {
-        VStack(spacing: 3) {
-            Image(systemName: icon).font(.system(size: 17, weight: .regular))
-            Text(title).font(Theme.Font.caption)
-        }
-        .foregroundStyle(selected ? Theme.Color.textPrimary : (enabled ? Theme.Color.textPrimary : Theme.Color.textTertiary))
-        .frame(width: 58, height: 46)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.small)
-                .fill(selected ? Color.white.opacity(0.14) : Color.clear)
-        )
-        .opacity(enabled ? 1 : 0.5)
+        .help(sourceHelp)
     }
 
     private var cameraControl: some View {
-        Menu {
-            Button { model.selectedCameraID = nil } label: {
-                sourceMenuItem("None", checked: model.selectedCameraID == nil)
-            }
-            ForEach(model.cameras) { cam in
-                Button { model.selectedCameraID = cam.id } label: {
-                    sourceMenuItem(cam.localizedName, checked: cam.id == model.selectedCameraID)
-                }
-            }
-        } label: {
+        BarMenuControl(width: 110, makeMenu: makeCameraMenu, onHoverChange: { setHovered(.camera, $0) }) {
             inlineControl(
                 icon: model.selectedCameraID == nil ? "video.slash.fill" : "video.fill",
                 title: cameraTitle,
-                color: model.selectedCameraID == nil ? Theme.Color.textSecondary : Theme.Color.textPrimary
+                color: model.selectedCameraID == nil ? Theme.Color.textSecondary : Theme.Color.textPrimary,
+                width: 110,
+                isHovered: hoveredControl == .camera
             )
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .help(cameraHelp)
     }
 
     private var micControl: some View {
-        Menu {
-            Button { model.selectedMicrophoneID = nil } label: {
-                sourceMenuItem("None", checked: model.selectedMicrophoneID == nil)
-            }
-            ForEach(model.microphones) { mic in
-                Button { model.selectedMicrophoneID = mic.id } label: {
-                    sourceMenuItem(displayedMicLabel(mic), checked: mic.id == model.selectedMicrophoneID)
-                }
-            }
-        } label: {
+        BarMenuControl(width: 118, makeMenu: makeMicMenu, onHoverChange: { setHovered(.mic, $0) }) {
             inlineControl(
                 icon: model.selectedMicrophoneID == nil ? "mic.slash.fill" : "mic.fill",
                 title: micTitle,
-                color: model.selectedMicrophoneID == nil ? Theme.Color.textSecondary : Theme.Color.textPrimary
+                color: model.selectedMicrophoneID == nil ? Theme.Color.textSecondary : Theme.Color.textPrimary,
+                width: 118,
+                isHovered: hoveredControl == .mic
             )
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .help(micHelp)
+    }
+
+    // MARK: - NSMenu builders (popped by `BarMenuControl`)
+
+    private func makeSourceMenu() -> NSMenu {
+        let menu = NSMenu()
+        if model.displays.isEmpty {
+            menu.addItem(disabledItem("No displays available"))
+        }
+        for display in model.displays {
+            menu.addItem(menuItem(display.localizedName, checked: display.id == model.selectedDisplayID) {
+                model.selectedDisplayID = display.id
+            })
+        }
+        menu.addItem(.separator())
+        for title in ["Window capture — Coming soon", "Area capture — Coming soon", "Device capture — Coming soon"] {
+            menu.addItem(disabledItem(title))
+        }
+        return menu
+    }
+
+    private func makeCameraMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(menuItem("Camera off", checked: model.selectedCameraID == nil) {
+            model.selectedCameraID = nil
+        })
+        for cam in model.cameras {
+            menu.addItem(menuItem(cam.localizedName, checked: cam.id == model.selectedCameraID) {
+                model.selectedCameraID = cam.id
+            })
+        }
+        return menu
+    }
+
+    private func makeMicMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(menuItem("Mic off", checked: model.selectedMicrophoneID == nil) {
+            model.selectedMicrophoneID = nil
+        })
+        for mic in model.microphones {
+            menu.addItem(menuItem(displayedMicLabel(mic), checked: mic.id == model.selectedMicrophoneID) {
+                model.selectedMicrophoneID = mic.id
+            })
+        }
+        return menu
+    }
+
+    private func menuItem(_ title: String, checked: Bool, enabled: Bool = true, _ action: @escaping () -> Void) -> NSMenuItem {
+        let item = ClosureMenuItem(title: title, action: #selector(ClosureMenuItem.fire), keyEquivalent: "")
+        item.target = item
+        item.onSelect = action
+        item.state = checked ? .on : .off
+        item.isEnabled = enabled
+        return item
+    }
+
+    private func disabledItem(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
     }
 
     private var systemAudioControl: some View {
@@ -399,20 +425,15 @@ struct PrecaptureView: View {
         } label: {
             inlineControl(
                 icon: model.includeSystemAudio ? "speaker.wave.2.fill" : "speaker.slash.fill",
-                title: "System audio",
-                color: model.includeSystemAudio ? Theme.Color.textPrimary : Theme.Color.textSecondary
+                title: model.includeSystemAudio ? "System audio" : "System off",
+                color: model.includeSystemAudio ? Theme.Color.textPrimary : Theme.Color.textSecondary,
+                width: 136,
+                isHovered: hoveredControl == .systemAudio
             )
+            .onHover { setHovered(.systemAudio, $0) }
         }
         .buttonStyle(.plain)
         .help(model.includeSystemAudio ? "System audio will be recorded" : "System audio is off")
-    }
-
-    private var sceneButton: some View {
-        Button(action: onSceneRecording) {
-            inlineControl(icon: "rectangle.stack.badge.play", title: "Scenes", color: Theme.Color.textPrimary)
-        }
-        .buttonStyle(.plain)
-        .help("Scene-based recording — record takes and merge")
     }
 
     private var recordButton: some View {
@@ -422,10 +443,14 @@ struct PrecaptureView: View {
                 Text("Record").font(Theme.Font.bodyEmphasized)
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, Theme.Spacing.lg)
-            .frame(height: 40)
+            .padding(.horizontal, Theme.Spacing.sm)
+            .frame(width: 100, height: 44)
             .background(Capsule().fill(Theme.Color.recordingRed))
             .opacity(model.canRecord ? 1 : 0.45)
+            .scaleEffect(hoveredControl == .record ? 1.03 : 1)
+            .brightness(hoveredControl == .record ? 0.06 : 0)
+            .animation(.easeOut(duration: 0.14), value: hoveredControl == .record)
+            .onHover { setHovered(.record, $0 && model.canRecord) }
         }
         .buttonStyle(.plain)
         .disabled(!model.canRecord)
@@ -434,64 +459,116 @@ struct PrecaptureView: View {
     }
 
     private var overflowMenu: some View {
-        Menu {
-            Toggle("Track cursor (zoom follow + auto-zoom)", isOn: $model.logClicks)
-                .disabled(!accessibilityGranted)
-            if !accessibilityGranted {
-                Button("Grant Accessibility…") { onRequestAccessibility() }
-            }
-            Divider()
-            Button("Open Project…") { onOpenProject() }
-                .keyboardShortcut("o", modifiers: .command)
-        } label: {
-            HStack(spacing: 2) {
-                Image(systemName: "gearshape.fill").font(.system(size: 14))
-                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
-            }
-            .foregroundStyle(Theme.Color.textSecondary)
-            .frame(height: 44)
-            .padding(.horizontal, Theme.Spacing.xs)
-            .contentShape(Rectangle())
+        BarMenuControl(width: 34, makeMenu: makeOverflowMenu, onHoverChange: { setHovered(.overflow, $0) }) {
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(hoveredControl == .overflow ? Theme.Color.textPrimary : Theme.Color.textSecondary)
+                .frame(width: 34, height: 44)
+                .background(
+                    Circle()
+                        .fill(Color.white.opacity(hoveredControl == .overflow ? 0.13 : 0))
+                        .frame(width: 32, height: 32)
+                )
+                .scaleEffect(hoveredControl == .overflow ? 1.05 : 1)
+                .animation(.easeOut(duration: 0.14), value: hoveredControl == .overflow)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .help("More options")
+    }
+
+    private func makeOverflowMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false   // respect our explicit isEnabled (disabled toggle)
+        let scene = menuItem("Scene Recording", checked: false) { onSceneRecording() }
+        scene.image = NSImage(systemSymbolName: "rectangle.stack.badge.play", accessibilityDescription: nil)
+        menu.addItem(scene)
+        menu.addItem(.separator())
+        menu.addItem(menuItem("Track cursor (zoom follow + auto-zoom)",
+                              checked: model.logClicks,
+                              enabled: accessibilityGranted) {
+            model.logClicks.toggle()
+        })
+        if !accessibilityGranted {
+            menu.addItem(menuItem("Grant Accessibility…", checked: false) { onRequestAccessibility() })
+        }
+        menu.addItem(.separator())
+        let open = menuItem("Open Project…", checked: false) { onOpenProject() }
+        open.keyEquivalent = "o"
+        open.keyEquivalentModifierMask = .command
+        menu.addItem(open)
+        return menu
     }
 
     // MARK: - Shared label builders
 
-    private func inlineControl(icon: String, title: String, color: Color) -> some View {
-        HStack(spacing: Theme.Spacing.xs) {
-            Image(systemName: icon).font(.system(size: 14))
+    private func setHovered(_ control: ToolbarControl, _ isHovered: Bool) {
+        if isHovered {
+            hoveredControl = control
+        } else if hoveredControl == control {
+            hoveredControl = nil
+        }
+    }
+
+    private func inlineControl(icon: String, title: String, color: Color, width: CGFloat, isHovered: Bool) -> some View {
+        let horizontalPadding = Theme.Spacing.sm
+        let iconWidth: CGFloat = 16
+        let textWidth = max(28, width - (horizontalPadding * 2) - iconWidth - Theme.Spacing.xs)
+        return HStack(spacing: Theme.Spacing.xs) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .frame(width: iconWidth)
             Text(title)
                 .font(Theme.Font.bodyEmphasized)
                 .lineLimit(1)
                 .truncationMode(.tail)
+                .frame(width: textWidth, alignment: .leading)
         }
         .foregroundStyle(color)
-        .padding(.horizontal, Theme.Spacing.sm)
-        .frame(height: 44)
-        .frame(maxWidth: 160)
+        .padding(.horizontal, horizontalPadding)
+        .frame(width: width, height: 44, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
+                .fill(Color.white.opacity(isHovered ? 0.13 : 0.001))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
+                .strokeBorder(Color.white.opacity(isHovered ? 0.18 : 0), lineWidth: Theme.Stroke.hairline)
+        )
+        .scaleEffect(isHovered ? 1.025 : 1)
+        .animation(.easeOut(duration: 0.14), value: isHovered)
+        .clipped()
         .contentShape(Rectangle())
     }
 
-    private func sourceMenuItem(_ text: String, checked: Bool) -> some View {
-        HStack {
-            if checked { Image(systemName: "checkmark") }
-            Text(text)
+    private var sourceTitle: String {
+        guard let id = model.selectedDisplayID,
+              let display = model.displays.first(where: { $0.id == id }) else {
+            return model.isLoading ? "Loading display" : "No display"
         }
+        return display.localizedName
+    }
+
+    private var sourceHelp: String {
+        model.selectedDisplayID == nil ? "Choose which display to record" : "Recording \(sourceTitle)"
     }
 
     private var cameraTitle: String {
         guard let id = model.selectedCameraID,
-              let cam = model.cameras.first(where: { $0.id == id }) else { return "No camera" }
+              let cam = model.cameras.first(where: { $0.id == id }) else { return "Camera off" }
         return cam.localizedName
+    }
+
+    private var cameraHelp: String {
+        model.selectedCameraID == nil ? "Camera is off" : "Camera: \(cameraTitle)"
     }
 
     private var micTitle: String {
         guard let id = model.selectedMicrophoneID,
-              let mic = model.microphones.first(where: { $0.id == id }) else { return "No microphone" }
+              let mic = model.microphones.first(where: { $0.id == id }) else { return "Mic off" }
         return mic.localizedName
+    }
+
+    private var micHelp: String {
+        model.selectedMicrophoneID == nil ? "Microphone is off" : "Microphone: \(micTitle)"
     }
 
     private func displayedMicLabel(_ mic: PrecaptureModel.DeviceChoice) -> String {
@@ -500,6 +577,74 @@ struct PrecaptureView: View {
         }
         return mic.localizedName
     }
+}
+
+/// A toolbar picker rendered as a real `Button` so SwiftUI `.onHover` fires.
+/// (It replaces a `.borderlessButton` SwiftUI `Menu`, whose AppKit pop-up
+/// backing swallowed hover tracking across its whole area — which is why the
+/// menu controls never highlighted while the plain-Button systemAudio one did.)
+/// Clicking pops a native `NSMenu` anchored beneath the control.
+private struct BarMenuControl<Label: View>: View {
+    let width: CGFloat
+    let makeMenu: () -> NSMenu
+    let onHoverChange: (Bool) -> Void
+    @ViewBuilder var label: () -> Label
+
+    @State private var anchor = MenuAnchor()
+
+    var body: some View {
+        Button {
+            anchor.present(makeMenu())
+        } label: {
+            label()
+        }
+        .buttonStyle(.plain)
+        .frame(width: width, height: 44)
+        .contentShape(Rectangle())
+        .onHover(perform: onHoverChange)
+        .background(MenuAnchorView(anchor: anchor))
+    }
+}
+
+/// Holds the control's backing NSView so the popped `NSMenu` can anchor to it.
+@MainActor private final class MenuAnchor {
+    weak var view: NSView?
+
+    func present(_ menu: NSMenu) {
+        guard let view else { return }
+        // Anchor at the control's top-left; near the screen bottom AppKit
+        // auto-flips the menu upward so it never opens off-screen.
+        menu.popUp(positioning: nil,
+                   at: NSPoint(x: 0, y: view.bounds.height + 6),
+                   in: view)
+    }
+}
+
+private struct MenuAnchorView: NSViewRepresentable {
+    let anchor: MenuAnchor
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        anchor.view = view
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        anchor.view = nsView
+    }
+
+    // Fill the control's frame so the menu anchors to the full control rect
+    // (a bare NSView has no intrinsic size and would otherwise collapse).
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions()
+    }
+}
+
+/// `NSMenuItem` that runs a closure when chosen, so menus can be built inline
+/// from the SwiftUI model without wiring a separate @objc target per item.
+private final class ClosureMenuItem: NSMenuItem {
+    var onSelect: (() -> Void)?
+    @objc func fire() { onSelect?() }
 }
 
 // Frosted dark-glass bar background, clipped to the bar shape.

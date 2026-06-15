@@ -94,9 +94,9 @@ final class ScenesSourceCatalog {
     }
 
     /// Defaults sensible at first load — same OS-default-mic strategy as
-    /// PrecaptureModel, plus the first non-virtual cam and the primary
-    /// display. Pure value transformation so callers can plug in over a
-    /// previously-persisted ScenesGlobalDefaults without clobbering it.
+    /// PrecaptureModel, plus the primary display. Camera is intentionally
+    /// privacy-first: keep a valid existing camera, but never auto-select a
+    /// replacement when the field is missing or stale.
     func seedingDefaultsIfMissing(
         from existing: (displayID: UInt32?, cameraUniqueID: String?, micUniqueID: String?)
     ) -> (displayID: UInt32?, cameraUniqueID: String?, micUniqueID: String?) {
@@ -107,9 +107,6 @@ final class ScenesSourceCatalog {
         var cameraUniqueID = existing.cameraUniqueID
         if let prior = cameraUniqueID, !cameras.contains(where: { $0.id == prior }) {
             cameraUniqueID = nil
-        }
-        if cameraUniqueID == nil {
-            cameraUniqueID = cameras.first(where: { !$0.isVirtualLoopback })?.id
         }
         var micUniqueID = existing.micUniqueID
         if let prior = micUniqueID, !microphones.contains(where: { $0.id == prior }) {

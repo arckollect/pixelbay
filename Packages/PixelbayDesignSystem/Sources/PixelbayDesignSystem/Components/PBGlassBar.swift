@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#endif
 
 // The app's floating "Liquid Glass" recipe, promoted out of the private
 // copies previously duplicated in PrecaptureView and RecordingHUD (and now
@@ -8,10 +11,8 @@ import SwiftUI
 // backdrop every frame and renders broken (a flat opaque rectangle, no tint
 // or shape) whenever sampling stalls (window drag, window-style change).
 // `NSVisualEffectView`-backed materials are rock-solid across drags,
-// occlusion and style changes, so this stacks `.ultraThinMaterial` + a dark
-// wash + a faint top white sheen, all clipped to the caller's shape. The
-// host should sit on a borderless/clear window (or any surface) — the
-// material samples whatever is behind it.
+// occlusion and style changes. The host should sit on a borderless/clear
+// window (or any surface) — the material samples whatever is behind it.
 
 public extension View {
     /// Fills the view's background with the app's frosted-glass recipe,
@@ -21,16 +22,45 @@ public extension View {
     func pbGlassBar<S: Shape>(_ shape: S) -> some View {
         background {
             ZStack {
+#if canImport(AppKit)
+                PBGlassBackdrop()
+                    .clipShape(shape)
+#else
                 shape.fill(.ultraThinMaterial)
-                shape.fill(Color.black.opacity(0.28))
+#endif
+                shape.fill(Color.black.opacity(0.015))
                 shape.fill(
                     LinearGradient(
-                        colors: [Color.white.opacity(0.10), .clear],
+                        colors: [
+                            Color.white.opacity(0.16),
+                            Color.white.opacity(0.05),
+                            .clear
+                        ],
                         startPoint: .top,
-                        endPoint: .center
+                        endPoint: .bottom
                     )
                 )
             }
         }
     }
 }
+
+#if canImport(AppKit)
+private struct PBGlassBackdrop: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .popover
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.isEmphasized = false
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.material = .popover
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.isEmphasized = false
+    }
+}
+#endif
