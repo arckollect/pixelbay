@@ -503,7 +503,7 @@ struct PrecaptureView: View {
     }
 
     private func makeOverflowMenu() -> NSMenu {
-        // Scene Recording moved out to the `scenesToggle` bar button.
+        // Scene Recording moved out to the `scenesButton` bar button.
         let menu = NSMenu()
         menu.autoenablesItems = false   // respect our explicit isEnabled (disabled toggle)
         menu.addItem(menuItem("Track cursor (zoom follow + auto-zoom)",
