@@ -62,6 +62,23 @@ struct ScenesWindowView: View {
             // "No display selected."
             seedDefaultsIfMissing()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .pixelbayScenesWindowOpenRequested)) { _ in
+            // The Scenes window is a singleton `Window`: this view and its
+            // @State model survive a close/reopen, so `.task` does NOT re-run
+            // on the next open and the prior session's transient state lingers
+            // (a stuck/terminal `phase` greys every tile and shows a phantom
+            // "Recording…" on the tile that recorded). Re-derive a fresh model
+            // from disk — the source of truth — on every launcher-initiated
+            // open. Only acts on a genuine REOPEN: on the first open
+            // `modelState` is still `.loading` (the `.task` owns it), so this
+            // no-ops and there's no double load.
+            guard case .ready = modelState else { return }
+            Task {
+                await loadModel(showLoading: false)
+                await catalog.reload()
+                seedDefaultsIfMissing()
+            }
+        }
     }
 
     /// Picks sensible default sources (primary display, etc.) from the freshly
@@ -400,7 +417,7 @@ struct ScenesWindowView: View {
     // MARK: - Helpers
 
     @MainActor
-    private func loadModel() async {
+    private func loadModel(showLoading: Bool = true) async {
         // Slice A.2 — snapshot the singleton's URL up-front so the rest of
         // this load runs against a frozen value. Clear the singleton
         // immediately AFTER the snapshot so a future window-open (e.g. the
@@ -422,7 +439,9 @@ struct ScenesWindowView: View {
         await Task.yield()
         guard !Task.isCancelled else { return }
         scenesAppendTarget.set(nil)
-        modelState = .loading
+        // On a reopen reload we keep the prior grid on screen until the fresh
+        // model is ready, avoiding a spinner flash; first load shows the spinner.
+        if showLoading { modelState = .loading }
         do {
             let model: ScenesSessionModel
             if let targetURL {

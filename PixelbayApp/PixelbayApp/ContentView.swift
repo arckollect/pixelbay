@@ -164,6 +164,12 @@ struct ContentView: View {
                     // document instead of producing a fresh merged project.
                     scenesAppendTarget.set(nil)
                     openWindow(id: WindowID.scenes)
+                    // The Scenes window is a singleton whose SwiftUI state
+                    // survives close/reopen, so a second open shows the stale
+                    // prior session (greyed tiles + a phantom recording
+                    // indicator on the tile that recorded). Tell it to re-derive
+                    // a fresh model from disk on every launcher-initiated open.
+                    NotificationCenter.default.post(name: .pixelbayScenesWindowOpenRequested, object: nil)
                 },
                 onClose: {
                     // Hover bar ✕ — hide the launcher. The menubar status

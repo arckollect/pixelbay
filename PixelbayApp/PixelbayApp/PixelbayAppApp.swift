@@ -36,6 +36,13 @@ extension KeyboardShortcuts.Name {
 // scene-scoped @Environment binding.
 extension Notification.Name {
     static let pixelbayNewRecordingRequested = Notification.Name("com.pixelbay.newRecordingRequested")
+    /// Posted when the launcher's Scenes button (re)opens the Scene Recording
+    /// window. The Scenes window is a singleton `Window` whose SwiftUI state
+    /// survives close/reopen, so its `.task` doesn't re-run on a second open —
+    /// `ScenesWindowView` observes this to re-derive a fresh model from disk
+    /// instead of showing the stale prior session (greyed tiles / phantom
+    /// recording state).
+    static let pixelbayScenesWindowOpenRequested = Notification.Name("com.pixelbay.scenesWindowOpenRequested")
 }
 
 @main
