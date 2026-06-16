@@ -52,32 +52,16 @@ struct ScenesWindowView: View {
                 readyView(model: model)
             }
         }
-        .task {
-            await loadModel()
-            await catalog.reload()
-            // Seed the global default sources up-front. Previously this lived
-            // in DefaultsBlock.onAppear, but that block now only renders inside
-            // the Sources popover — so without seeding here a fresh window has
-            // no default display and the first Record silently fails with
-            // "No display selected."
-            seedDefaultsIfMissing()
-        }
+        .task { await reloadSession(showLoading: true) }
         .onReceive(NotificationCenter.default.publisher(for: .pixelbayScenesWindowOpenRequested)) { _ in
-            // The Scenes window is a singleton `Window`: this view and its
-            // @State model survive a close/reopen, so `.task` does NOT re-run
-            // on the next open and the prior session's transient state lingers
-            // (a stuck/terminal `phase` greys every tile and shows a phantom
-            // "Recording…" on the tile that recorded). Re-derive a fresh model
-            // from disk — the source of truth — on every launcher-initiated
-            // open. Only acts on a genuine REOPEN: on the first open
-            // `modelState` is still `.loading` (the `.task` owns it), so this
-            // no-ops and there's no double load.
+            // The Scenes window is a singleton whose @State (this view + model)
+            // survives a close/reopen, so `.task` does NOT re-run on the next
+            // open — re-derive a fresh model from disk so the reopened modal
+            // never shows the prior session's stale state. Guard so this only
+            // fires on a genuine reopen: on the first open `modelState` is still
+            // `.loading` (the `.task` owns it), so this no-ops (no double load).
             guard case .ready = modelState else { return }
-            Task {
-                await loadModel(showLoading: false)
-                await catalog.reload()
-                seedDefaultsIfMissing()
-            }
+            Task { await reloadSession(showLoading: false) }
         }
     }
 
@@ -415,6 +399,21 @@ struct ScenesWindowView: View {
     }
 
     // MARK: - Helpers
+
+    /// Loads the session model + source catalog and seeds default sources, in
+    /// the order the window needs. Runs on first open (`.task`, with the
+    /// spinner) and on every launcher reopen (`showLoading: false`, swapping the
+    /// fresh model in without a spinner flash). Seeding here is load-bearing:
+    /// the global defaults used to be seeded in `DefaultsBlock.onAppear`, but
+    /// that block now only renders inside the Sources popover, so without this a
+    /// fresh window has no default display and the first Record fails with
+    /// "No display selected."
+    @MainActor
+    private func reloadSession(showLoading: Bool) async {
+        await loadModel(showLoading: showLoading)
+        await catalog.reload()
+        seedDefaultsIfMissing()
+    }
 
     @MainActor
     private func loadModel(showLoading: Bool = true) async {
