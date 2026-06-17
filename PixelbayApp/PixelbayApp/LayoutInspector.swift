@@ -280,6 +280,7 @@ struct BackgroundInspector: View {
 
             if layout.padding > 0 || hasBackground {
                 paddingRow
+                cornerRadiusRow
             }
         }
     }
@@ -664,6 +665,35 @@ struct BackgroundInspector: View {
                     set: { newValue in
                         var next = layout
                         next.padding = newValue
+                        onChange(next)
+                    }
+                ),
+                in: 0...120
+            )
+        }
+    }
+
+    // MARK: - Corner radius
+
+    /// Rounds the screen layer itself. Applying a wallpaper/desktop background
+    /// seeds a default radius (`applyFloating`); this slider lets the user tune
+    /// it — including back to 0 for sharp corners. Shown alongside Padding (same
+    /// gate) since both only matter once the screen is inset over a background.
+    private var cornerRadiusRow: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Corner radius").font(.caption)
+                Spacer()
+                Text("\(Int(layout.screenCornerRadius)) px")
+                    .font(Theme.Font.monoTimecode)
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+            PBSlider(
+                value: Binding<Double>(
+                    get: { layout.screenCornerRadius },
+                    set: { newValue in
+                        var next = layout
+                        next.screenCornerRadius = newValue
                         onChange(next)
                     }
                 ),
