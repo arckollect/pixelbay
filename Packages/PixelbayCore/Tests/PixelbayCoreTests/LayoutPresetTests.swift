@@ -11,7 +11,7 @@ final class LayoutPresetTests: XCTestCase {
         case .pip(let position, let size):
             XCTAssertEqual(position, .bottomRight)
             XCTAssertEqual(size, .medium)
-        case .splitHorizontal:
+        case .splitHorizontal, .custom:
             XCTFail("phase1Default must be a PiP")
         }
         XCTAssertEqual(p.camShape, .rectangle)
@@ -34,6 +34,20 @@ final class LayoutPresetTests: XCTestCase {
 
     func test_splitMode_roundTripsThroughCodable() throws {
         try roundTripMode(.splitHorizontal(screenSide: .left, screenFraction: 0.7))
+    }
+
+    func test_customMode_roundTripsThroughCodable() throws {
+        try roundTripMode(.custom(
+            screen: NormalizedRect(x: 0.08, y: 0.10, width: 0.84, height: 0.78),
+            webcam: NormalizedRect(x: 0.70, y: 0.66, width: 0.22, height: 0.124)
+        ))
+    }
+
+    func test_customMode_nilWebcam_roundTripsThroughCodable() throws {
+        try roundTripMode(.custom(
+            screen: NormalizedRect(x: 0, y: 0, width: 1, height: 1),
+            webcam: nil
+        ))
     }
 
     func test_background_solid_roundTripsThroughCodable() throws {
@@ -94,6 +108,93 @@ final class LayoutPresetTests: XCTestCase {
         XCTAssertEqual(decoded.padding, 0)
         XCTAssertEqual(decoded.screenCornerRadius, 0)
         XCTAssertEqual(decoded.extras, [:])
+    }
+
+    func test_decodeCustomLayout_fromRawJSON() throws {
+        let json = """
+        {
+          "mode": {
+            "kind": "custom",
+            "screen": { "x": 0.1, "y": 0.2, "width": 0.5, "height": 0.4 },
+            "webcam": { "x": 0.6, "y": 0.7, "width": 0.25, "height": 0.14 }
+          },
+          "background": { "kind": "none" }
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(LayoutPreset.self, from: json)
+
+        guard case .custom(let screen, let webcam) = decoded.mode else {
+            return XCTFail("expected custom mode")
+        }
+        XCTAssertEqual(screen, NormalizedRect(x: 0.1, y: 0.2, width: 0.5, height: 0.4))
+        XCTAssertEqual(webcam, NormalizedRect(x: 0.6, y: 0.7, width: 0.25, height: 0.14))
+    }
+
+    func test_decodeCustomLayout_nilWebcam_fromRawJSON() throws {
+        let json = """
+        {
+          "mode": {
+            "kind": "custom",
+            "screen": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 }
+          },
+          "background": { "kind": "none" }
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(LayoutPreset.self, from: json)
+
+        guard case .custom(let screen, let webcam) = decoded.mode else {
+            return XCTFail("expected custom mode")
+        }
+        XCTAssertEqual(screen, .full)
+        XCTAssertNil(webcam)
+    }
+
+    // MARK: - NormalizedRect
+
+    func test_normalizedRect_fillsOutput() {
+        XCTAssertTrue(NormalizedRect.full.fillsOutput)
+        XCTAssertTrue(NormalizedRect(x: 0, y: 0, width: 1, height: 1).fillsOutput)
+        XCTAssertFalse(NormalizedRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8).fillsOutput)
+        XCTAssertFalse(NormalizedRect(x: 0, y: 0, width: 0.5, height: 1).fillsOutput)
+    }
+
+    // MARK: - Migrator v7 → v8
+
+    func test_migrator_v7Document_reachesV8_unchangedLayout() throws {
+        // The v7→v8 step is a no-op stamp: a v7 project with a PiP layout must
+        // decode identically under the v8 model, only its schemaVersion bumped.
+        let v7: [String: Any] = [
+            "schemaVersion": 7,
+            "bundleVersion": 1,
+            "id": "p7",
+            "name": "v7 → v8",
+            "createdAt": "2026-06-12T00:00:00Z",
+            "modifiedAt": "2026-06-12T00:00:00Z",
+            "assets": [],
+            "tracks": [],
+            "sourceSegments": [],
+            "extras": [:],
+            "layout": [
+                "mode": ["kind": "pip", "position": "topRight", "size": "small"] as [String: Any],
+                "camShape": "rectangle",
+                "camCornerRadius": 12.0,
+                "background": ["kind": "none"] as [String: Any],
+                "padding": 0.0,
+                "screenCornerRadius": 0.0,
+                "extras": [String: Any]()
+            ]
+        ]
+        let migrated = try MigrationRegistry.standard.migrate(v7)
+        XCTAssertEqual(migrated["schemaVersion"] as? Int, 8)
+        XCTAssertEqual(currentSchemaVersion, 8)
+
+        let data = try JSONSerialization.data(withJSONObject: migrated, options: .sortedKeys)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let project = try decoder.decode(Project.self, from: data)
+        XCTAssertEqual(project.layout.mode, .pip(position: .topRight, size: .small))
     }
 
     // MARK: - Migrator v1 → v2

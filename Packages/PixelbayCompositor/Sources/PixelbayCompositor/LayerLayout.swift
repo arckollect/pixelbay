@@ -267,7 +267,36 @@ public enum LayoutCalculator {
                 webcamShape: camShape,
                 webcamCornerRadius: camRadius
             )
+
+        case .custom(let screenN, let webcamN):
+            // Free-form arrangement: the screen (and optional webcam) rects are
+            // authored directly in normalized output space, so `padding` does
+            // not apply here. The webcam rect is dropped for cam-less
+            // recordings, matching the preset modes.
+            let screenRect = denormalize(screenN, outputSize: outputSize)
+            let webcam: LayerRect? = (hasWebcam && webcamN != nil)
+                ? denormalize(webcamN!, outputSize: outputSize)
+                : nil
+            return ResolvedLayout(
+                outputSize: outputSize,
+                background: background,
+                screen: screenRect,
+                screenCornerRadius: screenCornerRadius,
+                webcam: webcam,
+                webcamShape: camShape,
+                webcamCornerRadius: camRadius
+            )
         }
+    }
+
+    /// Map a normalized (0…1) rect to an output-pixel `LayerRect`. A 2px size
+    /// floor guards against a degenerate/zero-area quad reaching the renderer.
+    static func denormalize(_ r: NormalizedRect, outputSize: CGSize) -> LayerRect {
+        let width = max(2, CGFloat(r.width) * outputSize.width)
+        let height = max(2, CGFloat(r.height) * outputSize.height)
+        let x = CGFloat(r.x) * outputSize.width
+        let y = CGFloat(r.y) * outputSize.height
+        return LayerRect(origin: CGPoint(x: x, y: y), size: CGSize(width: width, height: height))
     }
 
     public static let webcamMargin3a: CGFloat = 24

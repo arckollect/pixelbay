@@ -259,6 +259,83 @@ final class LayoutCalculatorTests: XCTestCase {
         XCTAssertEqual(resolved.webcamShape, .circle)
     }
 
+    // MARK: - Custom (free-form) mode
+
+    func test_resolve_custom_mapsNormalizedRectsToPixels() {
+        let preset = LayoutPreset(mode: .custom(
+            screen: NormalizedRect(x: 0.1, y: 0.1, width: 0.5, height: 0.5),
+            webcam: NormalizedRect(x: 0.7, y: 0.6, width: 0.2, height: 0.1125)
+        ))
+        let resolved = LayoutCalculator.resolve(
+            preset: preset,
+            outputSize: CGSize(width: 1920, height: 1080),
+            hasWebcam: true
+        )
+        XCTAssertEqual(resolved.screen.origin, CGPoint(x: 192, y: 108))
+        XCTAssertEqual(resolved.screen.size, CGSize(width: 960, height: 540))
+        let webcam = try! XCTUnwrap(resolved.webcam)
+        XCTAssertEqual(webcam.origin.x, 1344, accuracy: 0.001)
+        XCTAssertEqual(webcam.origin.y, 648, accuracy: 0.001)
+        XCTAssertEqual(webcam.size.width, 384, accuracy: 0.001)
+        XCTAssertEqual(webcam.size.height, 121.5, accuracy: 0.001)
+    }
+
+    func test_resolve_custom_webcamOmitted_whenNoWebcam() {
+        let preset = LayoutPreset(mode: .custom(
+            screen: .full,
+            webcam: NormalizedRect(x: 0.7, y: 0.6, width: 0.2, height: 0.1125)
+        ))
+        let resolved = LayoutCalculator.resolve(
+            preset: preset,
+            outputSize: CGSize(width: 1920, height: 1080),
+            hasWebcam: false
+        )
+        XCTAssertNil(resolved.webcam)
+    }
+
+    func test_resolve_custom_nilWebcamRect_yieldsNilCam() {
+        let preset = LayoutPreset(mode: .custom(screen: .full, webcam: nil))
+        let resolved = LayoutCalculator.resolve(
+            preset: preset,
+            outputSize: CGSize(width: 1920, height: 1080),
+            hasWebcam: true
+        )
+        XCTAssertNil(resolved.webcam)
+    }
+
+    func test_resolve_custom_degenerateRect_clampsToMinSize() {
+        let preset = LayoutPreset(mode: .custom(
+            screen: NormalizedRect(x: 0, y: 0, width: 0, height: 0),
+            webcam: nil
+        ))
+        let resolved = LayoutCalculator.resolve(
+            preset: preset,
+            outputSize: CGSize(width: 1920, height: 1080),
+            hasWebcam: false
+        )
+        XCTAssertGreaterThanOrEqual(resolved.screen.size.width, 2)
+        XCTAssertGreaterThanOrEqual(resolved.screen.size.height, 2)
+    }
+
+    func test_resolve_custom_propagatesShapeRadiusAndBackground() {
+        let preset = LayoutPreset(
+            mode: .custom(screen: NormalizedRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8), webcam: nil),
+            camShape: .circle,
+            background: .solid(color: RGBColor(r: 0.1, g: 0.2, b: 0.3)),
+            screenCornerRadius: 24
+        )
+        let resolved = LayoutCalculator.resolve(
+            preset: preset,
+            outputSize: CGSize(width: 1920, height: 1080),
+            hasWebcam: true
+        )
+        XCTAssertEqual(resolved.webcamShape, .circle)
+        XCTAssertEqual(resolved.screenCornerRadius, 24)
+        // Padding is ignored in custom mode — the screen rect is authored directly.
+        XCTAssertEqual(resolved.screen.origin, CGPoint(x: 192, y: 108))
+        if case .solid = resolved.background {} else { XCTFail("expected solid background") }
+    }
+
     // MARK: - Legacy helpers
 
     func test_layerRect_geometryHelpers() {

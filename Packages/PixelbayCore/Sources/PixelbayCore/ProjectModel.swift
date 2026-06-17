@@ -33,7 +33,16 @@ import Foundation
 // v6 → v7 (2026-06-12): adds `fastMotionSensitivity` and `edgeCushion` to
 // `TuningSettings`, widens camera ranges, and changes the default motion feel
 // to a slower hybrid zoom-follow.
-public let currentSchemaVersion: Int = 7
+//
+// v7 → v8 (2026-06-17): adds the `LayoutMode.custom(screen:webcam:)` case for
+// free-form drag/scale layouts (`NormalizedRect` per layer). A new enum case
+// is not forward-compatible — an older Pixelbay can't decode `.custom` — so we
+// bump the version (unlike a purely additive optional field). The migrator is
+// a no-op: existing projects only ever encode `.pip`/`.splitHorizontal`, which
+// decode unchanged under the v8 model. Bumping makes older builds reject a
+// `.custom` project with the clean "upgrade Pixelbay" error rather than a raw
+// decode failure.
+public let currentSchemaVersion: Int = 8
 
 // Bumped on any breaking change to the .pixelbay directory layout itself
 // (e.g. renaming the media/ folder, splitting sidecars into a new subdirectory).

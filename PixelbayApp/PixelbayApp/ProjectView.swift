@@ -1,5 +1,6 @@
 import AppKit
 import CoreMedia
+import PixelbayCompositor
 import PixelbayCore
 import PixelbayDesignSystem
 import PixelbayEditor
@@ -64,6 +65,12 @@ struct ProjectView: View {
     /// revision-keyed reload.
     @State private var cachedCursorData: CursorTrajectoryLoader.CursorData?
     @State private var liveTuningTask: Task<Void, Never>?
+    /// Live preview-rebuild task for an in-flight layer drag in the preview.
+    /// Mirrors `liveTuningTask`: each drag tick cancels and replaces it, so the
+    /// videoComposition is rebuilt at ~10 Hz while the outline tracks the cursor
+    /// 1:1. The mouse-up commit (a `SetLayoutPresetCommand`) then takes over via
+    /// the normal revision-keyed reload.
+    @State private var liveLayoutTask: Task<Void, Never>?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -304,6 +311,26 @@ struct ProjectView: View {
                     )
                     .allowsHitTesting(false)
                     .transition(.opacity)
+                }
+                // Free-form transform: only on the layout/camera tabs, where
+                // arranging the composition is the task at hand (keeps the
+                // selection handles out of the way while editing cursor/zoom/
+                // audio, and clear of the zoom safe-zone overlay).
+                if (selectedTab == .layout || selectedTab == .camera),
+                   let overlay = transformOverlayData {
+                    PreviewTransformOverlay(
+                        screenRect: overlay.screen,
+                        webcamRect: overlay.webcam,
+                        outputSize: player.outputSize,
+                        camShape: document.project.layout.camShape,
+                        fill: previewFill,
+                        onLivePreview: { screen, webcam in
+                            previewLayoutLive(screen: screen, webcam: webcam)
+                        },
+                        onCommit: { screen, webcam in
+                            commitCustomLayout(screen: screen, webcam: webcam)
+                        }
+                    )
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -701,6 +728,96 @@ struct ProjectView: View {
         previewProject.tuning.blurStrength = 0
         previewProject.tuning.cursorBlur = 0
         return previewProject
+    }
+
+    // MARK: - Interactive transform
+
+    /// Whether the project has a webcam layer to transform — mirrors the
+    /// `hasWebcam` predicate `PreviewComposition` uses (a webcam track with
+    /// clips).
+    private var projectHasWebcam: Bool {
+        document.project.tracks.contains { $0.kind == .webcam && !$0.clips.isEmpty }
+    }
+
+    /// Current resolved screen / webcam rects in normalized output space, for
+    /// the transform overlay to draw and hit-test. nil until the player reports
+    /// a real output size.
+    private var transformOverlayData: (screen: NormalizedRect, webcam: NormalizedRect?)? {
+        let outputSize = player.outputSize
+        guard outputSize.width > 0, outputSize.height > 0 else { return nil }
+        let resolved = LayoutCalculator.resolve(
+            preset: document.project.layout,
+            outputSize: outputSize,
+            hasWebcam: projectHasWebcam
+        )
+        return (
+            normalizedRect(resolved.screen, outputSize: outputSize),
+            resolved.webcam.map { normalizedRect($0, outputSize: outputSize) }
+        )
+    }
+
+    private func normalizedRect(_ r: LayerRect, outputSize: CGSize) -> NormalizedRect {
+        NormalizedRect(
+            x: Double(r.minX / outputSize.width),
+            y: Double(r.minY / outputSize.height),
+            width: Double(r.size.width / outputSize.width),
+            height: Double(r.size.height / outputSize.height)
+        )
+    }
+
+    /// Build a `.custom` layout from dragged rects, applying the
+    /// auto-default-background rule: shrinking the screen over no background
+    /// would expose black, so seed a tasteful wallpaper + rounded corners (the
+    /// existing "floating" look) when that happens.
+    private func customLayout(screen: NormalizedRect, webcam: NormalizedRect?) -> LayoutPreset {
+        var next = document.project.layout
+        next.mode = .custom(screen: screen, webcam: webcam)
+        if !screen.fillsOutput, case .none = next.background {
+            if let wallpaper = BackgroundInspector.wallpaperPresets.first {
+                next.background = .wallpaper(wallpaper)
+            } else {
+                next.background = .solid(color: PixelbayCore.RGBColor(r: 0.10, g: 0.11, b: 0.14))
+            }
+            if next.screenCornerRadius == 0 { next.screenCornerRadius = 24 }
+        }
+        return next
+    }
+
+    /// ~10 Hz live rebuild of just the videoComposition while a layer is being
+    /// dragged. Mirrors `onTuningPreview`: cancel/replace an in-flight task that
+    /// loads a throwaway project copy with the would-be layout; structure is
+    /// unchanged so PreviewPlayer takes the videoComposition fast path.
+    private func previewLayoutLive(screen: NormalizedRect, webcam: NormalizedRect?) {
+        liveLayoutTask?.cancel()
+        liveLayoutTask = Task {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard !Task.isCancelled else { return }
+            var previewProject = document.project
+            previewProject.layout = customLayout(screen: screen, webcam: webcam)
+            previewProject = editorPreviewProject(from: previewProject)
+            await player.load(
+                project: previewProject,
+                bundleURL: document.bundleURL,
+                wallpaperSource: .live,
+                wallpaperImageProvider: .live(
+                    bundleURL: document.bundleURL,
+                    builtinURL: { WallpaperCatalog.url(forBuiltinID: $0) }
+                ),
+                cursorTrajectory: cachedCursorData?.samples,
+                cursorClickTimes: cachedCursorData?.clickTimes ?? [],
+                cursorSprite: SystemCursorSprite.make(),
+                quality: previewQuality,
+                maxOutputSize: previewMaxOutputSize
+            )
+        }
+    }
+
+    /// Commit a dragged/nudged layout as one undoable edit. The revision bump
+    /// re-keys the debounced preview reload, which renders the final state.
+    private func commitCustomLayout(screen: NormalizedRect, webcam: NormalizedRect?) {
+        liveLayoutTask?.cancel()
+        let newLayout = customLayout(screen: screen, webcam: webcam)
+        Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
     }
 }
 

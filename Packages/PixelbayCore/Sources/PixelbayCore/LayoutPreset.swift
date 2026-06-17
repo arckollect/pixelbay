@@ -89,9 +89,16 @@ public struct LayoutPreset: Codable, Sendable, Equatable {
 // - `splitHorizontal`: 70/30 horizontal split — screen on one side, cam on
 //   the other. `screenFraction` ∈ [0.1, 0.9] is the screen's share of the
 //   output width.
+// - `custom`: free-form arrangement. The screen (and optionally the webcam)
+//   are positioned/sized directly via normalized rects in 0…1 output space.
+//   Produced when the user drags/scales a layer in the preview; the presets
+//   above stay as one-click starting points (selecting one overwrites `mode`
+//   back to `.pip`/`.splitHorizontal`). `padding` is ignored in this mode —
+//   the screen rect is authored directly.
 public enum LayoutMode: Codable, Sendable, Equatable {
     case pip(position: CamPosition, size: CamSizePreset)
     case splitHorizontal(screenSide: HorizontalSide, screenFraction: Double)
+    case custom(screen: NormalizedRect, webcam: NormalizedRect?)
 
     private enum CodingKeys: String, CodingKey {
         case kind
@@ -99,9 +106,11 @@ public enum LayoutMode: Codable, Sendable, Equatable {
         case size
         case screenSide
         case screenFraction
+        case screen
+        case webcam
     }
 
-    private enum Kind: String, Codable { case pip; case splitHorizontal }
+    private enum Kind: String, Codable { case pip; case splitHorizontal; case custom }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -117,6 +126,11 @@ public enum LayoutMode: Codable, Sendable, Equatable {
                 screenSide: try c.decode(HorizontalSide.self, forKey: .screenSide),
                 screenFraction: try c.decode(Double.self, forKey: .screenFraction)
             )
+        case .custom:
+            self = .custom(
+                screen: try c.decode(NormalizedRect.self, forKey: .screen),
+                webcam: try c.decodeIfPresent(NormalizedRect.self, forKey: .webcam)
+            )
         }
     }
 
@@ -131,7 +145,43 @@ public enum LayoutMode: Codable, Sendable, Equatable {
             try c.encode(Kind.splitHorizontal, forKey: .kind)
             try c.encode(side, forKey: .screenSide)
             try c.encode(fraction, forKey: .screenFraction)
+        case .custom(let screen, let webcam):
+            try c.encode(Kind.custom, forKey: .kind)
+            try c.encode(screen, forKey: .screen)
+            try c.encodeIfPresent(webcam, forKey: .webcam)
         }
+    }
+}
+
+// MARK: - NormalizedRect
+
+/// A rectangle expressed in normalized output space: every component is a
+/// fraction of the output in `0…1`, with a top-left origin (matching the
+/// compositor's pixel-space convention). Used by `LayoutMode.custom` so a
+/// free-form arrangement is resolution-independent — the same rect resolves to
+/// the right pixels whether the preview renders at 1620p or the export at UHD.
+public struct NormalizedRect: Codable, Sendable, Equatable, Hashable {
+    public var x: Double       // fraction of output WIDTH  (0 = left edge)
+    public var y: Double       // fraction of output HEIGHT (0 = top edge)
+    public var width: Double   // fraction of output width
+    public var height: Double  // fraction of output height
+
+    public init(x: Double, y: Double, width: Double, height: Double) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+    }
+
+    /// The full output (screen fills the canvas). Equivalent to no inset.
+    public static let full = NormalizedRect(x: 0, y: 0, width: 1, height: 1)
+
+    public var isValid: Bool { width > 0 && height > 0 }
+
+    /// True when this rect covers (essentially) the whole output — used to
+    /// decide whether a shrunk screen needs a background behind it.
+    public var fillsOutput: Bool {
+        x <= 0.001 && y <= 0.001 && (x + width) >= 0.999 && (y + height) >= 0.999
     }
 }
 

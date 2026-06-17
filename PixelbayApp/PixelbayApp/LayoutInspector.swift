@@ -33,10 +33,20 @@ struct CameraInspector: View {
                 camSizeRow
             } else if case .splitHorizontal(_, let fraction) = layout.mode {
                 splitControls(fraction: fraction)
+            } else if isCustom {
+                customModeRow
             }
 
             camShapeRow
         }
+    }
+
+    /// True when the layout is a free-form custom arrangement (produced by
+    /// dragging/scaling a layer in the preview). The preset controls below
+    /// stand in as one-click "starting points" that convert back out of custom.
+    private var isCustom: Bool {
+        if case .custom = layout.mode { return true }
+        return false
     }
 
     // MARK: - Mode
@@ -45,12 +55,22 @@ struct CameraInspector: View {
         HStack {
             Text("Mode")
             Spacer()
-            PBSegmentedControl(selection: modeBinding, [
-                (LayoutModeTag.pip, "Picture-in-Picture"),
-                (LayoutModeTag.split, "Side-by-Side"),
-            ])
-            .frame(maxWidth: 200)
+            // The "Custom" segment only appears once a custom arrangement
+            // exists — you enter custom by dragging in the preview, not by
+            // tapping here (tapping it is a no-op). PiP / Side-by-Side always
+            // convert out of custom.
+            PBSegmentedControl(selection: modeBinding, modeSegments)
+                .frame(maxWidth: isCustom ? 280 : 200)
         }
+    }
+
+    private var modeSegments: [(LayoutModeTag, String)] {
+        var segments: [(LayoutModeTag, String)] = [
+            (.pip, "Picture-in-Picture"),
+            (.split, "Side-by-Side"),
+        ]
+        if isCustom { segments.append((.custom, "Custom")) }
+        return segments
     }
 
     private var modeBinding: Binding<LayoutModeTag> {
@@ -59,6 +79,7 @@ struct CameraInspector: View {
                 switch layout.mode {
                 case .pip: return .pip
                 case .splitHorizontal: return .split
+                case .custom: return .custom
                 }
             },
             set: { newTag in
@@ -71,9 +92,32 @@ struct CameraInspector: View {
                     var next = layout
                     next.mode = .splitHorizontal(screenSide: .left, screenFraction: 0.7)
                     onChange(next)
+                case .custom:
+                    break  // display-only; entered by dragging in the preview
                 }
             }
         )
+    }
+
+    /// Replaces the position grid / size controls when the arrangement is
+    /// custom. Explains the state and offers a one-tap return to the default
+    /// preset (tapping any position/size/mode preset also converts out).
+    private var customModeRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Custom arrangement — drag the screen or camera in the preview to move and resize. Pick a preset to snap back to a layout.")
+                .font(Theme.Font.caption)
+                .foregroundStyle(Theme.Color.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                var next = layout
+                next.mode = .pip(position: .bottomRight, size: .medium)
+                onChange(next)
+            } label: {
+                Label("Reset Layout", systemImage: "arrow.uturn.backward")
+            }
+            .buttonStyle(.pbCompact)
+        }
+        .pbInsetRow()
     }
 
     // MARK: - PiP grid + size
@@ -278,14 +322,25 @@ struct BackgroundInspector: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             backgroundSection
 
-            if layout.padding > 0 || hasBackground {
+            // Padding is meaningless in a custom arrangement (the screen rect is
+            // authored directly by dragging), so it's hidden there. Corner
+            // radius still rounds the floating screen, so it stays available
+            // whenever a background is set or a radius is already dialed in.
+            if !isCustom, layout.padding > 0 || hasBackground {
                 paddingRow
+                cornerRadiusRow
+            } else if isCustom, hasBackground || layout.screenCornerRadius > 0 {
                 cornerRadiusRow
             }
         }
     }
 
     // MARK: - Background
+
+    private var isCustom: Bool {
+        if case .custom = layout.mode { return true }
+        return false
+    }
 
     private var hasBackground: Bool {
         if case .none = layout.background { return false }
@@ -706,6 +761,10 @@ struct BackgroundInspector: View {
 private enum LayoutModeTag: Hashable {
     case pip
     case split
+    /// Display-only — surfaced in the mode control while a free-form custom
+    /// arrangement is active. Selecting it does nothing; you enter custom by
+    /// dragging in the preview.
+    case custom
 }
 
 /// SwiftUI preview of a `WallpaperGradient` — the inspector swatch. Renders the
