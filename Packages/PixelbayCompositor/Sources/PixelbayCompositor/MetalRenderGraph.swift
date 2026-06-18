@@ -303,6 +303,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
             screenBlurSigmaPx: layout.screenZoomBlurSigmaPx,
             screenUVOpen: layout.screenUVOpen,
             screenUVClose: layout.screenUVClose,
+            screenCropUV: layout.screenCropUV,
             cvTextureRefs: &cvTextureRefs
         )
 
@@ -312,7 +313,8 @@ public final class MetalRenderGraph: @unchecked Sendable {
                 sprite: cursorSprite,
                 state: cursorState,
                 screen: layout.screen,
-                outputSize: layout.outputSize
+                outputSize: layout.outputSize,
+                contentCropUV: layout.zoomTargetsContent ? layout.screenCropUV : nil
             )
         }
 
@@ -497,6 +499,11 @@ public final class MetalRenderGraph: @unchecked Sendable {
         // Metal-side float4 slots (struct total 64 bytes).
         var uvOpen: SIMD4<Float> = SIMD4<Float>(1, 1, 0, 0)
         var uvClose: SIMD4<Float> = SIMD4<Float>(1, 1, 0, 0)
+        // Source crop applied BEFORE the temporal-blur remap (content-zoom):
+        // `srcUV = uv*screenCropUV.xy + screenCropUV.zw`. Identity (1,1,0,0)
+        // samples the full source → bit-identical to the pre-crop path. Lands
+        // at offset 64; struct total 80 bytes (16-aligned).
+        var screenCropUV: SIMD4<Float> = SIMD4<Float>(1, 1, 0, 0)
     }
 
     /// Cursor-specific uniforms. Adds a velocity offset (in cursor-UV space)
@@ -522,6 +529,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
         screenBlurSigmaPx: Float = 0,
         screenUVOpen: SIMD4<Float> = SIMD4<Float>(1, 1, 0, 0),
         screenUVClose: SIMD4<Float> = SIMD4<Float>(1, 1, 0, 0),
+        screenCropUV: SIMD4<Float> = SIMD4<Float>(1, 1, 0, 0),
         cvTextureRefs: inout [CVMetalTexture]
     ) throws {
         let vertices = makeQuadVertices(rect: destinationRect, outputSize: outputSize)
@@ -535,7 +543,8 @@ public final class MetalRenderGraph: @unchecked Sendable {
             opacity: max(0, min(1, opacity)),
             screenBlurSigmaPx: max(0, screenBlurSigmaPx),
             uvOpen: screenUVOpen,
-            uvClose: screenUVClose
+            uvClose: screenUVClose,
+            screenCropUV: screenCropUV
         )
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerUniforms>.stride, index: 0)
 
@@ -586,15 +595,35 @@ public final class MetalRenderGraph: @unchecked Sendable {
         sprite: CursorSpriteData,
         state: CursorRenderState,
         screen: LayerRect,
-        outputSize: CGSize
+        outputSize: CGSize,
+        contentCropUV: SIMD4<Float>? = nil
     ) {
-        // Cursor position in output pixels: anchor at the screen rect (so
-        // zoom transforms move the cursor automatically, since the screen
-        // rect has already been zoomed by EffectEvaluator) using the
-        // recorded normalised fraction as the content coordinate inside
-        // that rect.
-        let cursorX = screen.minX + CGFloat(state.xFractionInScreen) * screen.size.width
-        let cursorY = screen.minY + CGFloat(state.yFractionInScreen) * screen.size.height
+        // Cursor position in output pixels, anchored to the screen rect using
+        // the recorded normalised fraction as the content coordinate.
+        //
+        // Classic (destination-rect) zoom: the screen rect was already grown by
+        // EffectEvaluator, so the fraction lands correctly. Content zoom: the
+        // rect is fixed and the footage is magnified by a source crop, so map
+        // the content fraction THROUGH the crop into the fixed window —
+        // `d = (fraction − cropOffset)/cropScale` — and clip to the window
+        // (scissor below) so a panned-away cursor disappears with the footage.
+        let contentMagX: CGFloat
+        let contentMagY: CGFloat
+        let fractionX: CGFloat
+        let fractionY: CGFloat
+        if let crop = contentCropUV, crop.x > 1e-6, crop.y > 1e-6 {
+            fractionX = (CGFloat(state.xFractionInScreen) - CGFloat(crop.z)) / CGFloat(crop.x)
+            fractionY = (CGFloat(state.yFractionInScreen) - CGFloat(crop.w)) / CGFloat(crop.y)
+            contentMagX = 1 / CGFloat(crop.x)
+            contentMagY = 1 / CGFloat(crop.y)
+        } else {
+            fractionX = CGFloat(state.xFractionInScreen)
+            fractionY = CGFloat(state.yFractionInScreen)
+            contentMagX = 1
+            contentMagY = 1
+        }
+        let cursorX = screen.minX + fractionX * screen.size.width
+        let cursorY = screen.minY + fractionY * screen.size.height
 
         // Cursor size in output pixels — keep the sprite's intrinsic
         // aspect ratio so the arrow doesn't squash on non-square sprites.
@@ -668,8 +697,11 @@ public final class MetalRenderGraph: @unchecked Sendable {
         // the traversal (not the shutter) keeps the fade linear in streak
         // length as the keyframe eases in/out.
         let blurGate = CGFloat(max(0.0, min(1.0, state.motionBlurStrength)))
-        let traversedXContent = CGFloat(state.velocityXFractionPerSecond) * shutterTime * screen.size.width * blurGate
-        let traversedYContent = CGFloat(state.velocityYFractionPerSecond) * shutterTime * screen.size.height * blurGate
+        // `contentMag` (1 outside content-zoom) magnifies the on-screen travel:
+        // the footage — and so the cursor's apparent motion — is `1/cropScale`
+        // larger inside the fixed window.
+        let traversedXContent = CGFloat(state.velocityXFractionPerSecond) * shutterTime * screen.size.width * blurGate * contentMagX
+        let traversedYContent = CGFloat(state.velocityYFractionPerSecond) * shutterTime * screen.size.height * blurGate * contentMagY
         // Magnitude clamp at ±1.0 sprite-UV (a full sprite-length each side
         // at saturation) — scales the VECTOR, never the axes independently.
         // The previous per-axis clamp rotated the streak off the motion
@@ -715,7 +747,29 @@ public final class MetalRenderGraph: @unchecked Sendable {
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<CursorUniforms>.stride, index: 0)
         encoder.setRenderPipelineState(cursorPipelineState)
         encoder.setFragmentTexture(texture, index: 0)
+
+        // Content zoom: clip the cursor (and its blur trail quad) to the placed
+        // window so a cursor panned out of the magnified view disappears with
+        // the footage instead of floating over the background. Reset afterward
+        // so later passes (webcam) aren't clipped.
+        let clipToWindow = contentCropUV != nil
+        if clipToWindow {
+            let minX = max(0, Int(screen.minX.rounded(.down)))
+            let minY = max(0, Int(screen.minY.rounded(.down)))
+            let maxX = min(Int(outputSize.width), Int(screen.maxX.rounded(.up)))
+            let maxY = min(Int(outputSize.height), Int(screen.maxY.rounded(.up)))
+            if maxX > minX, maxY > minY {
+                encoder.setScissorRect(MTLScissorRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY))
+            }
+        }
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        if clipToWindow {
+            encoder.setScissorRect(MTLScissorRect(
+                x: 0, y: 0,
+                width: max(1, Int(outputSize.width)),
+                height: max(1, Int(outputSize.height))
+            ))
+        }
     }
 
     private func smoothstep(_ edge0: Double, _ edge1: Double, _ x: Double) -> Double {
@@ -868,6 +922,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
         float screenBlurSigmaPx;
         float4 uvOpen;
         float4 uvClose;
+        float4 screenCropUV;
     };
 
     // Phase 3d screen blur. Approximate Gaussian as a 9-tap cross
@@ -1041,7 +1096,8 @@ public final class MetalRenderGraph: @unchecked Sendable {
         constant LayerUniforms &u [[buffer(0)]]
     ) {
         constexpr sampler s(address::clamp_to_edge, filter::linear);
-        float4 c = temporalBlurSample(tex, s, in.texCoord, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
+        float2 uvc = in.texCoord * u.screenCropUV.xy + u.screenCropUV.zw;
+        float4 c = temporalBlurSample(tex, s, uvc, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
         c.a *= layerAlphaMask(in, u) * u.opacity;
         return c;
     }
@@ -1126,8 +1182,9 @@ public final class MetalRenderGraph: @unchecked Sendable {
         // would amplify quantisation error around chroma boundaries;
         // averaging in YCbCr space is exactly the right place since both
         // planes share the same UV.
-        float4 yAcc = temporalBlurSample(yPlane, s, in.texCoord, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
-        float4 cbcrAcc = temporalBlurSample(cbcrPlane, s, in.texCoord, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
+        float2 uvc = in.texCoord * u.screenCropUV.xy + u.screenCropUV.zw;
+        float4 yAcc = temporalBlurSample(yPlane, s, uvc, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
+        float4 cbcrAcc = temporalBlurSample(cbcrPlane, s, uvc, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
         float y = yAcc.r;
         float2 cbcr = cbcrAcc.rg;
 

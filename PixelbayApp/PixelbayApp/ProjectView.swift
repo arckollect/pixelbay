@@ -112,8 +112,7 @@ struct ProjectView: View {
             bundleURL: document.bundleURL,
             revision: document.revision,
             previewQuality: previewQuality,
-            previewRenderSize: previewRenderSizeKey,
-            suppressEffects: isArrangingLayout
+            previewRenderSize: previewRenderSizeKey
         )) {
             // Debounce preview rebuilds. Every committed edit bumps `revision`
             // and re-keys this task; rapid edits — e.g. clicking through the
@@ -728,29 +727,10 @@ struct ProjectView: View {
         // render the live editor preview crisp.
         previewProject.tuning.blurStrength = 0
         previewProject.tuning.cursorBlur = 0
-        // The Layout/Camera tabs edit the BASE composition via the interactive
-        // transform overlay. Effects (zoom, talking-head) transform the screen/
-        // webcam on top of the base per-frame, so if they rendered here the
-        // dragged content (zoom-scaled, overscanned) wouldn't match the overlay
-        // handles (drawn at the base rect) — moving/scaling would fight the zoom
-        // and commit a wrong base rect. Suppressing effects on these tabs keeps
-        // the preview a true WYSIWYG view of the base layout the overlay edits;
-        // the authored effects are untouched in the document and on playback /
-        // the other tabs / export.
-        if isArrangingLayout {
-            previewProject.effects = []
-        }
         return previewProject
     }
 
     // MARK: - Interactive transform
-
-    /// True on the tabs whose preview is the interactive transform surface. The
-    /// editor preview renders the base layout (effects suppressed) here so the
-    /// overlay's handles and the rendered content stay 1:1.
-    private var isArrangingLayout: Bool {
-        selectedTab == .layout || selectedTab == .camera
-    }
 
     /// Whether the project has a webcam layer to transform — mirrors the
     /// `hasWebcam` predicate `PreviewComposition` uses (a webcam track with
@@ -923,11 +903,6 @@ private struct ProjectViewKey: Hashable {
     let revision: Int
     let previewQuality: PreviewPlayer.PreviewQuality
     let previewRenderSize: PreviewRenderSizeKey
-    /// Whether the layout-arranging tabs (Layout/Camera) are active, which
-    /// renders the base composition with effects suppressed. Re-keys the reload
-    /// when the user crosses that tab boundary so the preview swaps between the
-    /// effect-applied and base views.
-    let suppressEffects: Bool
 }
 
 private struct PreviewRenderSizeKey: Hashable {

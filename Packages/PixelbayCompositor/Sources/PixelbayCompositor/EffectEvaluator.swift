@@ -143,13 +143,46 @@ public enum EffectEvaluator {
         let factorAtFullStrength = max(1.0, kf.zoomFactor)
         guard factorAtFullStrength > 1.0001, strength > 1e-6 else { return layout }
 
-        let screen = layout.screen
         let center = zoomCenter(for: kf, atTime: t)
         let focus = clampFocusToScale(
             x: center.x,
             y: center.y,
             zoomScale: factorAtFullStrength
         )
+
+        if layout.zoomTargetsContent {
+            // CONTENT zoom (free-form `.custom` layouts): the screen is a placed
+            // window — keep its rect fixed and magnify the footage *inside* it.
+            // Compute the zoom against a VIRTUAL full-frame so the magnification
+            // lives in content space (independent of the window's size/position),
+            // then express it as a source crop. The compositor's spring refines
+            // `screenCropUV` from `screenZoomVirtualRect`; setting the crop here
+            // too keeps any non-sprung path correct.
+            let virtualBase = LayerRect(origin: .zero, size: layout.outputSize)
+            let transform = computeReferenceZoomTransform(
+                stageSize: layout.outputSize,
+                baseScreen: virtualBase,
+                zoomScale: factorAtFullStrength,
+                progress: strength,
+                focusX: focus.x,
+                focusY: focus.y
+            )
+            var next = layout
+            next.screenZoomVirtualRect = LayerRect(
+                origin: CGPoint(x: CGFloat(transform.x), y: CGFloat(transform.y)),
+                size: CGSize(
+                    width: layout.outputSize.width * CGFloat(transform.scale),
+                    height: layout.outputSize.height * CGFloat(transform.scale)
+                )
+            )
+            next.screenCropUV = Self.cropUV(forVirtualTransform: transform, outputSize: layout.outputSize)
+            // `next.screen` stays put — the window does not move during a zoom.
+            return next
+        }
+
+        // Classic destination-rect zoom (preset pip/split): grow + recenter the
+        // screen rect about the focus. Unchanged.
+        let screen = layout.screen
         let transform = computeReferenceZoomTransform(
             stageSize: layout.outputSize,
             baseScreen: screen,
@@ -171,6 +204,23 @@ public enum EffectEvaluator {
             )
         )
         return next
+    }
+
+    /// Convert a "virtual full-frame" zoom transform `(scale c, translate t px)`
+    /// into a SOURCE crop UV `srcUV = uv * cropScale + cropOffset` for the screen
+    /// layer: `cropScale = 1/c`, `cropOffset = −t / (outputSize · c)` per axis.
+    /// Identity transform → identity crop. For a full-frame window this crop is
+    /// mathematically identical to the destination-rect zoom (same visible
+    /// pixels), so it composes seamlessly with the content-zoom path.
+    static func cropUV(forVirtualTransform transform: AppliedZoomTransform, outputSize: CGSize) -> SIMD4<Float> {
+        let c = transform.scale
+        guard c > 1e-6, outputSize.width > 0, outputSize.height > 0 else {
+            return ResolvedLayout.identityUVTransform
+        }
+        let cropScale = Float(1.0 / c)
+        let cropOffsetX = Float(-transform.x / (Double(outputSize.width) * c))
+        let cropOffsetY = Float(-transform.y / (Double(outputSize.height) * c))
+        return SIMD4<Float>(cropScale, cropScale, cropOffsetX, cropOffsetY)
     }
 
     private static func clampFocusToScale(

@@ -95,6 +95,11 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
     private var zoomSpringState = ZoomSpring.createZoomSpringState()
     private var previousZoomTimeSeconds: Double?
     private var previousSprungScreen: LayerRect?
+    /// Previous frame's sprung *virtual full-frame* rect, used by the content-zoom
+    /// path (`applyContentZoomSpring`) to derive crop-space motion blur. Separate
+    /// from `previousSprungScreen` (which tracks the moved window rect for the
+    /// classic destination-rect path).
+    private var previousSprungVirtualRect: LayerRect?
     private static let screenMotionBlurPeakVelocityPPS: Double = 1400
     private static let screenMotionBlurMaxPx: Double = 14
     private static let screenMotionBlurVelocityThresholdPPS: Double = 12
@@ -115,6 +120,20 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
         atTime timeSeconds: Double,
         motionBlurAmount: Double
     ) -> ResolvedLayout {
+        // Content-zoom (free-form `.custom` layouts): the screen window is fixed
+        // and the zoom is a source crop. Smooth the *virtual full-frame* transform
+        // with the same spring, then express it as `screenCropUV`. Kept fully
+        // separate so the classic destination-rect path below is byte-for-byte
+        // unchanged for preset (pip/split) layouts.
+        if targetLayout.zoomTargetsContent {
+            return applyContentZoomSpring(
+                targetLayout: targetLayout,
+                baseLayout: baseLayout,
+                atTime: timeSeconds,
+                motionBlurAmount: motionBlurAmount
+            )
+        }
+
         let target = zoomTransform(from: baseLayout.screen, to: targetLayout.screen)
         let previousTime = previousZoomTimeSeconds
         let dtMs = previousTime.map { (timeSeconds - $0) * 1000.0 } ?? 0
@@ -155,6 +174,75 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
         previousZoomTimeSeconds = timeSeconds
         previousSprungScreen = layout.screen
         return layout
+    }
+
+    /// Content-zoom spring + crop. Smooths the virtual full-frame zoom transform
+    /// (carried on `targetLayout.screenZoomVirtualRect`) with the shared
+    /// `ZoomSpring`, converts it to `screenCropUV`, and leaves `layout.screen`
+    /// (the placed window) untouched. Motion blur is computed in crop space.
+    private func applyContentZoomSpring(
+        targetLayout: ResolvedLayout,
+        baseLayout: ResolvedLayout,
+        atTime timeSeconds: Double,
+        motionBlurAmount: Double
+    ) -> ResolvedLayout {
+        let outputSize = baseLayout.outputSize
+        let fullFrame = LayerRect(origin: .zero, size: outputSize)
+        let targetVirtual = targetLayout.screenZoomVirtualRect ?? fullFrame
+        let target = zoomTransform(from: fullFrame, to: targetVirtual)
+        let previousTime = previousZoomTimeSeconds
+        let dtMs = previousTime.map { (timeSeconds - $0) * 1000.0 } ?? 0
+        let shouldReset = previousTime == nil || !(dtMs > 0) || dtMs > 80
+        let transform: AppliedZoomTransform
+        if shouldReset {
+            ZoomSpring.resetZoomSpring(state: &zoomSpringState, target: target)
+            transform = target
+        } else {
+            transform = ZoomSpring.stepZoomSpring(
+                state: &zoomSpringState,
+                target: target,
+                deltaMs: dtMs
+            )
+        }
+
+        var layout = targetLayout
+        let sprungVirtual = screenRect(base: fullFrame, transform: transform)
+        layout.screenCropUV = EffectEvaluator.cropUV(forVirtualTransform: transform, outputSize: outputSize)
+        // layout.screen stays = the placed window (targetLayout.screen unchanged).
+
+        if motionBlurAmount > 0,
+           !shouldReset,
+           let previousSprungVirtualRect,
+           let shutterOpenVirtual = referenceMotionBlurOpenRect(
+                current: sprungVirtual,
+                previous: previousSprungVirtualRect,
+                base: fullFrame,
+                outputSize: outputSize,
+                dtMs: dtMs,
+                amount: motionBlurAmount
+           ) {
+            let openTransform = zoomTransform(from: fullFrame, to: shutterOpenVirtual)
+            let cropOpen = EffectEvaluator.cropUV(forVirtualTransform: openTransform, outputSize: outputSize)
+            layout.screenUVOpen = Self.uvRemapBetweenCrops(now: layout.screenCropUV, open: cropOpen)
+            layout.screenUVClose = ResolvedLayout.identityUVTransform
+        } else {
+            layout.screenUVOpen = ResolvedLayout.identityUVTransform
+            layout.screenUVClose = ResolvedLayout.identityUVTransform
+        }
+
+        previousZoomTimeSeconds = timeSeconds
+        previousSprungVirtualRect = sprungVirtual
+        return layout
+    }
+
+    /// Remap that takes a fragment's "now" crop sample to its "shutter-open" crop
+    /// sample, so the temporal-blur shader (which applies `screenCropUV` then this
+    /// remap) integrates the source motion. Given crops `srcUV = uv·s + o`:
+    /// `xy = open.s / now.s`, `zw = open.o − now.o · (open.s / now.s)`.
+    private static func uvRemapBetweenCrops(now: SIMD4<Float>, open: SIMD4<Float>) -> SIMD4<Float> {
+        let sx = now.x != 0 ? open.x / now.x : 1
+        let sy = now.y != 0 ? open.y / now.y : 1
+        return SIMD4<Float>(sx, sy, open.z - now.z * sx, open.w - now.w * sy)
     }
 
     private func referenceMotionBlurOpenRect(
@@ -310,10 +398,18 @@ public final class PixelbayVideoCompositor: NSObject, AVVideoCompositing, @unche
             // gentle: a 1.6× zoom yields ~1.09× cursor, enough emphasis to
             // keep it findable without making the pointer balloon during
             // zoom-follow.
-            let zoomFactor = baseLayout.screen.size.width > 0
-                ? layout.screen.size.width / baseLayout.screen.size.width
-                : 1.0
-            let zoomCursorBoost = 1.0 + max(0.0, Double(zoomFactor) - 1.0) * cursorSettings.zoomScaleBoostPerZoomUnit
+            // Content-zoom keeps the window rect fixed, so the magnification
+            // lives in the source crop (1/cropScale), not the rect-width ratio.
+            let zoomFactor: Double
+            if layout.zoomTargetsContent {
+                let cropScale = Double(layout.screenCropUV.x)
+                zoomFactor = cropScale > 1e-6 ? 1.0 / cropScale : 1.0
+            } else {
+                zoomFactor = baseLayout.screen.size.width > 0
+                    ? Double(layout.screen.size.width / baseLayout.screen.size.width)
+                    : 1.0
+            }
+            let zoomCursorBoost = 1.0 + max(0.0, zoomFactor - 1.0) * cursorSettings.zoomScaleBoostPerZoomUnit
             // Velocity-driven sprite scale (Phase 3c). Sprite grows
             // with cursor speed via smoothstep over the same window
             // cameraDamped uses for τ blending — keeps the visual

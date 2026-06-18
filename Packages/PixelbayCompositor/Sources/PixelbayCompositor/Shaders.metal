@@ -38,6 +38,7 @@ struct LayerUniforms {
     float screenBlurSigmaPx;    // Gaussian veil sigma in pixels; 0 = no blur
     float4 uvOpen;              // shutter-open UV remap (scale.xy, offset.zw)
     float4 uvClose;             // shutter-close UV remap (scale.xy, offset.zw)
+    float4 screenCropUV;        // content-zoom source crop applied BEFORE blur (scale.xy, offset.zw); identity = full source
 };
 
 // Phase 3a background pass.
@@ -215,7 +216,9 @@ fragment float4 bgraFragment(
     constant LayerUniforms &u [[buffer(0)]]
 ) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float4 c = temporalBlurSample(tex, s, in.texCoord, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
+    // Content-zoom source crop (identity for the classic path → no-op).
+    float2 uvc = in.texCoord * u.screenCropUV.xy + u.screenCropUV.zw;
+    float4 c = temporalBlurSample(tex, s, uvc, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
     c.a *= layerAlphaMask(in, u) * u.opacity;
     return c;
 }
@@ -280,8 +283,10 @@ fragment float4 nv12Fragment(
     constant LayerUniforms &u [[buffer(0)]]
 ) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float4 yAcc = temporalBlurSample(yPlane, s, in.texCoord, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
-    float4 cbcrAcc = temporalBlurSample(cbcrPlane, s, in.texCoord, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
+    // Content-zoom source crop (identity for the classic path → no-op).
+    float2 uvc = in.texCoord * u.screenCropUV.xy + u.screenCropUV.zw;
+    float4 yAcc = temporalBlurSample(yPlane, s, uvc, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
+    float4 cbcrAcc = temporalBlurSample(cbcrPlane, s, uvc, u.layerSizePx, u.uvOpen, u.uvClose, u.screenBlurSigmaPx, in.position.xy);
     float y = yAcc.r;
     float2 cbcr = cbcrAcc.rg;
 

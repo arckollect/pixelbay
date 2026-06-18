@@ -78,6 +78,22 @@ public struct ResolvedLayout: Sendable, Equatable {
     /// still camera collapses to a single tap (identity transforms).
     public var screenUVOpen: SIMD4<Float>
     public var screenUVClose: SIMD4<Float>
+    /// When true (free-form `LayoutMode.custom`), the zoom effect magnifies the
+    /// screen's *content* inside the fixed `screen` rect instead of moving/growing
+    /// the rect: the zoom is expressed as a SOURCE crop (`screenCropUV`) and
+    /// `screen` stays put. For preset modes (pip/split) this is false and the
+    /// classic destination-rect zoom is used unchanged.
+    public var zoomTargetsContent: Bool
+    /// Source-UV crop applied to the screen layer before any temporal-blur remap:
+    /// the sampled source UV is `uv * screenCropUV.xy + screenCropUV.zw`. Identity
+    /// `(1,1,0,0)` samples the full source (no zoom). Only non-identity in the
+    /// content-zoom path. Webcam/background ignore it.
+    public var screenCropUV: SIMD4<Float>
+    /// Carries the content-zoom's "virtual full-frame" zoomed rect (origin/size
+    /// against the full output) from `EffectEvaluator` to the compositor's spring,
+    /// which smooths it and converts it to `screenCropUV`. nil when not in the
+    /// content-zoom path.
+    public var screenZoomVirtualRect: LayerRect?
 
     public static let identityUVTransform = SIMD4<Float>(1, 1, 0, 0)
 
@@ -92,7 +108,10 @@ public struct ResolvedLayout: Sendable, Equatable {
         webcamOpacity: Float = 1.0,
         screenZoomBlurSigmaPx: Float = 0,
         screenUVOpen: SIMD4<Float> = ResolvedLayout.identityUVTransform,
-        screenUVClose: SIMD4<Float> = ResolvedLayout.identityUVTransform
+        screenUVClose: SIMD4<Float> = ResolvedLayout.identityUVTransform,
+        zoomTargetsContent: Bool = false,
+        screenCropUV: SIMD4<Float> = ResolvedLayout.identityUVTransform,
+        screenZoomVirtualRect: LayerRect? = nil
     ) {
         self.outputSize = outputSize
         self.background = background
@@ -105,6 +124,9 @@ public struct ResolvedLayout: Sendable, Equatable {
         self.screenZoomBlurSigmaPx = screenZoomBlurSigmaPx
         self.screenUVOpen = screenUVOpen
         self.screenUVClose = screenUVClose
+        self.zoomTargetsContent = zoomTargetsContent
+        self.screenCropUV = screenCropUV
+        self.screenZoomVirtualRect = screenZoomVirtualRect
     }
 }
 
@@ -284,7 +306,11 @@ public enum LayoutCalculator {
                 screenCornerRadius: screenCornerRadius,
                 webcam: webcam,
                 webcamShape: camShape,
-                webcamCornerRadius: camRadius
+                webcamCornerRadius: camRadius,
+                // Free-form layouts treat the screen as a placed *window*: a zoom
+                // magnifies the footage inside it (source crop) rather than moving
+                // the window. Preset modes keep the classic destination-rect zoom.
+                zoomTargetsContent: true
             )
         }
     }
