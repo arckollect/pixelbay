@@ -81,6 +81,11 @@ struct PreviewTransformOverlay: View {
             .contentShape(Rectangle())
             .focusable(selection != nil)
             .focused($focused)
+            // Keep focusability (arrow-key nudge) but suppress the system focus
+            // ring — otherwise selecting a layer draws a blue ring around the
+            // whole preview (this view fills the container). The selection
+            // chrome + handles are drawn manually and are unaffected.
+            .focusEffectDisabled()
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let pt): hovered = hitTestBody(pt, video: video)
