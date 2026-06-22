@@ -33,9 +33,9 @@ struct CameraInspector: View {
                 camSizeRow
             } else if case .splitHorizontal(_, let fraction) = layout.mode {
                 splitControls(fraction: fraction)
-            } else if isCustom {
-                customModeRow
             }
+            // Custom mode shows no extra rows here — the explanation + Reset
+            // Layout affordance live at the top of the Layout tab (ProjectView).
 
             camShapeRow
         }
@@ -97,27 +97,6 @@ struct CameraInspector: View {
                 }
             }
         )
-    }
-
-    /// Replaces the position grid / size controls when the arrangement is
-    /// custom. Explains the state and offers a one-tap return to the default
-    /// preset (tapping any position/size/mode preset also converts out).
-    private var customModeRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Custom arrangement — drag the screen or camera in the preview to move and resize. Pick a preset to snap back to a layout.")
-                .font(Theme.Font.caption)
-                .foregroundStyle(Theme.Color.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button {
-                var next = layout
-                next.mode = .pip(position: .bottomRight, size: .medium)
-                onChange(next)
-            } label: {
-                Label("Reset Layout", systemImage: "arrow.uturn.backward")
-            }
-            .buttonStyle(.pbCompact)
-        }
-        .pbInsetRow()
     }
 
     // MARK: - PiP grid + size

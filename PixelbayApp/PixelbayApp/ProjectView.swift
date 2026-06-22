@@ -65,12 +65,22 @@ struct ProjectView: View {
     /// revision-keyed reload.
     @State private var cachedCursorData: CursorTrajectoryLoader.CursorData?
     @State private var liveTuningTask: Task<Void, Never>?
-    /// Live preview-rebuild task for an in-flight layer drag in the preview.
-    /// Mirrors `liveTuningTask`: each drag tick cancels and replaces it, so the
-    /// videoComposition is rebuilt at ~10 Hz while the outline tracks the cursor
-    /// 1:1. The mouse-up commit (a `SetLayoutPresetCommand`) then takes over via
-    /// the normal revision-keyed reload.
+    /// Live preview-rebuild state for an in-flight layer drag in the preview.
+    /// A leading-edge throttle (see `previewLayoutLive`): the latest rects are
+    /// stashed in `pendingLayoutRects` and drained through one `player.load`
+    /// fast-path at a time (`liveLayoutInFlight`), rendering the footage
+    /// continuously at ~`liveLayoutInterval` while the outline tracks the cursor
+    /// 1:1. `liveLayoutGeneration` lets the mouse-up commit invalidate a render
+    /// that's already past cancellation so it can't clobber the committed frame.
     @State private var liveLayoutTask: Task<Void, Never>?
+    @State private var liveLayoutInFlight = false
+    @State private var lastLayoutRenderAt: ContinuousClock.Instant?
+    @State private var pendingLayoutRects: (screen: NormalizedRect, webcam: NormalizedRect?)?
+    @State private var liveLayoutGeneration = 0
+    /// Live-drag render cadence. The outline stays at 60 Hz; the footage
+    /// re-renders at ~20 Hz, which reads as live under the tracking outline
+    /// without thrashing the AVFoundation recompose path.
+    private static let liveLayoutInterval: Duration = .milliseconds(50)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -312,12 +322,12 @@ struct ProjectView: View {
                     .allowsHitTesting(false)
                     .transition(.opacity)
                 }
-                // Free-form transform: only on the layout/camera tabs, where
-                // arranging the composition is the task at hand (keeps the
-                // selection handles out of the way while editing cursor/zoom/
-                // audio, and clear of the zoom safe-zone overlay).
-                if (selectedTab == .layout || selectedTab == .camera),
-                   let overlay = transformOverlayData {
+                // Free-form transform is available on every tab — moving/scaling
+                // the screen or webcam isn't tied to which inspector is open.
+                // (Only the Reset Layout affordance is Layout-tab-scoped, since
+                // it lives in that tab's inspector.) Chrome shows only on
+                // hover/selection, so it stays out of the way until used.
+                if let overlay = transformOverlayData {
                     PreviewTransformOverlay(
                         screenRect: overlay.screen,
                         webcamRect: overlay.webcam,
@@ -521,8 +531,7 @@ struct ProjectView: View {
     }
 
     private static let inspectorTabs: [PBTabItem<InspectorTab>] = [
-        PBTabItem(tag: .layout, systemImage: "rectangle.on.rectangle", help: "Background & Scene"),
-        PBTabItem(tag: .camera, systemImage: "video", help: "Camera"),
+        PBTabItem(tag: .layout, systemImage: "rectangle.on.rectangle", help: "Layout"),
         PBTabItem(tag: .cursor, systemImage: "cursorarrow.rays", help: "Cursor"),
         PBTabItem(tag: .zoom, systemImage: "plus.magnifyingglass", help: "Zoom & Effects"),
         PBTabItem(tag: .audio, systemImage: "speaker.wave.2", help: "Audio")
@@ -532,7 +541,6 @@ struct ProjectView: View {
     private func tabContent(_ tab: InspectorTab) -> some View {
         switch tab {
         case .layout: layoutInspector
-        case .camera: cameraInspector
         case .cursor: cursorInspector
         case .zoom: effectsInspector
         case .audio: audioInspector
@@ -590,30 +598,64 @@ struct ProjectView: View {
         }
     }
 
-    // MARK: - Background & Scene inspector (Phase 3a)
+    // MARK: - Layout inspector (Phase 3a) — background/scene + camera composition
 
-    private var layoutInspector: some View {
-        BackgroundInspector(
-            layout: document.project.layout,
-            bundleURL: document.bundleURL,
-            onChange: { newLayout in
-                Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
-            },
-            onError: { message in
-                document.reportError(message)
-            }
-        )
+    /// True when the layout is a free-form custom arrangement (produced by
+    /// dragging/scaling a layer in the preview).
+    private var isCustomLayout: Bool {
+        if case .custom = document.project.layout.mode { return true }
+        return false
     }
 
-    // MARK: - Camera inspector
+    private func applyLayout(_ newLayout: LayoutPreset) {
+        Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
+    }
 
-    private var cameraInspector: some View {
-        CameraInspector(
-            layout: document.project.layout,
-            onChange: { newLayout in
-                Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
+    /// The Layout tab: background/scene controls, the camera composition
+    /// controls, and — when a custom arrangement is active — a reset banner at
+    /// the bottom. Both sub-inspectors carry their own section headers. The
+    /// banner lives at the bottom so entering/leaving custom mode appends/removes
+    /// it without shoving the controls above it up or down.
+    private var layoutInspector: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            BackgroundInspector(
+                layout: document.project.layout,
+                bundleURL: document.bundleURL,
+                onChange: { applyLayout($0) },
+                onError: { document.reportError($0) }
+            )
+            PBDivider()
+            CameraInspector(
+                layout: document.project.layout,
+                onChange: { applyLayout($0) }
+            )
+            if isCustomLayout {
+                PBDivider()
+                customLayoutResetRow
             }
-        )
+        }
+    }
+
+    /// Shown at the bottom of the Layout tab while a custom arrangement is
+    /// active: explains the state and offers a one-tap return to the default
+    /// preset. Resets the transform only — background / padding / corner radius
+    /// are left as the user dialed them.
+    private var customLayoutResetRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Custom arrangement — drag the screen or camera in the preview to move and resize. Reset to snap back to a layout.")
+                .font(Theme.Font.caption)
+                .foregroundStyle(Theme.Color.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                var next = document.project.layout
+                next.mode = .pip(position: .bottomRight, size: .medium)
+                applyLayout(next)
+            } label: {
+                Label("Reset Layout", systemImage: "arrow.uturn.backward")
+            }
+            .buttonStyle(.pbCompact)
+        }
+        .pbInsetRow()
     }
 
     // MARK: - Cursor inspector (Phase 3c)
@@ -783,17 +825,57 @@ struct ProjectView: View {
         return next
     }
 
-    /// ~10 Hz live rebuild of just the videoComposition while a layer is being
-    /// dragged. Mirrors `onTuningPreview`: cancel/replace an in-flight task that
-    /// loads a throwaway project copy with the would-be layout; structure is
-    /// unchanged so PreviewPlayer takes the videoComposition fast path.
+    /// Live rebuild of just the videoComposition while a layer is being dragged,
+    /// so the footage moves/scales continuously instead of snapping on release.
+    ///
+    /// Leading-edge throttle: the latest rects are always stashed; if a render
+    /// is in flight it drains them when it finishes, otherwise we render
+    /// immediately (if a full interval has elapsed) or schedule one trailing
+    /// render at the interval boundary. A continuous drag produces a steady
+    /// ~`liveLayoutInterval` stream of renders AND the final position always
+    /// renders (it's the last value stashed). Structure is unchanged so
+    /// PreviewPlayer takes the videoComposition fast path.
     private func previewLayoutLive(screen: NormalizedRect, webcam: NormalizedRect?) {
-        liveLayoutTask?.cancel()
-        liveLayoutTask = Task {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-            guard !Task.isCancelled else { return }
+        pendingLayoutRects = (screen, webcam)
+
+        // At most one render in flight; it re-checks the stash and drains.
+        guard !liveLayoutInFlight else { return }
+
+        let now = ContinuousClock.now
+        if let last = lastLayoutRenderAt, now - last < Self.liveLayoutInterval {
+            // Too soon for a leading render: schedule a single trailing render
+            // at the interval boundary (replacing any already scheduled one).
+            let wait = Self.liveLayoutInterval - (now - last)
+            liveLayoutTask?.cancel()
+            liveLayoutTask = Task { @MainActor in
+                try? await Task.sleep(for: wait)
+                guard !Task.isCancelled else { return }
+                await runLiveLayoutRender()
+            }
+        } else {
+            // Leading edge: render now.
+            liveLayoutTask?.cancel()
+            liveLayoutTask = Task { @MainActor in await runLiveLayoutRender() }
+        }
+    }
+
+    /// Drains `pendingLayoutRects` through the `player.load` fast path one render
+    /// at a time, looping to catch ticks that arrived mid-render (so the final
+    /// drag position always lands). A monotonic generation guard drops a render
+    /// that a commit invalidated while it was past cancellation.
+    @MainActor
+    private func runLiveLayoutRender() async {
+        guard !liveLayoutInFlight else { return }
+        liveLayoutInFlight = true
+        defer { liveLayoutInFlight = false }
+
+        while let rects = pendingLayoutRects {
+            pendingLayoutRects = nil
+            lastLayoutRenderAt = ContinuousClock.now
+            let gen = liveLayoutGeneration
+
             var previewProject = document.project
-            previewProject.layout = customLayout(screen: screen, webcam: webcam)
+            previewProject.layout = customLayout(screen: rects.screen, webcam: rects.webcam)
             previewProject = editorPreviewProject(from: previewProject)
             await player.load(
                 project: previewProject,
@@ -809,13 +891,22 @@ struct ProjectView: View {
                 quality: previewQuality,
                 maxOutputSize: previewMaxOutputSize
             )
+
+            // A commit landed while this render was in flight — let its
+            // revision-keyed reload own the final frame; don't clobber it.
+            guard gen == liveLayoutGeneration else { return }
         }
     }
 
     /// Commit a dragged/nudged layout as one undoable edit. The revision bump
     /// re-keys the debounced preview reload, which renders the final state.
     private func commitCustomLayout(screen: NormalizedRect, webcam: NormalizedRect?) {
+        // Stop the live throttle: cancel any scheduled render, clear the stash
+        // so the drain loop ends, and bump the generation so an in-flight render
+        // that's already past cancellation discards itself.
         liveLayoutTask?.cancel()
+        pendingLayoutRects = nil
+        liveLayoutGeneration += 1
         let newLayout = customLayout(screen: screen, webcam: webcam)
         Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
     }
@@ -924,10 +1015,10 @@ private struct PreviewRenderSizeKey: Hashable {
 
 /// The right-rail inspector categories, surfaced as a vertical icon-tab rail.
 enum InspectorTab: Hashable {
-    /// "Background & Scene" — background gallery + frame padding.
+    /// "Layout" — background gallery + frame padding/corner radius, plus webcam
+    /// composition (mode/position/size/shape). Scene arrangement lives here so
+    /// the preview transform overlay has a single home.
     case layout
-    /// Webcam composition: PiP/side-by-side mode, position, size, shape.
-    case camera
     case cursor
     case zoom
     case audio

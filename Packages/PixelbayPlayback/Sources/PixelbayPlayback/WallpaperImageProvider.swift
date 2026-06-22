@@ -21,16 +21,41 @@ public struct WallpaperImageProvider: Sendable {
 }
 
 public extension WallpaperImageProvider {
+    /// Process-wide decode cache. `.live` is reconstructed on every
+    /// `player.load`, and a live layer drag rebuilds the composition ~20×/s with
+    /// an invariant wallpaper + output size; without this each tick re-decodes
+    /// the same file from disk and re-crops it. Keyed on the wallpaper's
+    /// identity + the output pixel size (the crop depends only on output
+    /// aspect). `NSCache` is internally thread-safe, so `nonisolated(unsafe)` is
+    /// accurate — the provide closure runs nonisolated (off the main actor).
+    nonisolated(unsafe) private static let decodeCache = NSCache<NSString, CGImage>()
+
     /// Resolves built-in wallpapers through `builtinURL` (the app injects a
     /// lookup over the bundled catalog) and uploaded wallpapers through
     /// `bundleURL` + the ref's stored relative path. Loads via ImageIO and
     /// aspect-crops on a background thread — no main-actor / AppKit access, so
-    /// it's safe to call from inside the nonisolated `build`.
+    /// it's safe to call from inside the nonisolated `build`. The decoded +
+    /// cropped result is memoized in `decodeCache`.
     static func live(
         bundleURL: URL,
         builtinURL: @escaping @Sendable (String) -> URL?
     ) -> WallpaperImageProvider {
         WallpaperImageProvider { ref, outputSize in
+            let identity: String
+            if let id = ref.builtinID {
+                identity = "builtin:\(id)"
+            } else if let rel = ref.relativePath {
+                identity = "rel:\(bundleURL.path):\(rel)"
+            } else {
+                return nil
+            }
+            let w = Int(outputSize.width.rounded())
+            let h = Int(outputSize.height.rounded())
+            let cacheKey = "\(identity)|\(w)x\(h)" as NSString
+            if let cached = decodeCache.object(forKey: cacheKey) {
+                return cached
+            }
+
             let url: URL?
             if let id = ref.builtinID {
                 url = builtinURL(id)
@@ -43,7 +68,9 @@ public extension WallpaperImageProvider {
                   let source = CGImageSourceCreateWithURL(url as CFURL, nil),
                   let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
             else { return nil }
-            return BackgroundImage.aspectCropped(image, toAspectOf: outputSize)
+            let cropped = BackgroundImage.aspectCropped(image, toAspectOf: outputSize)
+            decodeCache.setObject(cropped, forKey: cacheKey)
+            return cropped
         }
     }
 }
