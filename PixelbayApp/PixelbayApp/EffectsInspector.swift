@@ -22,14 +22,12 @@ import SwiftUI
 struct EffectsInspector: View {
     let project: Project
     let bundleURL: URL
-    let cursorSettings: CursorSettings
     /// Current playhead position in project-timeline seconds. Forwarded to
     /// `ZoomActionsBar` so "Add Zoom at Playhead" lands at the user's scrub
     /// position. Source: `PreviewPlayer.currentTime` in `ProjectView`.
     let playheadTime: Double
     @Binding var selectedKeyframeID: EffectKeyframeID?
     let onApply: (any EditCommand) -> Void
-    let onCursorChange: (CursorSettings) -> Void
     let onSeek: (RationalTime) -> Void
     let onFollowSafeZonePreview: (Double?) -> Void
     /// Live-drag tuning preview. Fired with the in-flight `TuningSettings`
@@ -52,8 +50,6 @@ struct EffectsInspector: View {
     @State private var previewTuning: TuningSettings?
     /// Brief "copied" affordance on the Copy Values button.
     @State private var didCopyTuning = false
-    @State private var previewCursorScale: Double?
-    @State private var previewCursorZoomBoost: Double?
 
     private var sortedKeyframes: [EffectKeyframe] {
         project.effects.sorted { $0.timelineRange.start.seconds < $1.timelineRange.start.seconds }
@@ -76,8 +72,6 @@ struct EffectsInspector: View {
             )
             PBDivider()
             motionTuningSection
-            PBDivider()
-            cursorTuningSection
             PBDivider()
             keyframeList
             if let keyframe = selectedKeyframe {
@@ -283,9 +277,6 @@ struct EffectsInspector: View {
                 tuningSlider("Screen", tuning, \.blurStrength, TuningSettings.blurStrengthRange) {
                     $0 <= 0.000_5 ? "Off" : String(format: "%.2f", $0)
                 }
-                tuningSlider("Cursor", tuning, \.cursorBlur, TuningSettings.cursorBlurRange) {
-                    $0 <= 0.000_5 ? "Off" : percentText($0)
-                }
             }
         }
     }
@@ -400,68 +391,6 @@ struct EffectsInspector: View {
         }
     }
 
-    private var cursorTuningSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Cursor")
-                    .font(Theme.Font.caption)
-                    .foregroundStyle(Theme.Color.textSecondary)
-                Spacer()
-                Toggle("", isOn: Binding<Bool>(
-                    get: { cursorSettings.isEnabled },
-                    set: { newValue in
-                        var next = cursorSettings
-                        next.isEnabled = newValue
-                        onCursorChange(next)
-                    }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .tint(Theme.Color.accent)
-            }
-            Group {
-                cursorScaleSlider
-                cursorZoomBoostSlider
-            }
-            .disabled(!cursorSettings.isEnabled)
-            .opacity(cursorSettings.isEnabled ? 1 : 0.4)
-        }
-    }
-
-    private var cursorScaleSlider: some View {
-        cursorSettingSlider(
-            title: "Size",
-            liveValue: previewCursorScale ?? cursorSettings.scale,
-            committedValue: cursorSettings.scale,
-            range: CursorSettings.scaleRange,
-            valueText: { String(format: "%.2f×", $0) },
-            currentPreview: { previewCursorScale },
-            setPreview: { previewCursorScale = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.scale = final
-                onCursorChange(next)
-            }
-        )
-    }
-
-    private var cursorZoomBoostSlider: some View {
-        cursorSettingSlider(
-            title: "Zoom Size Boost",
-            liveValue: previewCursorZoomBoost ?? cursorSettings.zoomScaleBoostPerZoomUnit,
-            committedValue: cursorSettings.zoomScaleBoostPerZoomUnit,
-            range: CursorSettings.zoomScaleBoostPerZoomUnitRange,
-            valueText: { String(format: "%.2f×/zoom", $0) },
-            currentPreview: { previewCursorZoomBoost },
-            setPreview: { previewCursorZoomBoost = $0 },
-            commit: { final in
-                var next = cursorSettings
-                next.zoomScaleBoostPerZoomUnit = final
-                onCursorChange(next)
-            }
-        )
-    }
-
     private func centerCursorToggle(_ keyframe: EffectKeyframe) -> some View {
         HStack {
             Text("Center Cursor")
@@ -477,41 +406,6 @@ struct EffectsInspector: View {
             .labelsHidden()
             .toggleStyle(.switch)
             .tint(Theme.Color.accent)
-        }
-    }
-
-    private func cursorSettingSlider(
-        title: String,
-        liveValue: Double,
-        committedValue: Double,
-        range: ClosedRange<Double>,
-        valueText: @escaping (Double) -> String,
-        currentPreview: @escaping () -> Double?,
-        setPreview: @escaping (Double?) -> Void,
-        commit: @escaping (Double) -> Void
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(title)
-                Spacer()
-                Text(valueText(liveValue))
-                    .font(Theme.Font.monoTimecode)
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-            PBSlider(
-                value: Binding<Double>(
-                    get: { liveValue },
-                    set: { newValue in setPreview(clamp(newValue, to: range)) }
-                ),
-                in: range,
-                onEditingChanged: { isEditing in
-                    guard !isEditing else { return }
-                    let final = clamp(currentPreview() ?? liveValue, to: range)
-                    setPreview(nil)
-                    guard abs(final - committedValue) >= 0.000_5 else { return }
-                    commit(final)
-                }
-            )
         }
     }
 

@@ -296,7 +296,7 @@ final class ProjectModelTests: XCTestCase {
         let settings = try JSONDecoder().decode(CursorSettings.self, from: json)
 
         XCTAssertFalse(settings.isEnabled)
-        XCTAssertEqual(settings.scale, 3.25)
+        XCTAssertEqual(settings.scale, CursorSettings.defaultScale)
         XCTAssertEqual(settings.extras, [:])
     }
 

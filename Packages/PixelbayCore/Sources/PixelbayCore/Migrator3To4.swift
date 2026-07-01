@@ -2,7 +2,7 @@ import Foundation
 
 /// v3 → v4 migrator (Phase 3c). v3 projects have no `cursorSettings` field;
 /// v4 makes it a required top-level value on `Project` with the standard
-/// default (synthetic cursor enabled, 3.25× scale). We stamp the default on
+/// default (synthetic cursor enabled, default scale). We stamp the default on
 /// load — legacy assets keep their existing OS-baked-in cursor because the
 /// compositor additionally gates on each `MediaAsset.cursorRenderedSynthetically`
 /// (stored in `extras`), which only new captures set.
@@ -21,7 +21,7 @@ public struct Migrator3To4: ProjectMigrator {
         if result["cursorSettings"] == nil {
             result["cursorSettings"] = [
                 "isEnabled": true,
-                "scale": 3.25,
+                "scale": CursorSettings.defaultScale,
                 "extras": [String: Any]()
             ] as [String: Any]
         }

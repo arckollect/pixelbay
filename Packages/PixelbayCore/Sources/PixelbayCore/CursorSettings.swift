@@ -8,14 +8,14 @@ import Foundation
 // the user-facing knobs that control that pass — currently just size. Color,
 // click-press animation, and cursor-shape tracking are reserved for v2.
 //
-// The default `scale = 3.25` is paired with the compositor's smaller 18px
-// base cursor height, yielding a ~58 px SVG box on 1080p output. The actual
+// The default `scale = 4.0` is paired with the compositor's smaller 18px
+// base cursor height, yielding a ~72 px SVG box on 1080p output. The actual
 // arrow shape sits inside that box, so the pointer stays readable without
 // feeling oversized while the camera is not zoomed.
 
 public struct CursorSettings: Codable, Sendable, Equatable {
-    public static let defaultScale: Double = 3.25
-    public static let defaultZoomScaleBoostPerZoomUnit: Double = 0.15
+    public static let defaultScale: Double = 4.0
+    public static let defaultZoomScaleBoostPerZoomUnit: Double = 1.5
     public static let defaultVelocityScaleBoost: Double = 0.12
     public static let defaultVelocityScaleLow: Double = 0.15
     public static let defaultVelocityScaleHigh: Double = 1.20

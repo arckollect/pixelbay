@@ -46,8 +46,8 @@ public actor ClickLogger {
     /// frame rate so every rendered frame has at least one fresh sample
     /// inside its Catmull-Rom interpolation window. Older builds used
     /// 1/30 s, which left ~half the rendered frames interpolating across
-    /// a 33 ms gap and read as a choppy cursor at the default 3.25×
-    /// sprite scale. Sidecar size grows ~4× at native rates but is still
+    /// a 33 ms gap and read as a choppy cursor at the default sprite
+    /// scale. Sidecar size grows ~4× at native rates but is still
     /// negligible (text JSON, ~50 bytes/sample).
     private let moveDecimationInterval: TimeInterval
     /// Recorded display's **bounds in global points** (origin + size in the

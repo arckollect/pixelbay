@@ -584,10 +584,9 @@ public final class MetalRenderGraph: @unchecked Sendable {
 
     /// Base output-height fraction the cursor occupies at `scale = 1.0`.
     /// At 1080p output a scale-1.0 cursor renders ~18 px tall; the
-    /// `CursorSettings.default.scale` of 3.25 yields a ~58 px SVG box, with
-    /// the actual arrow shape reading around the mid-40 px range. This keeps
-    /// saved projects with the old 3.25× setting from looking huge before any
-    /// zoom effect is active.
+    /// `CursorSettings.default.scale` of 4.0 yields a ~72 px SVG box, with
+    /// the actual arrow shape reading smaller inside that box. Stored project
+    /// settings still win, so older saves keep their authored cursor size.
     private static let cursorBaseFractionOfOutputHeight: CGFloat = 18.0 / 1080.0
 
     private func drawCursor(

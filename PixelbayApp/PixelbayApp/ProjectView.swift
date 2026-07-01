@@ -670,8 +670,15 @@ struct ProjectView: View {
     private var cursorInspector: some View {
         CursorInspector(
             cursorSettings: document.project.cursorSettings,
+            tuningSettings: document.project.tuning,
             onCursorChange: { newCursor in
                 Task { await document.apply(SetCursorSettingsCommand(newSettings: newCursor)) }
+            },
+            onTuningChange: { newTuning in
+                Task { await document.apply(SetTuningSettingsCommand(newSettings: newTuning)) }
+            },
+            onTuningPreview: { tuning in
+                handleTuningPreview(tuning)
             }
         )
     }
@@ -694,14 +701,10 @@ struct ProjectView: View {
         EffectsInspector(
             project: document.project,
             bundleURL: document.bundleURL,
-            cursorSettings: document.project.cursorSettings,
             playheadTime: player.currentTime.seconds,
             selectedKeyframeID: $selectedEffectKeyframeID,
             onApply: { command in
                 Task { await document.apply(command) }
-            },
-            onCursorChange: { newCursor in
-                Task { await document.apply(SetCursorSettingsCommand(newSettings: newCursor)) }
             },
             onSeek: { time in
                 let cmTime = CMTime(value: time.value, timescale: time.timescale)
@@ -711,42 +714,44 @@ struct ProjectView: View {
                 zoomFollowSafeZoneOverlayFraction = fraction
             },
             onTuningPreview: { tuning in
-                liveTuningTask?.cancel()
-                guard let tuning else { return }  // release → committed reload takes over
-                liveTuningTask = Task {
-                    // ~100 ms coalescing: drag ticks arrive at display rate;
-                    // re-solving the camera path + swapping the
-                    // videoComposition at ~10 Hz tracks the finger closely
-                    // without churning AVFoundation.
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                    guard !Task.isCancelled else { return }
-                    var previewProject = document.project
-                    previewProject.tuning = tuning
-                    previewProject = editorPreviewProject(from: previewProject)
-                    // Structure (tracks/clips/assets) is unchanged, so
-                    // PreviewPlayer's fast path rebuilds ONLY the
-                    // videoComposition against the existing player item —
-                    // no decoder churn while scrubbing a slider.
-                    await player.load(
-                        project: previewProject,
-                        bundleURL: document.bundleURL,
-                        wallpaperSource: .live,
-                        wallpaperImageProvider: .live(
-                            bundleURL: document.bundleURL,
-                            builtinURL: { WallpaperCatalog.url(forBuiltinID: $0) }
-                        ),
-                        cursorTrajectory: cachedCursorData?.samples,
-                        cursorClickTimes: cachedCursorData?.clickTimes ?? [],
-                        cursorSprite: SystemCursorSprite.make(),
-                        quality: previewQuality,
-                        maxOutputSize: previewMaxOutputSize
-                    )
-                }
+                handleTuningPreview(tuning)
             }
         )
     }
 
     // MARK: - Helpers
+
+    private func handleTuningPreview(_ tuning: TuningSettings?) {
+        liveTuningTask?.cancel()
+        guard let tuning else { return }  // release → committed reload takes over
+        liveTuningTask = Task {
+            // ~100 ms coalescing: drag ticks arrive at display rate; re-solving
+            // the camera path + swapping the videoComposition at ~10 Hz tracks
+            // the finger closely without churning AVFoundation.
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard !Task.isCancelled else { return }
+            var previewProject = document.project
+            previewProject.tuning = tuning
+            previewProject = editorPreviewProject(from: previewProject)
+            // Structure (tracks/clips/assets) is unchanged, so PreviewPlayer's
+            // fast path rebuilds ONLY the videoComposition against the existing
+            // player item — no decoder churn while scrubbing a slider.
+            await player.load(
+                project: previewProject,
+                bundleURL: document.bundleURL,
+                wallpaperSource: .live,
+                wallpaperImageProvider: .live(
+                    bundleURL: document.bundleURL,
+                    builtinURL: { WallpaperCatalog.url(forBuiltinID: $0) }
+                ),
+                cursorTrajectory: cachedCursorData?.samples,
+                cursorClickTimes: cachedCursorData?.clickTimes ?? [],
+                cursorSprite: SystemCursorSprite.make(),
+                quality: previewQuality,
+                maxOutputSize: previewMaxOutputSize
+            )
+        }
+    }
 
     private func rationalTime(_ cmTime: CMTime) -> RationalTime? {
         guard cmTime.isValid, !cmTime.isIndefinite else { return nil }

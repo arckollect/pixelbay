@@ -371,8 +371,8 @@ public struct Project: Codable, Sendable, Identifiable {
     // nothing downstream resolves or overwrites these. Replaces the retired
     // `zoomFollowStyle` macro sliders (the v5→v6 migrator drops that key).
     public var tuning: TuningSettings
-    // Phase 3c — synthetic cursor settings (size, on/off). Defaults preserve
-    // the new "render synthetic cursor at 3.25× scale" behavior for fresh
+    // Phase 3c — synthetic cursor settings (size, zoom boost, on/off).
+    // Defaults preserve the current synthetic-cursor behavior for fresh
     // projects; the v3→v4 migrator stamps the same default onto old projects
     // and the compositor gates on per-asset `cursorRenderedSynthetically` so
     // legacy recordings (cursor baked into screen frames) skip the synthetic

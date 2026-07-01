@@ -134,7 +134,7 @@ final class ScenesSessionTests: XCTestCase {
             "effects": [],
             "cursorSettings": [
                 "isEnabled": true,
-                "scale": 3.25,
+                "scale": CursorSettings.defaultScale,
                 "extras": [String: Any]()
             ] as [String: Any],
             "extras": [String: Any]()
