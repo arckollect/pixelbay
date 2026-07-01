@@ -24,20 +24,18 @@ struct CameraInspector: View {
     let onChange: (LayoutPreset) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
             PBSectionHeader("Camera")
 
-            modeRow
+            modePicker
             if case .pip = layout.mode {
-                positionGrid
-                camSizeRow
+                positionPicker
+                sizePicker
             } else if case .splitHorizontal(_, let fraction) = layout.mode {
                 splitControls(fraction: fraction)
             }
-            // Custom mode shows no extra rows here — the explanation + Reset
-            // Layout affordance live at the top of the Layout tab (ProjectView).
 
-            camShapeRow
+            shapePicker
         }
     }
 
@@ -51,52 +49,102 @@ struct CameraInspector: View {
 
     // MARK: - Mode
 
-    private var modeRow: some View {
-        HStack {
-            Text("Mode")
-            Spacer()
-            // The "Custom" segment only appears once a custom arrangement
-            // exists — you enter custom by dragging in the preview, not by
-            // tapping here (tapping it is a no-op). PiP / Side-by-Side always
-            // convert out of custom.
-            PBSegmentedControl(selection: modeBinding, modeSegments)
-                .frame(maxWidth: isCustom ? 280 : 200)
+    private var modePicker: some View {
+        cameraGroup("Mode") {
+            VStack(spacing: Theme.Spacing.sm) {
+                ForEach(modeChoices) { choice in
+                    modeCard(choice)
+                }
+            }
         }
     }
 
-    private var modeSegments: [(LayoutModeTag, String)] {
-        var segments: [(LayoutModeTag, String)] = [
-            (.pip, "Picture-in-Picture"),
-            (.split, "Side-by-Side"),
+    private var modeChoices: [CameraModeChoice] {
+        var choices = [
+            CameraModeChoice(
+                tag: .pip,
+                title: "Picture-in-Picture",
+                systemImage: "rectangle.inset.filled.and.person.filled",
+                preview: .pip
+            ),
+            CameraModeChoice(
+                tag: .split,
+                title: "Side-by-Side",
+                systemImage: "rectangle.split.2x1",
+                preview: .split
+            )
         ]
-        if isCustom { segments.append((.custom, "Custom")) }
-        return segments
+        if isCustom {
+            choices.append(
+                CameraModeChoice(
+                    tag: .custom,
+                    title: "Custom",
+                    systemImage: "point.topleft.down.curvedto.point.bottomright.up",
+                    preview: .custom
+                )
+            )
+        }
+        return choices
     }
 
-    private var modeBinding: Binding<LayoutModeTag> {
-        Binding(
-            get: {
-                switch layout.mode {
-                case .pip: return .pip
-                case .splitHorizontal: return .split
-                case .custom: return .custom
+    private var selectedModeTag: LayoutModeTag {
+        switch layout.mode {
+        case .pip: return .pip
+        case .splitHorizontal: return .split
+        case .custom: return .custom
+        }
+    }
+
+    private func modeCard(_ choice: CameraModeChoice) -> some View {
+        let isSelected = selectedModeTag == choice.tag
+        return Button {
+            selectMode(choice.tag)
+        } label: {
+            HStack(spacing: Theme.Spacing.md) {
+                CameraModePreview(kind: choice.preview, isSelected: isSelected)
+                    .frame(width: 76, height: 48)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: choice.systemImage)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(isSelected ? Theme.Color.accent : Theme.Color.textSecondary)
+                        Text(choice.title)
+                            .font(Theme.Font.bodyEmphasized)
+                            .foregroundStyle(Theme.Color.textPrimary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                    }
                 }
-            },
-            set: { newTag in
-                switch newTag {
-                case .pip:
-                    var next = layout
-                    next.mode = .pip(position: .bottomRight, size: .medium)
-                    onChange(next)
-                case .split:
-                    var next = layout
-                    next.mode = .splitHorizontal(screenSide: .left, screenFraction: 0.7)
-                    onChange(next)
-                case .custom:
-                    break  // display-only; entered by dragging in the preview
+
+                Spacer(minLength: Theme.Spacing.sm)
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.Color.accent)
                 }
             }
-        )
+            .padding(Theme.Spacing.sm)
+            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+            .cameraOptionSurface(selected: isSelected)
+        }
+        .buttonStyle(.plain)
+        .help(choice.title)
+    }
+
+    private func selectMode(_ newTag: LayoutModeTag) {
+        switch newTag {
+        case .pip:
+            var next = layout
+            next.mode = .pip(position: .bottomRight, size: .medium)
+            onChange(next)
+        case .split:
+            var next = layout
+            next.mode = .splitHorizontal(screenSide: .left, screenFraction: 0.7)
+            onChange(next)
+        case .custom:
+            break  // display-only; entered by arranging layers in the preview
+        }
     }
 
     // MARK: - PiP grid + size
@@ -106,9 +154,8 @@ struct CameraInspector: View {
     /// zone shows a little accent cam chip seated where the PiP would land;
     /// the rest show faint dots. Reads far more clearly than the old grid of
     /// nine identical rectangles.
-    private var positionGrid: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Cam Position").font(Theme.Font.caption).foregroundStyle(Theme.Color.textSecondary)
+    private var positionPicker: some View {
+        cameraGroup("Position", trailing: selectedPosition?.label) {
             ZStack {
                 RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
                     .fill(
@@ -122,6 +169,12 @@ struct CameraInspector: View {
                         RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
                             .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
                     )
+                    .overlay(alignment: .top) {
+                        RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                            .fill(.white.opacity(0.04))
+                            .frame(height: 1)
+                            .padding(.horizontal, 1)
+                    }
                 VStack(spacing: 0) {
                     ForEach(positionRows, id: \.self) { row in
                         HStack(spacing: 0) {
@@ -155,20 +208,17 @@ struct CameraInspector: View {
     private func positionCell(_ pos: CamPosition) -> some View {
         let isSelected = selectedPosition == pos
         return ZStack {
+            RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
+                .fill(isSelected ? Theme.Color.accent.opacity(0.13) : Color.clear)
+                .padding(3)
+
             if isSelected {
-                RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
-                    .fill(Theme.Color.accent)
-                    .overlay(
-                        Image(systemName: "video.fill")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.white)
-                    )
-                    .shadow(color: Theme.Color.accent.opacity(0.5), radius: 4, y: 1)
-                    .padding(4)
+                CameraChipPreview(shape: layout.camShape, width: 38, height: 26, isSelected: true)
+                    .shadow(color: Theme.Color.accent.opacity(0.45), radius: 5, y: 2)
             } else {
                 Circle()
-                    .fill(Theme.Color.textTertiary.opacity(0.55))
-                    .frame(width: 4, height: 4)
+                    .fill(Theme.Color.textTertiary.opacity(0.5))
+                    .frame(width: 5, height: 5)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -182,108 +232,178 @@ struct CameraInspector: View {
         .help(pos.label)
     }
 
-    private var camSizeRow: some View {
-        HStack {
-            Text("Cam Size").font(.caption)
-            Spacer()
-            PBSegmentedControl(selection: sizeBinding, [
-                (CamSizePreset.small, "S"),
-                (CamSizePreset.medium, "M"),
-                (CamSizePreset.large, "L"),
-            ])
-            .frame(maxWidth: 110)
+    private var sizePicker: some View {
+        cameraGroup("Camera Size") {
+            HStack(spacing: Theme.Spacing.sm) {
+                ForEach(CamSizePreset.allCases, id: \.self) { size in
+                    sizeOption(size)
+                }
+            }
         }
     }
 
-    private var sizeBinding: Binding<CamSizePreset> {
-        Binding(
-            get: {
-                if case .pip(_, let s) = layout.mode { return s }
-                return .medium
-            },
-            set: { newSize in
-                guard case .pip(let pos, _) = layout.mode else { return }
-                var next = layout
-                next.mode = .pip(position: pos, size: newSize)
-                onChange(next)
+    private var selectedSize: CamSizePreset {
+        if case .pip(_, let s) = layout.mode { return s }
+        return .medium
+    }
+
+    private func sizeOption(_ size: CamSizePreset) -> some View {
+        let isSelected = selectedSize == size
+        return Button {
+            setSize(size)
+        } label: {
+            VStack(spacing: 7) {
+                CameraSizePreview(size: size, shape: layout.camShape, isSelected: isSelected)
+                    .frame(height: 28)
+                Text(size.label)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(isSelected ? Theme.Color.textPrimary : Theme.Color.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
-        )
+            .padding(.horizontal, 6)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, minHeight: 66)
+            .cameraOptionSurface(selected: isSelected)
+        }
+        .buttonStyle(.plain)
+        .help(size.label)
+    }
+
+    private func setSize(_ newSize: CamSizePreset) {
+        guard case .pip(let pos, _) = layout.mode else { return }
+        var next = layout
+        next.mode = .pip(position: pos, size: newSize)
+        onChange(next)
     }
 
     // MARK: - Split
 
     @ViewBuilder
     private func splitControls(fraction: Double) -> some View {
-        HStack {
-            Text("Screen Side").font(.caption)
-            Spacer()
-            PBSegmentedControl(selection: splitSideBinding, [
-                (HorizontalSide.left, "Left"),
-                (HorizontalSide.right, "Right"),
-            ])
-            .frame(maxWidth: 130)
-        }
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("Screen Share").font(.caption)
-                Spacer()
-                Text(String(format: "%.0f%%", fraction * 100))
-                    .font(Theme.Font.monoTimecode)
-                    .foregroundStyle(Theme.Color.textSecondary)
+        cameraGroup("Screen Side") {
+            HStack(spacing: Theme.Spacing.sm) {
+                splitSideOption(.left, fraction: fraction)
+                splitSideOption(.right, fraction: fraction)
             }
-            PBSlider(
-                value: Binding<Double>(
-                    get: { fraction },
-                    set: { newValue in
-                        guard case .splitHorizontal(let side, _) = layout.mode else { return }
-                        var next = layout
-                        next.mode = .splitHorizontal(screenSide: side, screenFraction: newValue)
-                        onChange(next)
-                    }
-                ),
-                in: 0.3...0.9
-            )
+        }
+
+        cameraGroup("Screen Share", trailing: String(format: "%.0f%%", fraction * 100)) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                CameraSplitPreview(side: selectedSplitSide, fraction: fraction, isSelected: true)
+                    .frame(height: 58)
+                PBSlider(
+                    value: Binding<Double>(
+                        get: { fraction },
+                        set: { newValue in
+                            guard case .splitHorizontal(let side, _) = layout.mode else { return }
+                            var next = layout
+                            next.mode = .splitHorizontal(screenSide: side, screenFraction: newValue)
+                            onChange(next)
+                        }
+                    ),
+                    in: 0.3...0.9
+                )
+            }
+            .pbInsetRow()
         }
     }
 
-    private var splitSideBinding: Binding<HorizontalSide> {
-        Binding(
-            get: {
-                if case .splitHorizontal(let side, _) = layout.mode { return side }
-                return .left
-            },
-            set: { newSide in
-                guard case .splitHorizontal(_, let fraction) = layout.mode else { return }
-                var next = layout
-                next.mode = .splitHorizontal(screenSide: newSide, screenFraction: fraction)
-                onChange(next)
+    private var selectedSplitSide: HorizontalSide {
+        if case .splitHorizontal(let side, _) = layout.mode { return side }
+        return .left
+    }
+
+    private func splitSideOption(_ side: HorizontalSide, fraction: Double) -> some View {
+        let isSelected = selectedSplitSide == side
+        return Button {
+            setSplitSide(side)
+        } label: {
+            VStack(spacing: 7) {
+                CameraSplitPreview(side: side, fraction: fraction, isSelected: isSelected)
+                    .frame(height: 42)
+                Text(side == .left ? "Screen Left" : "Screen Right")
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(isSelected ? Theme.Color.textPrimary : Theme.Color.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
-        )
+            .padding(Theme.Spacing.sm)
+            .frame(maxWidth: .infinity, minHeight: 82)
+            .cameraOptionSurface(selected: isSelected)
+        }
+        .buttonStyle(.plain)
+        .help(side == .left ? "Screen Left" : "Screen Right")
+    }
+
+    private func setSplitSide(_ newSide: HorizontalSide) {
+        guard case .splitHorizontal(_, let fraction) = layout.mode else { return }
+        var next = layout
+        next.mode = .splitHorizontal(screenSide: newSide, screenFraction: fraction)
+        onChange(next)
     }
 
     // MARK: - Shape
 
-    private var camShapeRow: some View {
-        HStack {
-            Text("Cam Shape").font(.caption)
-            Spacer()
-            PBSegmentedControl(selection: camShapeBinding, [
-                (CamShape.rectangle, "Rectangle"),
-                (CamShape.circle, "Circle"),
-            ])
-            .frame(maxWidth: 180)
+    private var shapePicker: some View {
+        cameraGroup("Camera Shape") {
+            HStack(spacing: Theme.Spacing.sm) {
+                shapeOption(.rectangle)
+                shapeOption(.circle)
+            }
         }
     }
 
-    private var camShapeBinding: Binding<CamShape> {
-        Binding(
-            get: { layout.camShape },
-            set: { newShape in
-                var next = layout
-                next.camShape = newShape
-                onChange(next)
+    private func shapeOption(_ shape: CamShape) -> some View {
+        let isSelected = layout.camShape == shape
+        return Button {
+            setShape(shape)
+        } label: {
+            HStack(spacing: Theme.Spacing.sm) {
+                CameraChipPreview(shape: shape, width: 34, height: 26, isSelected: isSelected)
+                Text(shape.label)
+                    .font(Theme.Font.bodyEmphasized)
+                    .foregroundStyle(isSelected ? Theme.Color.textPrimary : Theme.Color.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
             }
-        )
+            .padding(.horizontal, Theme.Spacing.sm)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .cameraOptionSurface(selected: isSelected)
+        }
+        .buttonStyle(.plain)
+        .help(shape.label)
+    }
+
+    private func setShape(_ newShape: CamShape) {
+        var next = layout
+        next.camShape = newShape
+        onChange(next)
+    }
+
+    private func cameraGroup<Content: View>(
+        _ title: String,
+        trailing: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                    .font(Theme.Font.cardTitle)
+                    .foregroundStyle(Theme.Color.textPrimary)
+                Spacer(minLength: Theme.Spacing.sm)
+                if let trailing {
+                    Text(trailing)
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.Color.textSecondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+            }
+            content()
+        }
     }
 }
 
@@ -746,6 +866,259 @@ private enum LayoutModeTag: Hashable {
     case custom
 }
 
+private struct CameraModeChoice: Identifiable {
+    let tag: LayoutModeTag
+    let title: String
+    let systemImage: String
+    let preview: CameraModePreviewKind
+
+    var id: LayoutModeTag { tag }
+}
+
+private enum CameraModePreviewKind {
+    case pip
+    case split
+    case custom
+}
+
+private struct CameraOptionSurface: ViewModifier {
+    let selected: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                    .fill(selected ? Theme.Color.accent.opacity(0.13) : Theme.Color.bgInsetCard)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                    .strokeBorder(
+                        selected ? Theme.Color.accent.opacity(0.75) : Theme.Color.borderSubtle,
+                        lineWidth: selected ? Theme.Stroke.regular : Theme.Stroke.hairline
+                    )
+            )
+            .overlay(alignment: .top) {
+                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                    .fill(.white.opacity(selected ? 0.08 : 0.04))
+                    .frame(height: 1)
+                    .padding(.horizontal, 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
+            .animation(.easeOut(duration: 0.14), value: selected)
+    }
+}
+
+private extension View {
+    func cameraOptionSurface(selected: Bool) -> some View {
+        modifier(CameraOptionSurface(selected: selected))
+    }
+}
+
+private struct CameraModePreview: View {
+    let kind: CameraModePreviewKind
+    let isSelected: Bool
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
+                .fill(Theme.Color.bgBase)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
+                        .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+                )
+
+            switch kind {
+            case .pip:
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(screenFill)
+                    .frame(width: 58, height: 32)
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(cameraFill)
+                    .overlay(
+                        Image(systemName: "video.fill")
+                            .font(.system(size: 6, weight: .semibold))
+                            .foregroundStyle(.white)
+                    )
+                    .frame(width: 20, height: 13)
+                    .offset(x: 18, y: 9)
+            case .split:
+                HStack(spacing: 2) {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(screenFill)
+                        .frame(width: 38, height: 32)
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(cameraFill)
+                        .overlay(
+                            Image(systemName: "video.fill")
+                                .font(.system(size: 7, weight: .semibold))
+                                .foregroundStyle(.white)
+                        )
+                        .frame(width: 18, height: 32)
+                }
+            case .custom:
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(screenFill)
+                    .frame(width: 46, height: 26)
+                    .offset(x: -5, y: -4)
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(cameraFill)
+                    .overlay(
+                        Image(systemName: "video.fill")
+                            .font(.system(size: 6, weight: .semibold))
+                            .foregroundStyle(.white)
+                    )
+                    .frame(width: 22, height: 15)
+                    .offset(x: 19, y: 10)
+            }
+        }
+    }
+
+    private var screenFill: Color {
+        isSelected ? Theme.Color.textPrimary.opacity(0.17) : Theme.Color.bgElevated
+    }
+
+    private var cameraFill: Color {
+        isSelected ? Theme.Color.accent : Theme.Color.textTertiary.opacity(0.72)
+    }
+}
+
+private struct CameraSplitPreview: View {
+    let side: HorizontalSide
+    let fraction: Double
+    let isSelected: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let gap: CGFloat = 2
+            let width = max(1, geo.size.width)
+            let minimumColumnWidth: CGFloat = 14
+            let maximumScreenWidth = max(minimumColumnWidth, width - gap - minimumColumnWidth)
+            let screenWidth = min(maximumScreenWidth, max(minimumColumnWidth, (width - gap) * CGFloat(fraction)))
+            let cameraWidth = max(14, width - gap - screenWidth)
+
+            HStack(spacing: gap) {
+                if side == .left {
+                    screenBlock.frame(width: screenWidth)
+                    cameraBlock.frame(width: cameraWidth)
+                } else {
+                    cameraBlock.frame(width: cameraWidth)
+                    screenBlock.frame(width: screenWidth)
+                }
+            }
+            .frame(width: width, height: geo.size.height)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
+                .strokeBorder(isSelected ? Theme.Color.accent.opacity(0.5) : Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+        )
+    }
+
+    private var screenBlock: some View {
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [Theme.Color.bgElevated, Theme.Color.bgBase],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay(alignment: .topLeading) {
+                Circle()
+                    .fill(.white.opacity(0.14))
+                    .frame(width: 4, height: 4)
+                    .padding(6)
+            }
+    }
+
+    private var cameraBlock: some View {
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .fill(isSelected ? Theme.Color.accent.opacity(0.9) : Theme.Color.textTertiary.opacity(0.56))
+            .overlay(
+                Image(systemName: "video.fill")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.white)
+            )
+    }
+}
+
+private struct CameraChipPreview: View {
+    let shape: CamShape
+    let width: CGFloat
+    let height: CGFloat
+    let isSelected: Bool
+
+    var body: some View {
+        ZStack {
+            if shape == .circle {
+                Circle()
+                    .fill(fill)
+                    .overlay(Circle().strokeBorder(border, lineWidth: Theme.Stroke.hairline))
+                    .frame(width: min(width, height), height: min(width, height))
+            } else {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(fill)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .strokeBorder(border, lineWidth: Theme.Stroke.hairline)
+                    )
+                    .frame(width: width, height: height)
+            }
+
+            Image(systemName: "video.fill")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(isSelected ? .white : Theme.Color.textSecondary)
+        }
+    }
+
+    private var fill: Color {
+        isSelected ? Theme.Color.accent : Theme.Color.bgElevated
+    }
+
+    private var border: Color {
+        isSelected ? .white.opacity(0.3) : Theme.Color.borderStrong
+    }
+}
+
+private struct CameraSizePreview: View {
+    let size: CamSizePreset
+    let shape: CamShape
+    let isSelected: Bool
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Theme.Color.bgBase)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
+                )
+                .frame(width: 54, height: 30)
+
+            CameraChipPreview(shape: shape, width: chipWidth, height: chipHeight, isSelected: isSelected)
+                .padding(3)
+        }
+        .frame(width: 58, height: 34)
+    }
+
+    private var chipWidth: CGFloat {
+        switch size {
+        case .small: return 18
+        case .medium: return 25
+        case .large: return 34
+        }
+    }
+
+    private var chipHeight: CGFloat {
+        switch size {
+        case .small: return 13
+        case .medium: return 18
+        case .large: return 24
+        }
+    }
+}
+
 /// SwiftUI preview of a `WallpaperGradient` — the inspector swatch. Renders the
 /// same base + soft radial blobs the Metal compositor draws (approximated with
 /// `RadialGradient` layers), so the picker thumbnail reads like the exported
@@ -900,6 +1273,25 @@ private extension CamPosition {
         case .bottomLeft: return "Bottom Left"
         case .bottomCenter: return "Bottom Center"
         case .bottomRight: return "Bottom Right"
+        }
+    }
+}
+
+private extension CamSizePreset {
+    var label: String {
+        switch self {
+        case .small: return "Small"
+        case .medium: return "Medium"
+        case .large: return "Large"
+        }
+    }
+}
+
+private extension CamShape {
+    var label: String {
+        switch self {
+        case .rectangle: return "Rectangle"
+        case .circle: return "Circle"
         }
     }
 }

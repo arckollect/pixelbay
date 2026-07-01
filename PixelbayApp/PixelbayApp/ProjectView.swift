@@ -531,7 +531,8 @@ struct ProjectView: View {
     }
 
     private static let inspectorTabs: [PBTabItem<InspectorTab>] = [
-        PBTabItem(tag: .layout, systemImage: "rectangle.on.rectangle", help: "Layout"),
+        PBTabItem(tag: .layout, systemImage: "rectangle.on.rectangle", help: "Background & Scene"),
+        PBTabItem(tag: .camera, systemImage: "video", help: "Camera"),
         PBTabItem(tag: .cursor, systemImage: "cursorarrow.rays", help: "Cursor"),
         PBTabItem(tag: .zoom, systemImage: "plus.magnifyingglass", help: "Zoom & Effects"),
         PBTabItem(tag: .audio, systemImage: "speaker.wave.2", help: "Audio")
@@ -541,6 +542,7 @@ struct ProjectView: View {
     private func tabContent(_ tab: InspectorTab) -> some View {
         switch tab {
         case .layout: layoutInspector
+        case .camera: cameraInspector
         case .cursor: cursorInspector
         case .zoom: effectsInspector
         case .audio: audioInspector
@@ -598,7 +600,7 @@ struct ProjectView: View {
         }
     }
 
-    // MARK: - Layout inspector (Phase 3a) — background/scene + camera composition
+    // MARK: - Layout inspector (Phase 3a) — background/scene
 
     /// True when the layout is a free-form custom arrangement (produced by
     /// dragging/scaling a layer in the preview).
@@ -611,20 +613,21 @@ struct ProjectView: View {
         Task { await document.apply(SetLayoutPresetCommand(newLayout: newLayout)) }
     }
 
-    /// The Layout tab: background/scene controls, the camera composition
-    /// controls, and — when a custom arrangement is active — a reset banner at
-    /// the bottom. Both sub-inspectors carry their own section headers. The
-    /// banner lives at the bottom so entering/leaving custom mode appends/removes
-    /// it without shoving the controls above it up or down.
+    /// The Layout tab: background/scene controls only. Camera composition lives
+    /// in the dedicated Camera tab so both panes stay calmer and more scannable.
     private var layoutInspector: some View {
+        BackgroundInspector(
+            layout: document.project.layout,
+            bundleURL: document.bundleURL,
+            onChange: { applyLayout($0) },
+            onError: { document.reportError($0) }
+        )
+    }
+
+    // MARK: - Camera inspector
+
+    private var cameraInspector: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-            BackgroundInspector(
-                layout: document.project.layout,
-                bundleURL: document.bundleURL,
-                onChange: { applyLayout($0) },
-                onError: { document.reportError($0) }
-            )
-            PBDivider()
             CameraInspector(
                 layout: document.project.layout,
                 onChange: { applyLayout($0) }
@@ -636,16 +639,20 @@ struct ProjectView: View {
         }
     }
 
-    /// Shown at the bottom of the Layout tab while a custom arrangement is
-    /// active: explains the state and offers a one-tap return to the default
-    /// preset. Resets the transform only — background / padding / corner radius
+    /// Shown at the bottom of the Camera tab while a custom arrangement is
+    /// active. Resets the transform only — background / padding / corner radius
     /// are left as the user dialed them.
     private var customLayoutResetRow: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Custom arrangement — drag the screen or camera in the preview to move and resize. Reset to snap back to a layout.")
-                .font(Theme.Font.caption)
-                .foregroundStyle(Theme.Color.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: Theme.Spacing.sm) {
+                Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.Color.accent)
+                Text("Custom arrangement")
+                    .font(Theme.Font.cardTitle)
+                    .foregroundStyle(Theme.Color.textPrimary)
+                Spacer()
+            }
             Button {
                 var next = document.project.layout
                 next.mode = .pip(position: .bottomRight, size: .medium)
@@ -1015,10 +1022,10 @@ private struct PreviewRenderSizeKey: Hashable {
 
 /// The right-rail inspector categories, surfaced as a vertical icon-tab rail.
 enum InspectorTab: Hashable {
-    /// "Layout" — background gallery + frame padding/corner radius, plus webcam
-    /// composition (mode/position/size/shape). Scene arrangement lives here so
-    /// the preview transform overlay has a single home.
+    /// "Background & Scene" — backdrop gallery + frame padding/corner radius.
     case layout
+    /// "Camera" — webcam composition: mode, position, size, split, and shape.
+    case camera
     case cursor
     case zoom
     case audio
