@@ -37,13 +37,13 @@ struct AudioInspector: View {
     private var clipSection: some View {
         if let clip {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                PBSectionHeader("Clip")
+                PBSectionHeader("Clip", style: .caps)
                 volumeSlider(for: clip)
                 speedSlider(for: clip)
             }
         } else {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                PBSectionHeader("Clip")
+                PBSectionHeader("Clip", style: .caps)
                 Text("Select a clip in the timeline to edit its volume and speed.")
                     .font(Theme.Font.body)
                     .foregroundStyle(Theme.Color.textSecondary)
@@ -118,7 +118,7 @@ struct AudioInspector: View {
 
     private var tracksSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            PBSectionHeader("Tracks")
+            PBSectionHeader("Tracks", style: .caps)
             ForEach(audioTracks) { track in
                 HStack(spacing: Theme.Spacing.sm) {
                     Image(systemName: track.kind.inspectorSymbol)

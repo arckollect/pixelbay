@@ -50,6 +50,17 @@ public struct TimelineView: NSViewRepresentable {
     /// Called on ruler click + drag with the timeline-domain time at the
     /// pointer. Host (ProjectView) seeks the PreviewPlayer.
     public var onScrub: (RationalTime) -> Void
+    /// Per-row height overrides keyed by `TimelineDisplayRow.id` — rows
+    /// absent from the map use `trackHeight`. View state owned by the host.
+    public var rowHeightOverrides: [String: CGFloat]
+    /// Fired on mouseUp of a row-resize drag with the FULL updated override
+    /// map (existing overrides + the dragged row). The host stores it and
+    /// passes it back via `rowHeightOverrides`.
+    public var onRowHeightsChange: ([String: CGFloat]) -> Void
+    /// True while the host is mid-drag on a continuous geometry control
+    /// (track-height / zoom slider). Suppresses thumbnail + waveform layers
+    /// so per-tick rebuilds stay allocation-free; content returns on release.
+    public var suppressContent: Bool
 
     public init(
         project: Project,
@@ -61,10 +72,13 @@ public struct TimelineView: NSViewRepresentable {
         selectedEffectKeyframeID: EffectKeyframeID? = nil,
         playheadTime: RationalTime? = nil,
         revision: Int = 0,
+        rowHeightOverrides: [String: CGFloat] = [:],
+        suppressContent: Bool = false,
         onSelect: @escaping (ClipID?) -> Void,
         onSelectEffectKeyframe: @escaping (EffectKeyframeID?) -> Void = { _ in },
         onApplyCommand: @escaping (any EditCommand) -> Void = { _ in },
-        onScrub: @escaping (RationalTime) -> Void = { _ in }
+        onScrub: @escaping (RationalTime) -> Void = { _ in },
+        onRowHeightsChange: @escaping ([String: CGFloat]) -> Void = { _ in }
     ) {
         self.project = project
         self.bundleURL = bundleURL
@@ -75,10 +89,13 @@ public struct TimelineView: NSViewRepresentable {
         self.selectedEffectKeyframeID = selectedEffectKeyframeID
         self.playheadTime = playheadTime
         self.revision = revision
+        self.rowHeightOverrides = rowHeightOverrides
+        self.suppressContent = suppressContent
         self.onSelect = onSelect
         self.onSelectEffectKeyframe = onSelectEffectKeyframe
         self.onApplyCommand = onApplyCommand
         self.onScrub = onScrub
+        self.onRowHeightsChange = onRowHeightsChange
     }
 
     // We wrap our NSView in an NSScrollView (not SwiftUI's ScrollView)
@@ -111,13 +128,21 @@ public struct TimelineView: NSViewRepresentable {
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
         // Match the flipped documentView so AppKit places (0,0) at top.
-        scroll.contentView = FlippedClipView()
+        // The clip view must not draw its own background: where the
+        // document doesn't cover the viewport (mid-resize, before the
+        // floor-sizing pass below lands) a drawing clip view paints the
+        // system windowBackground gray — a visible block on the dark
+        // canvas.
+        let clipView = FlippedClipView()
+        clipView.drawsBackground = false
+        scroll.contentView = clipView
         let timeline = TimelineNSView()
         timeline.onSelect = onSelect
         timeline.onSelectEffectKeyframe = onSelectEffectKeyframe
         timeline.onApplyCommand = onApplyCommand
         timeline.onScrub = onScrub
-        timeline.update(project: project, bundleURL: bundleURL, pixelsPerSecond: pixelsPerSecond, trackHeight: trackHeight, scrollX: scrollX, selectedClipID: selectedClipID, selectedEffectKeyframeID: selectedEffectKeyframeID, revision: revision)
+        timeline.onRowHeightsChange = onRowHeightsChange
+        timeline.update(project: project, bundleURL: bundleURL, pixelsPerSecond: pixelsPerSecond, trackHeight: trackHeight, scrollX: scrollX, selectedClipID: selectedClipID, selectedEffectKeyframeID: selectedEffectKeyframeID, revision: revision, rowHeightOverrides: rowHeightOverrides, suppressContent: suppressContent)
         timeline.setPlayhead(time: playheadTime)
         scroll.documentView = timeline
         context.coordinator.timeline = timeline
@@ -135,6 +160,7 @@ public struct TimelineView: NSViewRepresentable {
         rulerHost.onScrub = onScrub
         scroll.addFloatingSubview(rulerHost, for: .vertical)
         context.coordinator.rulerHost = rulerHost
+        scroll.rulerHost = rulerHost
 
         sizeDocumentView(timeline, in: scroll, rulerHost: rulerHost)
         return scroll
@@ -147,7 +173,8 @@ public struct TimelineView: NSViewRepresentable {
         timeline.onSelectEffectKeyframe = onSelectEffectKeyframe
         timeline.onApplyCommand = onApplyCommand
         timeline.onScrub = onScrub
-        timeline.update(project: project, bundleURL: bundleURL, pixelsPerSecond: pixelsPerSecond, trackHeight: trackHeight, scrollX: scrollX, selectedClipID: selectedClipID, selectedEffectKeyframeID: selectedEffectKeyframeID, revision: revision)
+        timeline.onRowHeightsChange = onRowHeightsChange
+        timeline.update(project: project, bundleURL: bundleURL, pixelsPerSecond: pixelsPerSecond, trackHeight: trackHeight, scrollX: scrollX, selectedClipID: selectedClipID, selectedEffectKeyframeID: selectedEffectKeyframeID, revision: revision, rowHeightOverrides: rowHeightOverrides, suppressContent: suppressContent)
         timeline.setPlayhead(time: playheadTime)
         let rulerHost = context.coordinator.rulerHost
         rulerHost?.pixelsPerSecond = pixelsPerSecond
@@ -204,8 +231,13 @@ public struct TimelineView: NSViewRepresentable {
         let natural = TimelineLayoutCalculator.contentSize(
             for: project,
             pixelsPerSecond: pixelsPerSecond,
-            trackHeight: trackHeight
+            trackHeight: trackHeight,
+            rowHeightOverrides: rowHeightOverrides
         )
+        // Stamp the natural size on the view so TimelineScrollView.tile()
+        // can re-apply the viewport floor on AppKit-only layout passes
+        // (window resize / divider drag) that never reach updateNSView.
+        timeline.naturalContentSize = natural
         let viewport = scroll.contentSize
         let target = NSSize(
             width: max(natural.width, viewport.width),
@@ -255,6 +287,41 @@ public struct TimelineView: NSViewRepresentable {
 /// still play.
 private final class TimelineScrollView: NSScrollView {
     private var suppressScrollerFlash = false
+    /// The floating ruler, so `tile()` can keep it sized to the document
+    /// width on AppKit-only layout passes.
+    weak var rulerHost: StickyRulerView?
+
+    /// Re-apply the viewport floor to the document + ruler on every AppKit
+    /// layout pass. `TimelineView.sizeDocumentView` does this on SwiftUI
+    /// updates, but a pure window/divider resize never calls updateNSView —
+    /// the viewport would outgrow the document, exposing uncovered canvas
+    /// on the right and leaving stale row-card widths.
+    override func tile() {
+        super.tile()
+        guard let timeline = documentView as? TimelineNSView,
+              timeline.naturalContentSize != .zero else { return }
+        let natural = timeline.naturalContentSize
+        let target = NSSize(
+            width: max(natural.width, contentSize.width),
+            height: max(natural.height, contentSize.height)
+        )
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if timeline.frame.size != target {
+            timeline.setFrameSize(target)
+        }
+        if let rulerHost {
+            let rulerFrame = NSRect(
+                x: 0, y: 0,
+                width: target.width,
+                height: TimelineLayoutCalculator.rulerHeight
+            )
+            if rulerHost.frame != rulerFrame {
+                rulerHost.frame = rulerFrame
+            }
+        }
+        CATransaction.commit()
+    }
 
     override func setFrameSize(_ newSize: NSSize) {
         let changed = newSize != frame.size
@@ -297,6 +364,7 @@ public final class TimelineNSView: NSView {
     public var onSelectEffectKeyframe: ((EffectKeyframeID?) -> Void)?
     public var onApplyCommand: ((any EditCommand) -> Void)?
     public var onScrub: ((RationalTime) -> Void)?
+    public var onRowHeightsChange: (([String: CGFloat]) -> Void)?
 
     private var project: Project?
     private var bundleURL: URL?
@@ -306,6 +374,33 @@ public final class TimelineNSView: NSView {
     private var selectedClipID: ClipID?
     private var selectedEffectKeyframeID: EffectKeyframeID?
     private var playheadTime: RationalTime?
+    /// Committed per-row height overrides (from the host, via update).
+    private var rowHeightOverrides: [String: CGFloat] = [:]
+    /// The in-flight row-resize drag's live value, merged over
+    /// `rowHeightOverrides` for layout so the row tracks the cursor;
+    /// folded into the committed map on mouseUp.
+    private var liveRowHeights: [String: CGFloat] = [:]
+    /// Host-driven content suppression (set while the header's track-height
+    /// or zoom slider is mid-drag). See `suppressContentLayers`.
+    private var contentSuppressedByHost = false
+    /// True while an interactive resize is rebuilding the tree ~60×/s. Clip
+    /// content (thumbnail tiles, waveform bitmaps) is skipped during these
+    /// rebuilds: creating a Task per tile, decoding PNG→CGImage (~300KB
+    /// bitmap) per tile, and allocating a fresh full-clip-width waveform
+    /// backing store PER TICK is the "resizing rows spikes memory and
+    /// freezes the machine" bug. Glass clip bodies render throughout; the
+    /// settle rebuild on release restores content.
+    private var suppressContentLayers: Bool {
+        contentSuppressedByHost || dragSession?.kind == .resizeRow
+    }
+    /// Decoded thumbnail tiles keyed by (asset|time|size). The loader's L1
+    /// caches PNG BYTES — decoding to CGImage on every rebuild still costs
+    /// an allocation + decode per tile. Caching the decoded image lets
+    /// rebuilds hand Core Animation the SAME CGImage object (no copy, no
+    /// decode, no Task). LRU-capped.
+    private var tileImages: [String: CGImage] = [:]
+    private var tileImageLRU: [String] = []
+    private let tileImageCapacity = 256
     /// Last-applied non-playhead inputs. Compared against incoming `update(...)`
     /// calls to short-circuit no-op rebuilds. nil = first call (always rebuild).
     private var lastInputs: InputSnapshot?
@@ -320,6 +415,14 @@ public final class TimelineNSView: NSView {
         let selectedClipID: ClipID?
         let selectedEffectKeyframeID: EffectKeyframeID?
         let revision: Int
+        let rowHeightOverrides: [String: CGFloat]
+        let suppressContent: Bool
+    }
+
+    /// Effective per-row heights for layout: committed overrides with any
+    /// in-flight drag value on top.
+    private var effectiveRowHeights: [String: CGFloat] {
+        rowHeightOverrides.merging(liveRowHeights) { _, live in live }
     }
 
     /// Cached layout — recomputed each `rebuildLayers(...)` call from the
@@ -348,17 +451,27 @@ public final class TimelineNSView: NSView {
             case moveEffect
             case trimEffectIn
             case trimEffectOut
+            case resizeRow
         }
         var kind: Kind
         var clipID: ClipID?              // set for clip kinds; nil otherwise
         var effectKeyframeID: EffectKeyframeID?  // set for effect kinds
+        var rowID: String? = nil         // set for resizeRow
+        var startRowHeight: CGFloat = 0  // row height at drag start (resizeRow)
         var startPoint: CGPoint
         var currentDeltaPixels: CGFloat
+        var currentDeltaYPixels: CGFloat = 0
     }
     private var dragSession: DragSession?
 
     public override var isFlipped: Bool { true }
     public override var acceptsFirstResponder: Bool { true }
+
+    /// Natural (un-floored) content size from the last SwiftUI update —
+    /// stamped by `TimelineView.sizeDocumentView` so the enclosing
+    /// `TimelineScrollView.tile()` can re-apply the viewport floor during
+    /// AppKit-only layout passes.
+    var naturalContentSize: CGSize = .zero
 
     public init() {
         super.init(frame: .zero)
@@ -371,10 +484,28 @@ public final class TimelineNSView: NSView {
         layer?.actions = ["bounds": NSNull(), "position": NSNull()]
     }
 
+    /// Row cards, lane widths, and the effects hint are computed from
+    /// `bounds` at rebuild time. A frame change outside a SwiftUI update
+    /// (window resize, divider drag) would leave them stale — cards ending
+    /// mid-timeline over uncovered canvas — so rebuild here. Mid-drag this
+    /// fires per tick, same cost as the existing clip-drag rebuild path.
+    /// EXCEPT during a row-resize drag: mouseDragged already rebuilt for
+    /// this tick and then grows the frame — rebuilding again here would
+    /// double every tick's layer churn for no visual difference (lane
+    /// geometry doesn't depend on the document's height).
+    public override func setFrameSize(_ newSize: NSSize) {
+        let changed = newSize != frame.size
+        super.setFrameSize(newSize)
+        if changed, project != nil, dragSession?.kind != .resizeRow {
+            rebuildLayers()
+        }
+    }
+
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
-    public func update(project: Project, bundleURL: URL?, pixelsPerSecond: CGFloat, trackHeight: CGFloat, scrollX: CGFloat, selectedClipID: ClipID?, selectedEffectKeyframeID: EffectKeyframeID?, revision: Int) {
+    public func update(project: Project, bundleURL: URL?, pixelsPerSecond: CGFloat, trackHeight: CGFloat, scrollX: CGFloat, selectedClipID: ClipID?, selectedEffectKeyframeID: EffectKeyframeID?, revision: Int, rowHeightOverrides: [String: CGFloat] = [:], suppressContent: Bool = false) {
+        self.contentSuppressedByHost = suppressContent
         let snapshot = InputSnapshot(
             bundleURL: bundleURL,
             pixelsPerSecond: pixelsPerSecond,
@@ -382,7 +513,9 @@ public final class TimelineNSView: NSView {
             scrollX: scrollX,
             selectedClipID: selectedClipID,
             selectedEffectKeyframeID: selectedEffectKeyframeID,
-            revision: revision
+            revision: revision,
+            rowHeightOverrides: rowHeightOverrides,
+            suppressContent: suppressContent
         )
         // Skip the full layer rebuild when nothing the layout depends on
         // has changed. The playhead path (`setPlayhead(time:)`) runs
@@ -401,6 +534,7 @@ public final class TimelineNSView: NSView {
         self.scrollX = scrollX
         self.selectedClipID = selectedClipID
         self.selectedEffectKeyframeID = selectedEffectKeyframeID
+        self.rowHeightOverrides = rowHeightOverrides
         self.lastInputs = snapshot
         self.lastThumbnailVisibleBucket = nil
         needsLayout = true
@@ -421,7 +555,8 @@ public final class TimelineNSView: NSView {
             size: bounds.size == .zero ? CGSize(width: 800, height: 240) : bounds.size,
             pixelsPerSecond: pixelsPerSecond,
             scrollX: scrollX,
-            trackHeight: trackHeight
+            trackHeight: trackHeight,
+            rowHeightOverrides: effectiveRowHeights
         )
         let preview = currentDragPreview()
         let layout = TimelineLayoutCalculator.layout(project: project, viewport: viewport, dragPreview: preview)
@@ -492,28 +627,26 @@ public final class TimelineNSView: NSView {
         }
 
         let effectsLane = layout.effectsLane
+        drawRowCard(headerFrame: effectsLane.headerFrame, laneFrame: effectsLane.laneFrame, in: layer)
         // Effects header through the shared lane-header path so it matches the
         // icon+name treatment of the track lanes above it.
         drawLaneHeader(
             frame: effectsLane.headerFrame,
             title: "Effects",
             symbolName: "plus.magnifyingglass",
+            tint: Theme.NSColor.trackEffects,
             emphasized: false,
             muted: false,
             in: layer
         )
 
-        let effectsLaneBg = CALayer()
-        effectsLaneBg.frame = effectsLane.laneFrame
-        effectsLaneBg.backgroundColor = Theme.NSColor.bgBase.withAlphaComponent(0.4).cgColor
-        layer.addSublayer(effectsLaneBg)
-
-        // Empty state reads as intentional, not broken: a quiet centred hint
-        // instead of a blank lane. Drawn inside rebuildLayers so the
+        // Empty state reads as intentional, not broken — and teaches the
+        // gesture that fills it. Drawn inside rebuildLayers so the
         // revision-gate still suppresses per-frame rebuilds.
         if effectsLane.keyframes.isEmpty {
             let hint = CATextLayer()
-            hint.string = "No effects yet"
+            hint.string = "No effects yet — ⌥ click to add a zoom"
+            hint.font = NSFont.systemFont(ofSize: 11, weight: .regular)
             hint.fontSize = 11
             hint.alignmentMode = .center
             hint.contentsScale = window?.backingScaleFactor ?? 2
@@ -529,28 +662,29 @@ public final class TimelineNSView: NSView {
             layer.addSublayer(hint)
         }
 
-        // Bottom hairline under the last (effects) lane so the timeline reads
-        // as deliberately ending here rather than falling into dead space.
-        let bottomRule = CALayer()
-        bottomRule.frame = CGRect(
-            x: 0,
-            y: effectsLane.laneFrame.maxY,
-            width: max(effectsLane.headerFrame.width + effectsLane.laneFrame.width, bounds.width),
-            height: Theme.Stroke.hairline
-        )
-        bottomRule.backgroundColor = Theme.NSColor.borderSubtle.cgColor
-        layer.addSublayer(bottomRule)
-
         for keyframe in effectsLane.keyframes {
             let isSelected = keyframe.id == selectedEffectKeyframeID
+            let role = baseColorForEffectKeyframe(keyframe)
             let kfLayer = CALayer()
             kfLayer.frame = keyframe.frame
-            kfLayer.cornerRadius = 5
+            kfLayer.cornerRadius = 6
             kfLayer.borderWidth = isSelected ? 2 : 1
             kfLayer.borderColor = isSelected
-                ? Theme.NSColor.accent.cgColor
-                : Theme.NSColor.borderSubtle.cgColor
-            kfLayer.backgroundColor = colorForEffectKeyframe(keyframe, selected: isSelected).cgColor
+                ? Theme.NSColor.textPrimary.withAlphaComponent(0.92).cgColor
+                : role.withAlphaComponent(0.42).cgColor
+            kfLayer.backgroundColor = role.withAlphaComponent(isSelected ? 0.42 : 0.24).cgColor
+            if isSelected {
+                kfLayer.shadowColor = role.cgColor
+                kfLayer.shadowOpacity = 0.5
+                kfLayer.shadowRadius = 8
+                kfLayer.shadowOffset = .zero
+                kfLayer.shadowPath = CGPath(
+                    roundedRect: CGRect(origin: .zero, size: keyframe.frame.size),
+                    cornerWidth: 6,
+                    cornerHeight: 6,
+                    transform: nil
+                )
+            }
             layer.addSublayer(kfLayer)
 
             // Small ⌘ glyph in the top-left for manual-hotkey keyframes so
@@ -600,45 +734,30 @@ public final class TimelineNSView: NSView {
         case .trimEffectOut:
             guard let id = session.effectKeyframeID else { return .none }
             return .trimEffectKeyframeOut(id, deltaPixels: session.currentDeltaPixels)
+        case .resizeRow:
+            // Row resize previews through liveRowHeights, not a clip-frame
+            // delta — the layout picks it up via effectiveRowHeights.
+            return .none
         }
     }
 
-    /// Draws one physical-track row: header + lane background + clips +
-    /// optional waveform overlay. Used for `singleTrack` display rows
-    /// (expanded grouped child OR a track outside any group).
+    /// Draws one physical-track row: row card + header + clips + optional
+    /// waveform overlay. Used for `singleTrack` display rows (expanded
+    /// grouped child OR a track outside any group).
     private func drawSingleTrackRow(_ track: TrackLayout, in layer: CALayer) {
         let muted = project?.tracks.first(where: { $0.id == track.id })?.muted ?? false
+        drawRowCard(headerFrame: track.headerFrame, laneFrame: track.laneFrame, in: layer)
         drawLaneHeader(
             frame: track.headerFrame,
             title: track.name,
             symbolName: laneSymbol(for: track.kind),
+            tint: baseColor(for: track.kind),
             emphasized: false,
             muted: muted,
             in: layer
         )
-
-        let lane = CALayer()
-        lane.frame = track.laneFrame
-        lane.backgroundColor = Theme.NSColor.bgBase.withAlphaComponent(0.4).cgColor
-        layer.addSublayer(lane)
-
         for clip in track.clips {
-            let clipLayer = CALayer()
-            clipLayer.frame = clip.frame
-            clipLayer.cornerRadius = 5
-            clipLayer.borderWidth = clip.id == selectedClipID ? 1.5 : 1
-            // Unselected clips get a bright same-hue rim so they read as
-            // defined, finished pills; selected gets the accent.
-            clipLayer.borderColor = clip.id == selectedClipID
-                ? Theme.NSColor.accent.cgColor
-                : colorForKind(track.kind, selected: true).cgColor
-            clipLayer.backgroundColor = colorForKind(track.kind, selected: clip.id == selectedClipID).cgColor
-            layer.addSublayer(clipLayer)
-            if isAudioKind(track.kind) {
-                addWaveformLayer(forClip: clip, clipFrame: clip.frame, kind: track.kind)
-            } else if isVideoKind(track.kind) {
-                addThumbnailStrip(forClip: clip, clipFrame: clip.frame, kind: track.kind)
-            }
+            addClipLayer(clip, kind: track.kind, in: layer)
         }
     }
 
@@ -655,6 +774,7 @@ public final class TimelineNSView: NSView {
     ) {
         guard let primary = tracksByID[primaryTrackID] else { return }
 
+        drawRowCard(headerFrame: primary.headerFrame, laneFrame: primary.laneFrame, in: layer)
         // Header label uses the group's friendly name. No mute indicator on
         // grouped rows — the band aggregates multiple physical tracks whose
         // mute states can differ; mute lives on the expanded child rows.
@@ -662,34 +782,90 @@ public final class TimelineNSView: NSView {
             frame: primary.headerFrame,
             title: isVideoGroup ? "Video" : "Audio",
             symbolName: isVideoGroup ? "video.fill" : "speaker.wave.2.fill",
+            tint: baseColor(for: primary.kind),
             emphasized: true,
             muted: false,
             in: layer
         )
 
-        // Lane background.
-        let lane = CALayer()
-        lane.frame = primary.laneFrame
-        lane.backgroundColor = Theme.NSColor.bgBase.withAlphaComponent(0.4).cgColor
-        layer.addSublayer(lane)
-
         // Primary track clips form the visible band.
         for clip in primary.clips {
-            let clipLayer = CALayer()
-            clipLayer.frame = clip.frame
-            clipLayer.cornerRadius = 5
-            clipLayer.borderWidth = clip.id == selectedClipID ? 1.5 : 1
-            clipLayer.borderColor = clip.id == selectedClipID
-                ? Theme.NSColor.accent.cgColor
-                : colorForKind(primary.kind, selected: true).cgColor
-            clipLayer.backgroundColor = colorForKind(primary.kind, selected: clip.id == selectedClipID).cgColor
-            layer.addSublayer(clipLayer)
-            if isAudioKind(primary.kind) {
-                addWaveformLayer(forClip: clip, clipFrame: clip.frame, kind: primary.kind)
-            } else if isVideoKind(primary.kind) {
-                addThumbnailStrip(forClip: clip, clipFrame: clip.frame, kind: primary.kind)
-            }
+            addClipLayer(clip, kind: primary.kind, in: layer)
         }
+    }
+
+    /// One soft rounded "row card" spanning a display row's header + lane,
+    /// with a hairline seam where the header column meets the lane. Replaces
+    /// the old opaque header box + flat lane wash so each row reads as a
+    /// single continuous surface floating on the deep canvas — the lane's
+    /// identity comes from its tinted icon and clips, not from chrome.
+    private func drawRowCard(headerFrame: CGRect, laneFrame: CGRect, in layer: CALayer) {
+        let cardInset: CGFloat = 6
+        let card = CALayer()
+        card.frame = CGRect(
+            x: headerFrame.minX + cardInset,
+            y: headerFrame.minY,
+            width: max(0, laneFrame.maxX - headerFrame.minX - cardInset * 2),
+            height: headerFrame.height
+        )
+        card.backgroundColor = NSColor.white.withAlphaComponent(0.035).cgColor
+        card.cornerRadius = 7
+        layer.addSublayer(card)
+
+        let seam = CALayer()
+        seam.frame = CGRect(
+            x: laneFrame.minX,
+            y: headerFrame.minY + 6,
+            width: Theme.Stroke.hairline,
+            height: max(0, headerFrame.height - 12)
+        )
+        seam.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
+        layer.addSublayer(seam)
+    }
+
+    /// Shared clip rendering: a soft role-tinted "glass" body with a quiet
+    /// same-hue rim. Selection is a crisp near-white border plus a gentle
+    /// role-coloured glow — unmistakable over any fill or thumbnail, unlike
+    /// the old blue-border-on-blue-block treatment.
+    private func addClipLayer(_ clip: ClipLayout, kind: TrackKind, in layer: CALayer) {
+        let isSelected = clip.id == selectedClipID
+        let role = baseColor(for: kind)
+        let clipLayer = CALayer()
+        clipLayer.frame = clip.frame
+        clipLayer.cornerRadius = 7
+        clipLayer.borderWidth = isSelected ? 2 : 1
+        clipLayer.borderColor = isSelected
+            ? Theme.NSColor.textPrimary.withAlphaComponent(0.92).cgColor
+            : role.withAlphaComponent(0.38).cgColor
+        clipLayer.backgroundColor = role.withAlphaComponent(clipFillAlpha(kind: kind, selected: isSelected)).cgColor
+        if isSelected {
+            clipLayer.shadowColor = role.cgColor
+            clipLayer.shadowOpacity = 0.5
+            clipLayer.shadowRadius = 8
+            clipLayer.shadowOffset = .zero
+            clipLayer.shadowPath = CGPath(
+                roundedRect: CGRect(origin: .zero, size: clip.frame.size),
+                cornerWidth: 7,
+                cornerHeight: 7,
+                transform: nil
+            )
+        }
+        layer.addSublayer(clipLayer)
+        if isAudioKind(kind) {
+            addWaveformLayer(forClip: clip, clipFrame: clip.frame, kind: kind)
+        } else if isVideoKind(kind) {
+            addThumbnailStrip(forClip: clip, clipFrame: clip.frame, kind: kind)
+        }
+    }
+
+    /// Fill strength for the glass clip body. Audio stays quieter (the
+    /// tinted waveform is the hero); video carries a touch more colour as
+    /// the backdrop behind its thumbnail strip.
+    private func clipFillAlpha(kind: TrackKind, selected: Bool) -> CGFloat {
+        if isAudioKind(kind) {
+            return selected ? 0.34 : 0.20
+        }
+        return selected ? 0.38 : 0.26
     }
 
     /// Renders the disclosure chevron for one grouped lane. SF Symbol
@@ -698,7 +874,7 @@ public final class TimelineNSView: NSView {
     /// CALayer with `NSImage` contents — same pattern as the PiP badge.
     private func addDisclosureChevron(_ disclosure: LaneDisclosure, in layer: CALayer) {
         let symbolName = disclosure.isCollapsed ? "chevron.right" : "chevron.down"
-        guard let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) else { return }
+        guard let symbol = tintedSymbol(symbolName, color: Theme.NSColor.textTertiary) else { return }
         let chevron = CALayer()
         chevron.frame = disclosure.hitFrame
         chevron.contents = symbol
@@ -728,10 +904,10 @@ public final class TimelineNSView: NSView {
         let bg = CALayer()
         bg.frame = badgeFrame
         bg.cornerRadius = badgeSize / 2
-        bg.backgroundColor = Theme.NSColor.bgBase.withAlphaComponent(0.75).cgColor
+        bg.backgroundColor = Theme.NSColor.bgDeep.withAlphaComponent(0.85).cgColor
         layer.addSublayer(bg)
         let symbolName = isVideo ? "videocam.fill" : "speaker.wave.2.fill"
-        if let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
+        if let symbol = tintedSymbol(symbolName, color: Theme.NSColor.textSecondary) {
             let glyph = CALayer()
             glyph.frame = badgeFrame.insetBy(dx: 2, dy: 2)
             glyph.contents = symbol
@@ -741,36 +917,36 @@ public final class TimelineNSView: NSView {
         }
     }
 
-    /// Draws a lane header cell: full-width background, a per-kind glyph at
-    /// the left, the (vertically centred, truncating) track name, and — when
+    /// Draws a lane header cell: a per-kind glyph tinted to the lane's ROLE
+    /// colour at the left (this — not a filled box — is what identifies the
+    /// lane), the (vertically centred, truncating) track name, and — when
     /// `muted` — a danger-tinted speaker.slash on the right. The mute glyph
     /// is a status indicator only; toggling mute lives in the Audio
-    /// inspector tab (no CALayer hit-testing here).
+    /// inspector tab (no CALayer hit-testing here). The header background is
+    /// transparent: the shared row card behind it provides the surface.
     private func drawLaneHeader(
         frame: CGRect,
         title: String,
         symbolName: String,
+        tint: NSColor,
         emphasized: Bool,
         muted: Bool,
         in layer: CALayer
     ) {
         let scale = window?.backingScaleFactor ?? 2
-        let bg = CALayer()
-        bg.frame = frame
-        bg.backgroundColor = Theme.NSColor.bgElevated.cgColor
-        layer.addSublayer(bg)
 
         let textColor: NSColor = muted
             ? Theme.NSColor.textTertiary
             : (emphasized ? Theme.NSColor.textPrimary : Theme.NSColor.textSecondary)
+        let iconColor: NSColor = muted ? Theme.NSColor.textTertiary : tint
 
-        let leftPad: CGFloat = 8
+        let leftPad: CGFloat = 14
         let gap: CGFloat = 6
         let iconSize: CGFloat = 13
         var textMinX = frame.minX + leftPad
         var textMaxX = frame.maxX - leftPad
 
-        if let icon = tintedSymbol(symbolName, color: textColor) {
+        if let icon = tintedSymbol(symbolName, color: iconColor) {
             let iconLayer = CALayer()
             iconLayer.frame = CGRect(
                 x: frame.minX + leftPad,
@@ -810,6 +986,7 @@ public final class TimelineNSView: NSView {
             height: textHeight
         )
         text.string = title
+        text.font = NSFont.systemFont(ofSize: 11, weight: .medium)
         text.fontSize = 11
         text.alignmentMode = .left
         text.truncationMode = .end
@@ -845,43 +1022,26 @@ public final class TimelineNSView: NSView {
         return base.withSymbolConfiguration(config)
     }
 
-    private func colorForKind(_ kind: TrackKind, selected: Bool) -> NSColor {
-        let base: NSColor
+    /// The lane's role colour — the single hue that identifies a track kind
+    /// across its header icon, clip tint, rim, waveform, and selection glow.
+    private func baseColor(for kind: TrackKind) -> NSColor {
         switch kind {
-        case .screen:        base = Theme.NSColor.trackVideo
-        case .webcam:        base = Theme.NSColor.trackWebcam
-        case .microphone:    base = Theme.NSColor.trackMic
-        case .systemAudio:   base = Theme.NSColor.trackSystemAudio
-        case .voiceover:     base = Theme.NSColor.trackVoiceover
-        case .overlay:       base = Theme.NSColor.trackOverlay
-        case .effects:       base = Theme.NSColor.trackEffects
+        case .screen:        return Theme.NSColor.trackVideo
+        case .webcam:        return Theme.NSColor.trackWebcam
+        case .microphone:    return Theme.NSColor.trackMic
+        case .systemAudio:   return Theme.NSColor.trackSystemAudio
+        case .voiceover:     return Theme.NSColor.trackVoiceover
+        case .overlay:       return Theme.NSColor.trackOverlay
+        case .effects:       return Theme.NSColor.trackEffects
         }
-        // Audio clips keep a SUBTLE tinted body so the bright waveform reads as
-        // the hero instead of sitting on a solid block; video clips (whose
-        // thumbnail strip covers most of the body) carry more colour presence.
-        // Audio clips: a clear coloured body (like pro editors) now that the
-        // bright white waveform sits on top — the earlier washed-out tint read
-        // as a flat block because the waveform was invisible.
-        let alpha: CGFloat
-        if isAudioKind(kind) {
-            alpha = selected ? 0.62 : 0.45
-        } else {
-            alpha = selected ? 0.80 : 0.55
-        }
-        return base.withAlphaComponent(alpha)
     }
 
-    private func colorForEffectKeyframe(
-        _ keyframe: EffectKeyframeLayout,
-        selected: Bool = false
-    ) -> NSColor {
-        let base: NSColor
+    private func baseColorForEffectKeyframe(_ keyframe: EffectKeyframeLayout) -> NSColor {
         switch (keyframe.kind, keyframe.origin) {
-        case (.zoom, .auto):            base = Theme.NSColor.effectZoomAuto
-        case (.zoom, .manualHotkey):    base = Theme.NSColor.effectZoomManual
-        case (.talkingHeadSwap, _):     base = Theme.NSColor.effectTalkingHead
+        case (.zoom, .auto):            return Theme.NSColor.effectZoomAuto
+        case (.zoom, .manualHotkey):    return Theme.NSColor.effectZoomManual
+        case (.talkingHeadSwap, _):     return Theme.NSColor.effectTalkingHead
         }
-        return base.withAlphaComponent(selected ? 0.75 : 0.55)
     }
 
     private func isAudioKind(_ kind: TrackKind) -> Bool {
@@ -907,6 +1067,7 @@ public final class TimelineNSView: NSView {
     /// tile. Each tile loads async via `ThumbnailLoader` and is dropped in as
     /// it resolves; the disk + memory caches make re-tiling on zoom cheap.
     private func addThumbnailStrip(forClip clip: ClipLayout, clipFrame: CGRect, kind: TrackKind) {
+        guard !suppressContentLayers else { return }
         guard let project, let bundleURL else { return }
         guard let modelClip = project.tracks.flatMap(\.clips).first(where: { $0.id == clip.id }) else { return }
         guard let asset = project.assets.first(where: { $0.id == modelClip.assetID }) else { return }
@@ -927,17 +1088,32 @@ public final class TimelineNSView: NSView {
         let strip = ThumbnailLayer()
         strip.frame = visibleFrame
         strip.contentsScale = window?.backingScaleFactor ?? 2
+        // Round the strip so tiles don't poke square corners into the
+        // clip's rounded glass body.
+        strip.cornerRadius = 5
+        strip.masksToBounds = true
         layer?.addSublayer(strip)
 
+        // GENERATION size is quantized to coarse buckets — the loader caches
+        // by exact integer (width, height), so requesting tiles at the row's
+        // live pixel height would cache-miss on EVERY tick of a height drag
+        // and fire a fresh AVAssetImageGenerator decode per tile per pixel:
+        // the "resizing rows spikes memory / freezes" bug. Rounding the
+        // height up to 16px steps (and deriving tile count from the rounded
+        // height, so sample times stay stable too) means a full drag crosses
+        // ~5 cache buckets total. Tiles render via .resizeAspectFill into
+        // their exact frames, so drawing a slightly-larger cached tile is
+        // visually lossless.
+        let genHeight = max(32, ceil(visibleFrame.height / 16) * 16)
         // Adaptive tile width: one frame per ~16:9 slot, min 80pt.
-        let tileWidth = max(80, visibleFrame.height * (16.0 / 9.0))
+        let tileWidth = max(80, genHeight * (16.0 / 9.0))
         let tileCount = max(1, Int((visibleFrame.width / tileWidth).rounded(.down)))
         let actualTileWidth = visibleFrame.width / CGFloat(tileCount)
 
         let sourceStart = seconds(modelClip.sourceRange.start)
         let sourceDuration = seconds(modelClip.sourceRange.duration)
         let loader = thumbnailLoader
-        let targetSize = CGSize(width: actualTileWidth, height: visibleFrame.height)
+        let targetSize = CGSize(width: ceil(actualTileWidth / 32) * 32, height: genHeight)
 
         for i in 0..<tileCount {
             // Sample at the centre of each tile's time span.
@@ -952,15 +1128,27 @@ public final class TimelineNSView: NSView {
                 width: actualTileWidth,
                 height: visibleFrame.height
             )
-            Task { @MainActor [weak strip] in
+            // Same millisecond rounding the loader keys on, so the decoded-
+            // image cache and the loader's PNG cache stay aligned.
+            let keySeconds = (atSeconds * 1000).rounded() / 1000
+            let tileKey = "\(assetURL.path)|\(keySeconds)|\(Int(targetSize.width))x\(Int(targetSize.height))"
+            if let cached = tileImages[tileKey] {
+                // Synchronous fast path: rebuilds re-use the SAME CGImage
+                // object — no Task, no PNG decode, no bitmap allocation.
+                strip.addTile(cgImage: cached, frame: tileFrame)
+                touchTileImage(tileKey)
+                continue
+            }
+            Task { @MainActor [weak strip, weak self] in
                 do {
                     let data = try await loader.thumbnail(
                         forAssetAt: assetURL,
                         atSeconds: atSeconds,
                         targetSize: targetSize
                     )
-                    guard let strip, let cgImage = Self.cgImage(fromPNG: data) else { return }
-                    strip.addTile(cgImage: cgImage, frame: tileFrame)
+                    guard let cgImage = Self.cgImage(fromPNG: data) else { return }
+                    self?.storeTileImage(cgImage, forKey: tileKey)
+                    strip?.addTile(cgImage: cgImage, frame: tileFrame)
                 } catch {
                     // Best-effort: leave the clip's tinted body showing. Logged
                     // once per failing asset; recording still plays back fine.
@@ -968,6 +1156,22 @@ public final class TimelineNSView: NSView {
                 }
             }
         }
+    }
+
+    // MARK: - Decoded-tile LRU
+
+    private func storeTileImage(_ image: CGImage, forKey key: String) {
+        tileImages[key] = image
+        touchTileImage(key)
+        while tileImageLRU.count > tileImageCapacity, let evict = tileImageLRU.first {
+            tileImageLRU.removeFirst()
+            tileImages[evict] = nil
+        }
+    }
+
+    private func touchTileImage(_ key: String) {
+        if let idx = tileImageLRU.firstIndex(of: key) { tileImageLRU.remove(at: idx) }
+        tileImageLRU.append(key)
     }
 
     private func visibleThumbnailFrame(for stripFrame: CGRect) -> CGRect {
@@ -989,6 +1193,7 @@ public final class TimelineNSView: NSView {
     /// background still shows; the user just doesn't get the audio
     /// preview yet).
     private func addWaveformLayer(forClip clip: ClipLayout, clipFrame: CGRect, kind: TrackKind) {
+        guard !suppressContentLayers else { return }
         guard let project, let bundleURL else { return }
         guard let modelClip = project.tracks.flatMap(\.clips).first(where: { $0.id == clip.id }) else { return }
         guard let asset = project.assets.first(where: { $0.id == modelClip.assetID }) else { return }
@@ -1003,7 +1208,12 @@ public final class TimelineNSView: NSView {
             width: max(0, clipFrame.width - inset * 2),
             height: max(0, clipFrame.height - inset * 2)
         )
-        waveform.fillColor = Theme.NSColor.waveformFill.withAlphaComponent(0.95).cgColor
+        // Light tint of the lane's role colour, not stark white — the wave
+        // stays the hero on the quiet glass body while the whole row reads
+        // as one hue family (mic = violet, system audio = indigo, …).
+        let waveTint = baseColor(for: kind)
+            .blended(withFraction: 0.65, of: .white) ?? Theme.NSColor.waveformFill
+        waveform.fillColor = waveTint.withAlphaComponent(0.92).cgColor
         waveform.contentsScale = window?.backingScaleFactor ?? 2
         layer?.addSublayer(waveform)
 
@@ -1045,6 +1255,10 @@ public final class TimelineNSView: NSView {
         }
         for kf in lastLayout.effectsLane.keyframes {
             addBodyAndEdgeCursors(frame: kf.frame)
+        }
+        // Per-row height-resize zones along each header's bottom edge.
+        for handle in lastLayout.rowResizeHandles {
+            addCursorRect(handle.hitFrame, cursor: .resizeUpDown)
         }
     }
 
@@ -1216,6 +1430,16 @@ public final class TimelineNSView: NSView {
                 collapsed: nowCollapsed
             ))
             dragSession = nil
+        case .rowResizeHandle(let rowID, let currentHeight):
+            // Per-row height resize: vertical drag adjusts just this row.
+            // No selection change — the user is manipulating chrome.
+            dragSession = DragSession(
+                kind: .resizeRow,
+                rowID: rowID,
+                startRowHeight: currentHeight,
+                startPoint: point,
+                currentDeltaPixels: 0
+            )
         case .trackHeader, .emptyLane, .empty:
             onSelect?(nil)
             onSelectEffectKeyframe?(nil)
@@ -1269,6 +1493,7 @@ public final class TimelineNSView: NSView {
         guard var session = dragSession else { return }
         let point = convert(event.locationInWindow, from: nil)
         session.currentDeltaPixels = point.x - session.startPoint.x
+        session.currentDeltaYPixels = point.y - session.startPoint.y
         dragSession = session
         if session.kind == .scrub {
             // Scrub fires per-tick (no commit on mouseUp; the player is
@@ -1276,6 +1501,24 @@ public final class TimelineNSView: NSView {
             // playhead follows the player via setPlayhead(time:) on the
             // next SwiftUI update tick.
             postScrub(at: point)
+        } else if session.kind == .resizeRow, let rowID = session.rowID {
+            // Live per-row resize: track the cursor through the same
+            // clamps the layout applies, then rebuild. Also grow the
+            // document + natural size so an expanding bottom row isn't
+            // clipped until the host's SwiftUI update lands.
+            let newHeight = max(
+                TimelineLayoutCalculator.minTrackHeight,
+                min(TimelineLayoutCalculator.maxTrackHeight, session.startRowHeight + session.currentDeltaYPixels)
+            )
+            liveRowHeights[rowID] = newHeight
+            rebuildLayers()
+            if let layout = lastLayout {
+                naturalContentSize.height = layout.totalContentHeight
+                let targetHeight = max(layout.totalContentHeight, enclosingScrollView?.contentSize.height ?? 0)
+                if frame.height != targetHeight {
+                    setFrameSize(NSSize(width: frame.width, height: targetHeight))
+                }
+            }
         } else {
             rebuildLayers()
         }
@@ -1289,6 +1532,17 @@ public final class TimelineNSView: NSView {
         }
         // Scrub doesn't produce an EditCommand on mouseUp.
         if session.kind == .scrub { return }
+        // Row resize is view state, not a document edit: fold the live
+        // value into the committed map, hand the full map to the host,
+        // and skip the EditCommand path entirely.
+        if session.kind == .resizeRow {
+            guard !liveRowHeights.isEmpty else { return }
+            rowHeightOverrides.merge(liveRowHeights) { _, live in live }
+            liveRowHeights = [:]
+            window?.invalidateCursorRects(for: self)
+            onRowHeightsChange?(rowHeightOverrides)
+            return
+        }
         let pps = max(TimelineLayoutCalculator.minPixelsPerSecond,
                       min(TimelineLayoutCalculator.maxPixelsPerSecond, pixelsPerSecond))
         let deltaSeconds = Double(session.currentDeltaPixels / pps)
@@ -1366,8 +1620,8 @@ public final class TimelineNSView: NSView {
                 duration: .seconds(newDurationSec)
             )
             onApplyCommand?(UpdateEffectKeyframeCommand(keyframeID: kfID, newValue: updated))
-        case .scrub:
-            // Already returned above; this case for exhaustiveness.
+        case .scrub, .resizeRow:
+            // Already returned above; these cases for exhaustiveness.
             break
         }
     }
@@ -1454,22 +1708,19 @@ public final class StickyRulerView: NSView {
     }
 
     private func configurePlayheadHead() {
-        let w: CGFloat = 12
+        let w: CGFloat = 9
         let h = TimelineLayoutCalculator.rulerHeight
-        let pointHeight: CGFloat = 5
-        let topInset: CGFloat = 2
-        let topHeight = h - pointHeight
-        // A clean downward pennant marking the exact playhead x. Small top
-        // inset so it doesn't run edge-to-edge; a dark shadow lifts the white
-        // marker off the ruler so it reads as a deliberate handle.
-        let path = CGMutablePath()
-        path.move(to: CGPoint(x: 0, y: topInset))
-        path.addLine(to: CGPoint(x: w, y: topInset))
-        path.addLine(to: CGPoint(x: w, y: topHeight))
-        path.addLine(to: CGPoint(x: w / 2, y: h))
-        path.addLine(to: CGPoint(x: 0, y: topHeight))
-        path.closeSubpath()
-        playheadHead.path = path
+        // A small white capsule grabber marking the exact playhead x —
+        // the modern scrubber handle (vs the old chunky pennant). A dark
+        // shadow lifts it off the ruler so it reads as a deliberate handle
+        // over any content.
+        let capsule = CGRect(x: 0, y: 4, width: w, height: h - 8)
+        playheadHead.path = CGPath(
+            roundedRect: capsule,
+            cornerWidth: capsule.width / 2,
+            cornerHeight: capsule.width / 2,
+            transform: nil
+        )
         playheadHead.fillColor = Theme.NSColor.timelinePlayhead.cgColor
         playheadHead.strokeColor = NSColor.clear.cgColor
         playheadHead.zPosition = 1
@@ -1496,7 +1747,7 @@ public final class StickyRulerView: NSView {
         playheadHead.isHidden = false
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let headWidth: CGFloat = 12
+        let headWidth: CGFloat = 9
         playheadHead.frame = CGRect(
             x: x - headWidth / 2,
             y: 0,

@@ -43,6 +43,10 @@ public enum TimelineHit: Sendable, Equatable {
     /// `groupedAudio` display rows OR for expanded `singleTrack` rows
     /// inside a group (the child row's chevron collapses back).
     case laneDisclosure(LaneGroupID)
+    /// Click landed on a row's height-resize grab zone (the bottom edge
+    /// of its header cell). Drag begins a per-row height resize;
+    /// `currentHeight` is the row height at drag start.
+    case rowResizeHandle(rowID: String, currentHeight: CGFloat)
     /// Click landed outside any meaningful area (e.g. negative scroll
     /// region, far-right beyond all clips). Treat as deselect.
     case empty
@@ -70,6 +74,14 @@ public enum TimelineHitTest {
         for disclosure in layout.laneDisclosures {
             if disclosure.hitFrame.contains(point) {
                 return .laneDisclosure(disclosure.groupID)
+            }
+        }
+        // Per-row resize handles straddle the boundary between rows in the
+        // header column — checked before headers so the grab zone wins over
+        // the header cells it overlaps.
+        for handle in layout.rowResizeHandles {
+            if handle.hitFrame.contains(point) {
+                return .rowResizeHandle(rowID: handle.rowID, currentHeight: handle.currentHeight)
             }
         }
         // Each track contributes a header cell + a lane cell.

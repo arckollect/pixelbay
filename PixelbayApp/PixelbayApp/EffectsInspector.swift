@@ -62,7 +62,7 @@ struct EffectsInspector: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            PBSectionHeader("Effects")
+            PBSectionHeader("Effects", style: .caps)
             ZoomActionsBar(
                 project: project,
                 bundleURL: bundleURL,

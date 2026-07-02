@@ -21,7 +21,7 @@ struct CursorInspector: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            PBSectionHeader("Cursor")
+            PBSectionHeader("Cursor", style: .caps)
             enabledRow
             Group {
                 cursorSizeSlider

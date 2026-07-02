@@ -115,6 +115,11 @@ struct PixelbayAppApp: App {
                 .environment(scenesAppendTarget)
         }
         .defaultSize(width: 1200, height: 800)
+        // Native unified titlebar toolbar: the editor's actions render in
+        // the titlebar with system material + spacing (see ProjectView's
+        // editorToolbar), and the window title doubles as the inline
+        // project-rename field.
+        .windowToolbarStyle(.unified(showsTitle: true))
 
         // Phase 5 — Scenes window. Singleton (`Window`, not `WindowGroup`)
         // because there's exactly one persistent scenes-session bundle on

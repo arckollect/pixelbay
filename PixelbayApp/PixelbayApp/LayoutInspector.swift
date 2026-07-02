@@ -25,7 +25,7 @@ struct CameraInspector: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-            PBSectionHeader("Camera")
+            PBSectionHeader("Camera", style: .caps)
 
             modePicker
             if case .pip = layout.mode {
@@ -455,9 +455,7 @@ struct BackgroundInspector: View {
     /// / Custom) — above a contextual editor (shown only for a solid color).
     private var backgroundSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            Text("Background")
-                .font(Theme.Font.cardTitle)
-                .foregroundStyle(Theme.Color.textPrimary)
+            PBSectionHeader("Background", style: .caps)
 
             backgroundGroupLabel("Wallpapers")
             LazyVGrid(columns: backgroundGridColumns, spacing: 8) {

@@ -44,6 +44,11 @@ public struct TimelineLayout: Sendable, Equatable {
     /// `SetLaneCollapsedCommand` to flip the lane's collapse state.
     /// Empty when the project has no tracks at all.
     public var laneDisclosures: [LaneDisclosure]
+    /// One per resizable display row (everything except the fixed-height
+    /// effects lane): a horizontal grab zone spanning the header column at
+    /// the row's bottom edge. Dragging it resizes just that row (per-row
+    /// height override); the global track-height slider resets all rows.
+    public var rowResizeHandles: [RowResizeHandle]
 
     public init(
         totalContentWidth: CGFloat,
@@ -54,7 +59,8 @@ public struct TimelineLayout: Sendable, Equatable {
         trackHeaderWidth: CGFloat,
         displayRows: [TimelineDisplayRow] = [],
         groupedOverlapBadges: [GroupedLaneBadge] = [],
-        laneDisclosures: [LaneDisclosure] = []
+        laneDisclosures: [LaneDisclosure] = [],
+        rowResizeHandles: [RowResizeHandle] = []
     ) {
         self.totalContentWidth = totalContentWidth
         self.totalContentHeight = totalContentHeight
@@ -65,6 +71,22 @@ public struct TimelineLayout: Sendable, Equatable {
         self.displayRows = displayRows
         self.groupedOverlapBadges = groupedOverlapBadges
         self.laneDisclosures = laneDisclosures
+        self.rowResizeHandles = rowResizeHandles
+    }
+}
+
+/// A per-row height-resize grab zone. `rowID` matches
+/// `TimelineDisplayRow.id` ("group:video", "track:<uuid>"); `hitFrame`
+/// spans the header column at the row's bottom boundary; `currentHeight`
+/// is the row's height at layout time (the drag's starting value).
+public struct RowResizeHandle: Sendable, Equatable {
+    public let rowID: String
+    public let hitFrame: CGRect
+    public let currentHeight: CGFloat
+    public init(rowID: String, hitFrame: CGRect, currentHeight: CGFloat) {
+        self.rowID = rowID
+        self.hitFrame = hitFrame
+        self.currentHeight = currentHeight
     }
 }
 
@@ -240,17 +262,24 @@ public struct TimelineViewport: Sendable, Equatable {
     /// "row size" — `TimelineLayoutCalculator` uses this when laying out
     /// each track's header / lane / clip rectangles.
     public var trackHeight: CGFloat
+    /// Per-row height overrides keyed by `TimelineDisplayRow.id`. Rows
+    /// absent from the map use `trackHeight`. Set by dragging a row's
+    /// header bottom edge; cleared when the user moves the global
+    /// track-height slider.
+    public var rowHeightOverrides: [String: CGFloat]
 
     public init(
         size: CGSize,
         pixelsPerSecond: CGFloat,
         scrollX: CGFloat = 0,
-        trackHeight: CGFloat = TimelineLayoutCalculator.defaultTrackHeight
+        trackHeight: CGFloat = TimelineLayoutCalculator.defaultTrackHeight,
+        rowHeightOverrides: [String: CGFloat] = [:]
     ) {
         self.size = size
         self.pixelsPerSecond = pixelsPerSecond
         self.scrollX = scrollX
         self.trackHeight = trackHeight
+        self.rowHeightOverrides = rowHeightOverrides
     }
 }
 
@@ -290,7 +319,11 @@ public enum TimelineLayoutCalculator {
     public static let rulerHeight: CGFloat = 24
     public static let verticalInset: CGFloat = 8
     public static let defaultPixelsPerSecond: CGFloat = 80
-    public static let minPixelsPerSecond: CGFloat = 16
+    /// Low enough that long recordings (many minutes) can fit-to-width in
+    /// a normal window — the editor's default zoom fits the whole project
+    /// (see ProjectView.fitTimelineZoomIfNeeded). Was 16, which capped
+    /// "fit" at ~80 seconds for a typical lane width.
+    public static let minPixelsPerSecond: CGFloat = 2
     public static let maxPixelsPerSecond: CGFloat = 800
     /// Effects row sits below all real tracks. Thinner than a regular
     /// track lane because each keyframe is a single rounded badge, not a
@@ -314,9 +347,16 @@ public enum TimelineLayoutCalculator {
     ///     pre-Branch-B layout's behaviour).
     public static func computeDisplayRows(
         project: Project,
-        trackHeight: CGFloat = defaultTrackHeight
+        trackHeight: CGFloat = defaultTrackHeight,
+        rowHeightOverrides: [String: CGFloat] = [:]
     ) -> [TimelineDisplayRow] {
         let trackH = max(minTrackHeight, min(maxTrackHeight, trackHeight))
+        // Per-row override wins over the uniform slider height; clamped to
+        // the same bounds so a drag can't collapse a row to nothing.
+        func rowHeight(forID id: String) -> CGFloat {
+            guard let override = rowHeightOverrides[id] else { return trackH }
+            return max(minTrackHeight, min(maxTrackHeight, override))
+        }
         // Bucket physical tracks by their lane group, preserving the
         // project's track ordering inside each bucket. Tracks whose
         // `laneBreakout == true` are NOT bucketed into a group —
@@ -366,31 +406,34 @@ public enum TimelineLayoutCalculator {
                 let kind: TimelineDisplayRow.Kind = (group == .video)
                     ? .groupedVideo(physicalTracks: ids, primaryTrackID: primary)
                     : .groupedAudio(physicalTracks: ids, primaryTrackID: primary)
+                let id = "group:\(group.rawValue)"
                 rows.append(TimelineDisplayRow(
-                    id: "group:\(group.rawValue)",
+                    id: id,
                     kind: kind,
                     isCollapsed: true,
-                    height: trackH
+                    height: rowHeight(forID: id)
                 ))
             } else {
                 // Expanded: emit one row per physical track in order.
                 for trackID in ids {
+                    let id = "track:\(trackID.rawValue)"
                     rows.append(TimelineDisplayRow(
-                        id: "track:\(trackID.rawValue)",
+                        id: id,
                         kind: .singleTrack(trackID: trackID, parentGroup: group),
                         isCollapsed: false,
-                        height: trackH
+                        height: rowHeight(forID: id)
                     ))
                 }
             }
         }
         let appendBrokenOut: (LaneGroupID, [TrackID]) -> Void = { group, ids in
             for trackID in ids {
+                let id = "track:\(trackID.rawValue)"
                 rows.append(TimelineDisplayRow(
-                    id: "track:\(trackID.rawValue)",
+                    id: id,
                     kind: .singleTrack(trackID: trackID, parentGroup: group),
                     isCollapsed: false,
-                    height: trackH
+                    height: rowHeight(forID: id)
                 ))
             }
         }
@@ -425,11 +468,16 @@ public enum TimelineLayoutCalculator {
         // grouped tracks share a single row. Build a TrackID → row-Y map
         // first; per-track frames are projected onto that map below so
         // grouped-collapse tracks land at the group's Y origin.
-        let displayRows = computeDisplayRows(project: project, trackHeight: trackHeight)
+        let displayRows = computeDisplayRows(
+            project: project,
+            trackHeight: trackHeight,
+            rowHeightOverrides: viewport.rowHeightOverrides
+        )
         var trackToRowY: [TrackID: CGFloat] = [:]
         var trackToRowHeight: [TrackID: CGFloat] = [:]
         var effectsLaneY: CGFloat = rulerHeight + verticalInset
         var cumulativeY: CGFloat = rulerHeight + verticalInset
+        var resizeHandles: [RowResizeHandle] = []
         for row in displayRows {
             switch row.kind {
             case .groupedVideo(let physicalTracks, _),
@@ -444,6 +492,21 @@ public enum TimelineLayoutCalculator {
                 trackToRowHeight[trackID] = row.height
             case .effectsLane:
                 effectsLaneY = cumulativeY
+            }
+            // Every resizable row gets a grab zone across the header column
+            // at its bottom boundary (covering the inter-row gap plus a
+            // little slack each side). The effects lane stays fixed-height.
+            if row.kind != .effectsLane {
+                resizeHandles.append(RowResizeHandle(
+                    rowID: row.id,
+                    hitFrame: CGRect(
+                        x: 0,
+                        y: cumulativeY + row.height - 2,
+                        width: trackHeaderWidth,
+                        height: trackSpacing + 4
+                    ),
+                    currentHeight: row.height
+                ))
             }
             cumulativeY += row.height + trackSpacing
         }
@@ -663,7 +726,8 @@ public enum TimelineLayoutCalculator {
             trackHeaderWidth: trackHeaderWidth,
             displayRows: displayRows,
             groupedOverlapBadges: badges,
-            laneDisclosures: disclosures
+            laneDisclosures: disclosures,
+            rowResizeHandles: resizeHandles
         )
     }
 
@@ -716,7 +780,8 @@ public enum TimelineLayoutCalculator {
     public static func contentSize(
         for project: Project,
         pixelsPerSecond: CGFloat,
-        trackHeight: CGFloat
+        trackHeight: CGFloat,
+        rowHeightOverrides: [String: CGFloat] = [:]
     ) -> CGSize {
         let pps = max(minPixelsPerSecond, min(maxPixelsPerSecond, pixelsPerSecond))
         let trackH = max(minTrackHeight, min(maxTrackHeight, trackHeight))
@@ -725,7 +790,11 @@ public enum TimelineLayoutCalculator {
         // row per grouped lane when collapsed, one per physical track
         // when expanded, plus the effects lane). Falls back to the old
         // "track-per-row" calculation when project has no tracks.
-        let displayRows = computeDisplayRows(project: project, trackHeight: trackH)
+        let displayRows = computeDisplayRows(
+            project: project,
+            trackHeight: trackH,
+            rowHeightOverrides: rowHeightOverrides
+        )
         var cumulative: CGFloat = rulerHeight + verticalInset
         for row in displayRows {
             cumulative += row.height + trackSpacing

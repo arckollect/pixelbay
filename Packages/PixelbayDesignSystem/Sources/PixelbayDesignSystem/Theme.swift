@@ -10,10 +10,11 @@ import AppKit
 //
 // PALETTE TONE — the whole app's tone is the `Palette` enum below. To retone
 // (e.g. neutral graphite → warm neutral → cool slate) edit those hex strings
-// and nothing else. The current palette is "Neutral graphite + system blue",
-// matching the onboarding module: near-black surfaces, white-led text, a
-// system-blue accent used sparingly, monochrome status (blue = info, red =
-// error/record), and a blue-family ramp for the timeline lanes.
+// and nothing else. The current palette is "Neutral graphite + system blue"
+// for the chrome — near-black surfaces, white-led text, a system-blue accent
+// used sparingly, monochrome status (blue = info, red = error/record) — with
+// full-spectrum SEMANTIC hues for the timeline lanes (video blue, voice
+// green, system-audio teal, camera pink, narration amber, effects violet).
 //
 // UPGRADE PATH — these are static `enum` tokens, so they do NOT react to a
 // runtime palette switch. If a Settings palette toggle is ever wanted, refactor
@@ -31,19 +32,26 @@ extension Theme {
     enum Palette {
         // Surfaces — neutral graphite (matches onboarding Tone: bg #181818,
         // row #282828). The warm variant was 262624/1F1F1E/2F2F2D/222220.
+        // The deep→base→elevated ladder is deliberately wider than the old
+        // 12/18/28 ramp so panes read as distinct depth planes: the preview
+        // canvas and timeline sit in a visibly deeper well than the chrome.
         static let bgBase      = "#181818"   // primary window background (== Tone.bg)
-        static let bgDeep      = "#121212"   // deepest: toolbars, timeline header, inspector pane
+        static let bgDeep      = "#101010"   // deepest: preview canvas, timeline well, inspector pane
         static let bgElevated  = "#282828"   // raised surfaces / cards / secondary buttons (== Tone.row)
         static let bgInsetCard = "#1F1F1F"   // card interiors
 
-        // Borders — neutral
+        // Borders — neutral. `borderStrong` marks interactive edges (drag
+        // handles, focused chrome) so it carries more contrast than the old
+        // #3D3D3D.
         static let borderSubtle = "#2E2E2E"
-        static let borderStrong = "#3D3D3D"
+        static let borderStrong = "#454545"
 
-        // Text — white-led neutral (matches onboarding white / white-opacity)
+        // Text — white-led neutral (matches onboarding white / white-opacity).
+        // Secondary sits at ~62% white for comfortable long-form legibility
+        // on the graphite surfaces (the old #9A9A9A read muddy on bgDeep).
         static let textPrimary   = "#FFFFFF"
-        static let textSecondary = "#9A9A9A"
-        static let textTertiary  = "#6B6B6B"
+        static let textSecondary = "#A3A3A3"
+        static let textTertiary  = "#737373"
 
         // Accent + status — system blue accent; monochrome status (blue = info /
         // affirmative, red = error / record). No green or amber (see onboarding:
@@ -55,16 +63,20 @@ extension Theme {
         static let danger       = "#FF453A"   // macOS system red
         static let recordingRed = "#FF453A"
 
-        // Track roles (timeline lanes) — tonal-cohesive COOL sweep (blue →
-        // indigo → violet). Distinct per kind so lanes are tellable apart,
-        // but harmonized for a calm minimal-premium read. No green/orange.
+        // Track roles (timeline lanes) — full-spectrum semantic hues, the
+        // NLE convention (FCP / Premiere): video = blue, human audio =
+        // green, system audio = teal, camera = pink, narration = amber,
+        // effects = violet. Each lane is instantly tellable apart even as
+        // the timeline's soft translucent tints (low alpha collapses close
+        // hues into one). The earlier "cool sweep only" restriction is
+        // deliberately lifted.
         static let trackVideo       = "#3B82F6"   // blue (screen)
-        static let trackWebcam      = "#5B8DEF"   // periwinkle
-        static let trackMic         = "#6366F1"   // indigo
-        static let trackSystemAudio = "#4F76E8"   // blue-indigo
-        static let trackVoiceover   = "#8B5CF6"   // violet
+        static let trackWebcam      = "#F472B6"   // pink (person/camera)
+        static let trackMic         = "#34D399"   // emerald (voice)
+        static let trackSystemAudio = "#2DD4BF"   // teal (machine audio)
+        static let trackVoiceover   = "#FBBF24"   // amber (narration)
         static let trackOverlay     = "#60A5FA"   // light blue
-        static let trackEffects     = "#A78BFA"   // light violet
+        static let trackEffects     = "#A78BFA"   // violet
 
         // Effect-keyframe roles — indigo/violet family (distinct from clip lanes)
         static let effectZoomAuto   = "#818CF8"
@@ -72,7 +84,7 @@ extension Theme {
         static let effectTalkingHead = "#6366F1"
 
         // Timeline chrome
-        static let timelineRuler    = "#141414"   // neutral
+        static let timelineRuler    = "#101010"   // == bgDeep so the ruler fuses with the timeline well
         static let timelinePlayhead = "#FFFFFF"   // white + dark halo → pops over ANY clip content (light thumbnails or dark lanes); blue blended into the cool clips
         static let waveformFill     = "#FFFFFF"   // bright white waveform (pops on the colored audio clip, like pro editors)
     }

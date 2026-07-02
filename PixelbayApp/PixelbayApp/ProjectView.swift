@@ -29,10 +29,32 @@ struct ProjectView: View {
     @State private var player = PreviewPlayer()
     @State private var selectedClipID: ClipID?
     @State private var selectedEffectKeyframeID: EffectKeyframeID?
+    /// Backing string for the editable window title (navigationTitle binding).
     @State private var editingName: String = ""
-    @FocusState private var isEditingName: Bool
+    /// Debounce for titlebar-rename commits — see the editingName onChange.
+    @State private var nameCommitTask: Task<Void, Never>?
     @State private var pixelsPerSecond: CGFloat = TimelineLayoutCalculator.defaultPixelsPerSecond
-    @State private var trackHeight: CGFloat = TimelineLayoutCalculator.compactTrackHeight
+    /// Default row height ≈60% along the header slider's 24–96 range —
+    /// tall rows so thumbnails and waveforms read clearly out of the box.
+    /// The header slider still adjusts it live.
+    @State private var trackHeight: CGFloat = 67
+    /// Per-row height overrides (keyed by TimelineDisplayRow.id), set by
+    /// dragging a row header's bottom edge in the timeline. View state —
+    /// session-scoped, not persisted to the document. Moving the global
+    /// track-height slider resets all rows to uniform.
+    @State private var rowHeights: [String: CGFloat] = [:]
+    /// Live width of the timeline pane, captured by a GeometryReader — the
+    /// input to fit-to-width zoom.
+    @State private var timelineWidth: CGFloat = 0
+    /// False until the user touches the zoom slider. While false, the zoom
+    /// auto-fits the whole project into the visible timeline width (and
+    /// re-fits as the project or pane changes); the first manual zoom
+    /// hands control to the user.
+    @State private var userAdjustedZoom = false
+    /// True while a header slider (track height / zoom) is mid-drag. The
+    /// timeline suppresses its expensive content layers (thumbnails,
+    /// waveforms) for the duration so per-tick rebuilds stay cheap.
+    @State private var timelineSliderDragging = false
     /// Which inspector tab the right-rail is showing. Independent of clip /
     /// keyframe selection, except that selecting an effect keyframe in the
     /// timeline auto-switches here to `.zoom` (the only surface that edits
@@ -83,32 +105,37 @@ struct ProjectView: View {
     private static let liveLayoutInterval: Duration = .milliseconds(50)
 
     var body: some View {
-        VStack(spacing: 0) {
-            toolbar
-            PBDivider()
-            HStack(spacing: 0) {
-                // The resizable preview/timeline split owns its own drag
-                // state (inside ResizableVSplit) — deliberately NOT hoisted
-                // to ProjectView. If `timelineHeight` lived here, every
-                // drag tick (~120/s) would invalidate this whole body
-                // (toolbar + both inspectors + transport), dropping frames
-                // and making BOTH panes stutter. Isolated, the drag only
-                // re-evaluates the split subtree.
-                ResizableVSplit {
-                    previewPane
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } bottom: {
-                    timelinePane
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                PBDivider(.vertical)
-                inspectorPane
-                    .frame(width: 360)
+        HStack(spacing: 0) {
+            // The resizable preview/timeline split owns its own drag
+            // state (inside ResizableVSplit) — deliberately NOT hoisted
+            // to ProjectView. If `timelineHeight` lived here, every
+            // drag tick (~120/s) would invalidate this whole body
+            // (toolbar + both inspectors + transport), dropping frames
+            // and making BOTH panes stutter. Isolated, the drag only
+            // re-evaluates the split subtree.
+            ResizableVSplit {
+                previewPane
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } bottom: {
+                timelinePane
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            PBDivider(.vertical)
+            inspectorPane
+                .frame(width: 380)
         }
         .frame(minWidth: 1000, minHeight: 700)
         .background(Theme.Color.bgBase)
         .tint(Theme.Color.accent)
+        // Native document chrome: the project name IS the window title,
+        // editable inline via the titlebar (click the title → rename), and
+        // the dirty state reads as the standard "Edited" subtitle. Toolbar
+        // actions live in the unified titlebar toolbar (see editorToolbar)
+        // instead of a custom in-window strip — native materials, native
+        // spacing, native overflow behaviour.
+        .navigationTitle($editingName)
+        .navigationSubtitle(document.isDirty ? "Edited" : "")
+        .toolbar { editorToolbar }
         // Note: focusedSceneValue(\.openProjectDocument, document) is set
         // by the enclosing ProjectWindow, not here — that way the document
         // is published once per scene from the natural owner.
@@ -118,11 +145,21 @@ struct ProjectView: View {
         // changes only show up in the timeline, not in playback. Save
         // doesn't bump revision (content unchanged) so the preview
         // doesn't reload then either.
+        //
+        // Preview RENDER SIZE is deliberately NOT in this key. It used to be
+        // (quantized to 64px), so dragging the preview/timeline split re-keyed
+        // the task and forced a full composition rebuild each time the backing
+        // size crossed a 64px boundary — the reload flips status to .loading,
+        // which swaps the live video for the spinner: visible flicker on every
+        // resize. The build still reads `previewMaxOutputSize` live below, so
+        // the FIRST build is correctly sized to the pane; we simply don't
+        // rebuild on subsequent resizes. Growing the pane a lot scales the
+        // existing high-res frame (imperceptibly soft for an editing preview);
+        // the next real edit rebuilds at the current size.
         .task(id: ProjectViewKey(
             bundleURL: document.bundleURL,
             revision: document.revision,
-            previewQuality: previewQuality,
-            previewRenderSize: previewRenderSizeKey
+            previewQuality: previewQuality
         )) {
             // Debounce preview rebuilds. Every committed edit bumps `revision`
             // and re-keys this task; rapid edits — e.g. clicking through the
@@ -172,6 +209,19 @@ struct ProjectView: View {
                 editingName = newName
             }
         }
+        .onChange(of: editingName) { _, _ in
+            // The titlebar rename field writes through the navigationTitle
+            // binding. Debounce before dispatching RenameProjectCommand so a
+            // burst of binding writes coalesces into one undoable rename —
+            // and the external-sync path above no-ops via the equality guard
+            // in commitNameIfChanged.
+            nameCommitTask?.cancel()
+            nameCommitTask = Task {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                guard !Task.isCancelled else { return }
+                commitNameIfChanged()
+            }
+        }
         .onChange(of: document.revision) { _, _ in
             reconcileSelections()
         }
@@ -182,68 +232,41 @@ struct ProjectView: View {
 
     // MARK: - Toolbar
 
-    private var toolbar: some View {
-        HStack(spacing: Theme.Spacing.sm) {
-            // Slice A.2 — "Scenes" entry point. Sets the shared
-            // ScenesAppendTarget singleton to this document's bundleURL,
-            // then opens the singleton scenes window. The window snapshots
-            // the URL on appear; the editor toolbar button stays the FIRST
-            // item in the HStack so Branch B's later additions (Expand /
-            // Collapse all) at the END of the row don't conflict on merge.
+    /// Native unified-titlebar toolbar. Items render with the system's
+    /// toolbar treatment (material, spacing, overflow menu on narrow
+    /// windows) instead of the old custom in-window strip. Keyboard
+    /// shortcuts stay on the menu bar (EditUndoRedoCommands /
+    /// SaveProjectCommand) — these are the visible affordances.
+    @ToolbarContentBuilder
+    private var editorToolbar: some ToolbarContent {
+        // "Scenes" is the add-content entry point, so it sits leading
+        // (navigation position), apart from the document actions.
+        ToolbarItem(placement: .navigation) {
             Button {
                 scenesAppendTarget.set(document.bundleURL)
                 openWindow(id: WindowID.scenes)
             } label: {
                 Label("Scenes", systemImage: "rectangle.stack.badge.play")
             }
-            .buttonStyle(.pbCompact)
             .help("Add more scenes to this project")
-            PBDivider(.vertical).frame(height: 20)
-            // Toolbar Undo/Redo are visible affordances; the keyboard
-            // shortcuts (⌘Z / ⇧⌘Z) live on the Edit menu via
-            // EditUndoRedoCommands so a focused TextField doesn't shadow
-            // them with text-undo.
-            Button {
-                Task { await document.undo() }
-            } label: {
-                Label("Undo", systemImage: "arrow.uturn.backward")
+        }
+        ToolbarItemGroup {
+            ControlGroup {
+                Button {
+                    Task { await document.undo() }
+                } label: {
+                    Label("Undo", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(!document.canUndo)
+                .help(document.undoActionName.map { "Undo \($0)" } ?? "Undo")
+                Button {
+                    Task { await document.redo() }
+                } label: {
+                    Label("Redo", systemImage: "arrow.uturn.forward")
+                }
+                .disabled(!document.canRedo)
+                .help(document.redoActionName.map { "Redo \($0)" } ?? "Redo")
             }
-            .buttonStyle(.pbCompact)
-            .disabled(!document.canUndo)
-            .help(document.undoActionName.map { "Undo \($0)" } ?? "Undo")
-            Button {
-                Task { await document.redo() }
-            } label: {
-                Label("Redo", systemImage: "arrow.uturn.forward")
-            }
-            .buttonStyle(.pbCompact)
-            .disabled(!document.canRedo)
-            .help(document.redoActionName.map { "Redo \($0)" } ?? "Redo")
-            PBDivider(.vertical).frame(height: 20)
-            // Save shortcut lives on the File menu's SaveProjectCommand
-            // (FocusedValue-bound), so this button is just an in-window
-            // affordance that mirrors document state.
-            Button {
-                Task { await document.save() }
-            } label: {
-                Label(document.isDirty ? "Save (modified)" : "Save", systemImage: "tray.and.arrow.down")
-            }
-            .buttonStyle(.pbPrimary)
-            .disabled(!document.isDirty || document.status == .saving)
-            Spacer()
-            Button {
-                NSWorkspace.shared.activateFileViewerSelecting([document.bundleURL])
-            } label: {
-                Label("Reveal", systemImage: "folder")
-            }
-            .buttonStyle(.pbCompact)
-            PBDivider(.vertical).frame(height: 20)
-            // Branch B (Slice B.4) — bulk toggle of every grouped lane.
-            // Reads the smart-default seed to decide which direction the
-            // button toggles to. INSERTION ORDER: this is the LAST item
-            // in the toolbar HStack so the merge surface against Branch
-            // A's "Scenes" button (added as the FIRST item) stays
-            // minimal (one diff per edge, no body interleave).
             Button {
                 let nowCollapsed = !allLanesCollapsed
                 Task {
@@ -257,14 +280,23 @@ struct ProjectView: View {
                         : "chevron.right.square"
                 )
             }
-            .buttonStyle(.pbCompact)
             .help(allLanesCollapsed
                   ? "Expand every grouped lane to show underlying tracks"
                   : "Collapse every grouped lane into Video / Audio bands")
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([document.bundleURL])
+            } label: {
+                Label("Reveal in Finder", systemImage: "folder")
+            }
+            .help("Show the project bundle in Finder")
+            Button {
+                Task { await document.save() }
+            } label: {
+                Label("Save", systemImage: "tray.and.arrow.down")
+            }
+            .disabled(!document.isDirty || document.status == .saving)
+            .help(document.isDirty ? "Save changes (⌘S)" : "All changes saved")
         }
-        .padding(.horizontal, Theme.Spacing.lg)
-        .padding(.vertical, Theme.Spacing.sm)
-        .background(Theme.Color.bgDeep)
     }
 
     /// True when every known lane group is currently collapsed (per the
@@ -278,27 +310,35 @@ struct ProjectView: View {
 
     @ViewBuilder
     private var previewPane: some View {
+        // The preview sits in a deep "canvas well" (bgDeep) so the footage
+        // card visually floats above the editor chrome — the depth ladder
+        // reads: canvas well < window chrome < raised controls.
         switch player.status {
         case .idle, .loading:
-            VStack(spacing: Theme.Spacing.sm) {
+            VStack(spacing: Theme.Spacing.md) {
                 ProgressView().controlSize(.small)
                 Text("Loading preview…")
                     .font(Theme.Font.body)
                     .foregroundStyle(Theme.Color.textSecondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Theme.Color.bgBase)
+            .background(Theme.Color.bgDeep)
         case .failed(let message):
-            VStack(spacing: Theme.Spacing.sm) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.Color.warning)
-                Text("Preview unavailable: \(message)")
+            VStack(spacing: Theme.Spacing.md) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 28))
+                    .foregroundStyle(Theme.Color.warning)
+                Text("Preview unavailable")
+                    .font(Theme.Font.cardTitle)
+                    .foregroundStyle(Theme.Color.textPrimary)
+                Text(message)
                     .font(Theme.Font.body)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Theme.Color.textSecondary)
                     .padding(.horizontal, 40)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Theme.Color.bgBase)
+            .background(Theme.Color.bgDeep)
         case .ready:
             ZStack {
                 PreviewPlayerView(
@@ -344,63 +384,146 @@ struct ProjectView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Theme.Color.bgBase, in: RoundedRectangle(cornerRadius: Theme.Radius.medium))
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.large))
             .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.medium)
+                RoundedRectangle(cornerRadius: Theme.Radius.large)
                     .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
             )
+            // Two-layer shadow: a tight contact shadow plus a soft ambient
+            // falloff — the card reads as floating in the canvas well rather
+            // than painted on it. CRITICAL: the shadows live on this
+            // background shape, NOT on the card subtree itself. A `.shadow`
+            // around the AppKit-hosted PreviewPlayerView forces the live
+            // video layer through SwiftUI's shadow compositing, which
+            // re-rasterizes on every body invalidation (tab switch) and
+            // split-resize tick — visible as preview flicker.
+            .background(
+                RoundedRectangle(cornerRadius: Theme.Radius.large)
+                    .fill(Theme.Color.bgBase)
+                    .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+                    .shadow(color: .black.opacity(0.45), radius: 22, y: 10)
+            )
             .padding(Theme.Spacing.lg)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.Color.bgDeep)
         }
     }
 
-    private var timelinePlaybackControls: some View {
-        HStack(spacing: Theme.Spacing.sm) {
-            timelineControlButton("backward.end.fill", help: "Jump to start") {
+    /// Centered playback cluster — the single most used control in the
+    /// editor, so it owns the middle of the timeline header (matching the
+    /// native transport placement in QuickTime / FCP) instead of hiding
+    /// at the left edge. Timecode lives separately at the header's leading
+    /// edge (see timecodeReadout).
+    private var timelineTransport: some View {
+        HStack(spacing: Theme.Spacing.xs) {
+            TransportButton(symbol: "backward.end.fill", help: "Jump to start") {
                 player.seekToStart()
             }
-            timelineControlButton("backward.frame.fill", help: "Step back one frame") {
+            TransportButton(symbol: "backward.frame.fill", help: "Step back one frame") {
                 player.stepFrame(by: -1)
             }
-            Button {
+            TransportButton(
+                symbol: player.isPlaying ? "pause.fill" : "play.fill",
+                help: player.isPlaying ? "Pause" : "Play",
+                prominent: true
+            ) {
                 player.togglePlayPause()
-            } label: {
-                Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.Color.textPrimary)
-                    .frame(width: 34, height: 30)
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
             .keyboardShortcut(.space, modifiers: [])
-            .help(player.isPlaying ? "Pause" : "Play")
-            timelineControlButton("forward.frame.fill", help: "Step forward one frame") {
+            TransportButton(symbol: "forward.frame.fill", help: "Step forward one frame") {
                 player.stepFrame(by: 1)
             }
-            timelineControlButton("forward.end.fill", help: "Jump to end") {
+            TransportButton(symbol: "forward.end.fill", help: "Jump to end") {
                 player.seekToEnd()
             }
-            Text("\(Timecode.clock(player.currentTime.seconds)) / \(Timecode.clock(player.duration.seconds))")
-                .font(Theme.Font.monoTimecode)
-                .foregroundStyle(Theme.Color.textSecondary)
-                .frame(width: 96, alignment: .leading)
         }
-        .padding(.horizontal, Theme.Spacing.sm)
-        .padding(.vertical, 3)
+        .padding(.horizontal, Theme.Spacing.xs)
+        .padding(.vertical, 2)
         .background(Theme.Color.bgElevated, in: Capsule())
         .overlay(Capsule().strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline))
     }
 
-    private func timelineControlButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.Color.textSecondary)
-                .frame(width: 26, height: 26)
-                .contentShape(Rectangle())
+    /// Current position (bright) over total duration (quiet) — promoted from
+    /// the old cramped inline readout so scrubbing has a clear anchor.
+    private var timecodeReadout: some View {
+        HStack(spacing: 4) {
+            Text(Timecode.clock(player.currentTime.seconds))
+                .font(Theme.Font.monoTimecode)
+                .foregroundStyle(Theme.Color.textPrimary)
+            Text("/ \(Timecode.clock(player.duration.seconds))")
+                .font(Theme.Font.monoTimecode)
+                .foregroundStyle(Theme.Color.textTertiary)
         }
-        .buttonStyle(.plain)
-        .help(help)
+    }
+
+    /// Trailing header cluster: view-density controls (track height, zoom)
+    /// and the append-recording entry point.
+    private var timelineViewTools: some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            // Track-height (row size) control. Lets the user condense
+            // tracks when the project has many of them (so they all
+            // fit in the visible pane without vertical scrolling) or
+            // expand to give waveforms more room.
+            timelineGlyph("rectangle.compress.vertical", help: "Condense tracks")
+            PBSlider(
+                value: Binding(
+                    get: { Double(trackHeight) },
+                    set: {
+                        trackHeight = CGFloat($0)
+                        // The global slider is the "make everything uniform"
+                        // control — clear per-row overrides so it visibly
+                        // affects every lane again.
+                        if !rowHeights.isEmpty { rowHeights = [:] }
+                    }
+                ),
+                in: Double(TimelineLayoutCalculator.minTrackHeight)...Double(TimelineLayoutCalculator.maxTrackHeight),
+                size: .mini,
+                onEditingChanged: { timelineSliderDragging = $0 }
+            )
+            .frame(width: 88)
+            .help("Adjust all track row heights (drag a row header's bottom edge to size one row)")
+            timelineGlyph("rectangle.expand.vertical", help: "Expand tracks")
+            PBDivider(.vertical).frame(height: 16)
+            timelineGlyph("minus.magnifyingglass", help: "Zoom out")
+            PBSlider(
+                value: Binding(
+                    get: { Double(pixelsPerSecond) },
+                    set: {
+                        pixelsPerSecond = CGFloat($0)
+                        // First manual zoom ends the auto fit-to-width mode.
+                        userAdjustedZoom = true
+                    }
+                ),
+                in: Double(TimelineLayoutCalculator.minPixelsPerSecond)...Double(TimelineLayoutCalculator.maxPixelsPerSecond),
+                size: .mini,
+                onEditingChanged: { timelineSliderDragging = $0 }
+            )
+            .frame(width: 112)
+            .help("Zoom timeline")
+            timelineGlyph("plus.magnifyingglass", help: "Zoom in")
+            PBDivider(.vertical).frame(height: 16)
+            // Slice A.3 — "+" entry point for a single-shot append
+            // recording. Anchored at the right edge of the timeline
+            // header so the user reads it as "add to the end of this
+            // timeline". The popover hosts source pickers; on stop the
+            // result flows through `document.appendRecordingToTimeline`
+            // which dispatches one InsertClipCommand per asset (undo-able).
+            Button {
+                appendPopoverPresented = true
+            } label: {
+                Label("Add", systemImage: "plus.circle.fill")
+            }
+            .buttonStyle(.pbCompact)
+            .help("Record more — appends to the timeline tail")
+            .popover(isPresented: $appendPopoverPresented, arrowEdge: .top) {
+                AppendRecordingPopover(
+                    bundle: ProjectBundle(url: document.bundleURL),
+                    onRecorded: { result in
+                        Task { await document.appendRecordingToTimeline(result: result) }
+                    }
+                )
+            }
+        }
     }
 
     // MARK: - Timeline pane
@@ -414,56 +537,18 @@ struct ProjectView: View {
 
     private var timelinePane: some View {
         VStack(spacing: 0) {
-            HStack(spacing: Theme.Spacing.sm) {
-                Text("Timeline")
-                    .font(Theme.Font.cardTitle)
-                    .foregroundStyle(Theme.Color.textSecondary)
-                timelinePlaybackControls
-                Spacer()
-                // Track-height (row size) control. Lets the user condense
-                // tracks when the project has many of them (so they all
-                // fit in the visible pane without vertical scrolling) or
-                // expand to give waveforms more room.
-                timelineGlyph("rectangle.compress.vertical", help: "Condense tracks")
-                PBSlider(
-                    value: Binding(get: { Double(trackHeight) }, set: { trackHeight = CGFloat($0) }),
-                    in: Double(TimelineLayoutCalculator.minTrackHeight)...Double(TimelineLayoutCalculator.maxTrackHeight),
-                    size: .mini
-                )
-                .frame(width: 96)
-                .help("Adjust track row height")
-                timelineGlyph("rectangle.expand.vertical", help: "Expand tracks")
-                PBDivider(.vertical).frame(height: 16)
-                timelineGlyph("minus.magnifyingglass", help: "Zoom out")
-                PBSlider(
-                    value: Binding(get: { Double(pixelsPerSecond) }, set: { pixelsPerSecond = CGFloat($0) }),
-                    in: Double(TimelineLayoutCalculator.minPixelsPerSecond)...Double(TimelineLayoutCalculator.maxPixelsPerSecond),
-                    size: .mini
-                )
-                .frame(width: 120)
-                .help("Zoom timeline")
-                timelineGlyph("plus.magnifyingglass", help: "Zoom in")
-                PBDivider(.vertical).frame(height: 16)
-                // Slice A.3 — "+" entry point for a single-shot append
-                // recording. Anchored at the right edge of the timeline
-                // header so the user reads it as "add to the end of this
-                // timeline". The popover hosts source pickers; on stop the
-                // result flows through `document.appendRecordingToTimeline`
-                // which dispatches one InsertClipCommand per asset (undo-able).
-                Button {
-                    appendPopoverPresented = true
-                } label: {
-                    Label("Add", systemImage: "plus.circle.fill")
+            // Header layout: timecode anchored leading, transport truly
+            // centered (ZStack, so it doesn't drift as the side content
+            // changes width), view tools + Add anchored trailing.
+            ZStack {
+                HStack {
+                    timecodeReadout
+                    Spacer()
                 }
-                .buttonStyle(.pbCompact)
-                .help("Record more — appends to the timeline tail")
-                .popover(isPresented: $appendPopoverPresented, arrowEdge: .top) {
-                    AppendRecordingPopover(
-                        bundle: ProjectBundle(url: document.bundleURL),
-                        onRecorded: { result in
-                            Task { await document.appendRecordingToTimeline(result: result) }
-                        }
-                    )
+                timelineTransport
+                HStack(spacing: Theme.Spacing.sm) {
+                    Spacer()
+                    timelineViewTools
                 }
             }
             .padding(.horizontal, Theme.Spacing.md)
@@ -486,6 +571,8 @@ struct ProjectView: View {
                 selectedEffectKeyframeID: selectedEffectKeyframeID,
                 playheadTime: rationalTime(player.currentTime),
                 revision: document.revision,
+                rowHeightOverrides: rowHeights,
+                suppressContent: timelineSliderDragging,
                 onSelect: { selectedClipID = $0 },
                 onSelectEffectKeyframe: { keyframeID in
                     selectedEffectKeyframeID = keyframeID
@@ -499,10 +586,25 @@ struct ProjectView: View {
                 onScrub: { time in
                     let cmTime = CMTime(value: time.value, timescale: time.timescale)
                     player.seek(to: cmTime)
-                }
+                },
+                onRowHeightsChange: { rowHeights = $0 }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Theme.Color.bgDeep)
+            // Fit-to-width zoom: capture the pane's live width, and re-fit
+            // whenever it (or the project) changes while the user hasn't
+            // taken manual control of the zoom.
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { timelineWidth = geo.size.width }
+                        .onChange(of: geo.size.width) { _, newWidth in
+                            timelineWidth = newWidth
+                        }
+                }
+            )
+            .onChange(of: timelineWidth) { _, _ in fitTimelineZoomIfNeeded() }
+            .onChange(of: document.revision) { _, _ in fitTimelineZoomIfNeeded() }
         }
     }
 
@@ -510,8 +612,6 @@ struct ProjectView: View {
 
     private var inspectorPane: some View {
         VStack(spacing: 0) {
-            projectHeader
-            PBDivider()
             PBVerticalTabRail(tabs: Self.inspectorTabs, selection: $selectedTab) { tab in
                 ScrollView {
                     VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
@@ -531,11 +631,11 @@ struct ProjectView: View {
     }
 
     private static let inspectorTabs: [PBTabItem<InspectorTab>] = [
-        PBTabItem(tag: .layout, systemImage: "rectangle.on.rectangle", help: "Background & Scene"),
-        PBTabItem(tag: .camera, systemImage: "video", help: "Camera"),
-        PBTabItem(tag: .cursor, systemImage: "cursorarrow.rays", help: "Cursor"),
-        PBTabItem(tag: .zoom, systemImage: "plus.magnifyingglass", help: "Zoom & Effects"),
-        PBTabItem(tag: .audio, systemImage: "speaker.wave.2", help: "Audio")
+        PBTabItem(tag: .layout, systemImage: "rectangle.on.rectangle", help: "Background & Scene", title: "Layout"),
+        PBTabItem(tag: .camera, systemImage: "video", help: "Camera composition", title: "Camera"),
+        PBTabItem(tag: .cursor, systemImage: "cursorarrow.rays", help: "Cursor appearance & motion", title: "Cursor"),
+        PBTabItem(tag: .zoom, systemImage: "plus.magnifyingglass", help: "Zoom & Effects", title: "Effects"),
+        PBTabItem(tag: .audio, systemImage: "speaker.wave.2", help: "Audio mix", title: "Audio")
     ]
 
     @ViewBuilder
@@ -560,24 +660,6 @@ struct ProjectView: View {
         .padding(Theme.Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.Color.danger.opacity(0.12))
-    }
-
-    private var projectHeader: some View {
-        HStack(spacing: Theme.Spacing.sm) {
-            TextField("Project Name", text: $editingName)
-                .focused($isEditingName)
-                .onSubmit { commitNameIfChanged() }
-                .onChange(of: isEditingName) { _, focused in
-                    // Commit on focus-loss (clicking elsewhere, ⌘S,
-                    // closing the project) — not just Enter. Fixes
-                    // the "typed but didn't press Enter then clicked
-                    // Save, lost the change" wart.
-                    if !focused { commitNameIfChanged() }
-                }
-                .pbField(focused: isEditingName)
-        }
-        .padding(.horizontal, Theme.Spacing.lg)
-        .padding(.vertical, Theme.Spacing.md)
     }
 
     private func commitNameIfChanged() {
@@ -758,6 +840,28 @@ struct ProjectView: View {
         return RationalTime(value: cmTime.value, timescale: cmTime.timescale)
     }
 
+    /// Fit-to-width zoom: choose pixelsPerSecond so the whole project spans
+    /// the visible lane width — a 10-second take and a 5-minute session both
+    /// open fully visible. Re-applied on pane resize and on every committed
+    /// edit (append/trim changes the duration) until the user takes manual
+    /// control of the zoom slider, after which their choice sticks.
+    private func fitTimelineZoomIfNeeded() {
+        guard !userAdjustedZoom else { return }
+        // Trailing margin keeps the project's tail off the hard right edge.
+        let laneWidth = timelineWidth - TimelineLayoutCalculator.trackHeaderWidth - 24
+        guard laneWidth > 100 else { return }
+        let totalSeconds = TimelineLayoutCalculator.totalSeconds(in: document.project)
+        guard totalSeconds > 0.1 else { return }
+        let fit = laneWidth / totalSeconds
+        let clamped = min(
+            max(fit, TimelineLayoutCalculator.minPixelsPerSecond),
+            TimelineLayoutCalculator.maxPixelsPerSecond
+        )
+        if abs(clamped - pixelsPerSecond) > 0.01 {
+            pixelsPerSecond = clamped
+        }
+    }
+
     private var previewMaxOutputSize: CGSize {
         guard previewBackingSize.width >= 2, previewBackingSize.height >= 2 else {
             return previewQuality.maxOutputSize
@@ -767,10 +871,6 @@ struct ProjectView: View {
             width: max(2, min(maxSize.width, previewBackingSize.width)),
             height: max(2, min(maxSize.height, previewBackingSize.height))
         )
-    }
-
-    private var previewRenderSizeKey: PreviewRenderSizeKey {
-        PreviewRenderSizeKey(size: previewMaxOutputSize)
     }
 
     private func editorPreviewProject(from project: Project) -> Project {
@@ -924,6 +1024,34 @@ struct ProjectView: View {
     }
 }
 
+/// Transport control: a quiet glyph that lifts to a circular wash on hover.
+/// `prominent` marks the play/pause action — larger glyph, always-bright.
+private struct TransportButton: View {
+    let symbol: String
+    let help: String
+    var prominent: Bool = false
+    let action: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: prominent ? 14 : 11, weight: .semibold))
+                .foregroundStyle(
+                    prominent || hovered ? Theme.Color.textPrimary : Theme.Color.textSecondary
+                )
+                .frame(width: prominent ? 34 : 26, height: 26)
+                .background(Circle().fill(hovered ? Color.white.opacity(0.08) : .clear))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .animation(.easeOut(duration: 0.12), value: hovered)
+        .onHover { hovered = $0 }
+    }
+}
+
 private struct ZoomFollowSafeZoneOverlay: View {
     let fraction: Double
     let videoSize: CGSize
@@ -1001,28 +1129,14 @@ private struct ZoomFollowSafeZoneOverlay: View {
 /// alone changes only when a different project is opened; the revision
 /// changes per committed edit (apply/undo/redo). SwiftUI fires the task
 /// on any change to the key, so both transitions trigger a rebuild.
+///
+/// Preview render size is intentionally absent — see the `.task(id:)` note
+/// in `body` for why (resize flicker). The build reads the live backing
+/// size instead.
 private struct ProjectViewKey: Hashable {
     let bundleURL: URL
     let revision: Int
     let previewQuality: PreviewPlayer.PreviewQuality
-    let previewRenderSize: PreviewRenderSizeKey
-}
-
-private struct PreviewRenderSizeKey: Hashable {
-    let width: Int
-    let height: Int
-
-    init(size: CGSize) {
-        // Quantize to 64 px so live pane drags coalesce, then the existing
-        // preview-load debounce settles on the final visible size.
-        width = Self.quantized(size.width)
-        height = Self.quantized(size.height)
-    }
-
-    private static func quantized(_ value: CGFloat) -> Int {
-        let clamped = max(2, Int(value.rounded()))
-        return max(2, ((clamped + 63) / 64) * 64)
-    }
 }
 
 /// The right-rail inspector categories, surfaced as a vertical icon-tab rail.
@@ -1058,7 +1172,11 @@ struct ResizableVSplit<Top: View, Bottom: View>: View {
     @ViewBuilder var top: () -> Top
     @ViewBuilder var bottom: () -> Bottom
 
-    @State private var bottomHeight: CGFloat = 190
+    /// Default split: sized so the standard collapsed timeline (transport
+    /// header + ruler + Video / Audio / Effects rows at the 67pt default
+    /// track height) is fully visible with room to breathe below the
+    /// effects lane; the preview takes the rest without dominating.
+    @State private var bottomHeight: CGFloat = 250
     /// Bottom height captured at the start of a resize drag; nil when idle.
     @State private var dragStartHeight: CGFloat?
     /// Hover state for the grabber (drives the cursor + accent).

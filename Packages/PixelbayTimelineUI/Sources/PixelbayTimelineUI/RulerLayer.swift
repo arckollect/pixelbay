@@ -54,8 +54,9 @@ public final class RulerLayer: CALayer, @unchecked Sendable {
         guard bounds.width > 0, bounds.height > 0 else { return }
 
         // Bottom hairline that visually separates the ruler from the lanes.
-        // borderStrong (not subtle) gives a crisper, finished ruler/lane edge.
-        ctx.setFillColor(Theme.NSColor.borderStrong.cgColor)
+        // Subtle — the redesigned lanes are soft row cards on a deep canvas,
+        // so a strong rule here would be the loudest line on screen.
+        ctx.setFillColor(Theme.NSColor.borderSubtle.cgColor)
         ctx.fill(CGRect(x: 0, y: bounds.maxY - 0.5, width: bounds.width, height: 0.5))
 
         let intervals = TimelineLayoutCalculator.niceTickInterval(forPixelsPerSecond: pixelsPerSecond)
@@ -72,7 +73,7 @@ public final class RulerLayer: CALayer, @unchecked Sendable {
         // Minor ticks first (so major overpaints them at exact alignments).
         // Dimmed so the major/minor rhythm reads clearly (minor recede).
         if intervals.minor < intervals.major {
-            ctx.setStrokeColor(Theme.NSColor.textTertiary.withAlphaComponent(0.6).cgColor)
+            ctx.setStrokeColor(Theme.NSColor.textTertiary.withAlphaComponent(0.35).cgColor)
             ctx.setLineWidth(1)
             drawTicks(
                 in: ctx,
@@ -85,8 +86,10 @@ public final class RulerLayer: CALayer, @unchecked Sendable {
             )
         }
 
-        // Major ticks + labels.
-        ctx.setStrokeColor(Theme.NSColor.textSecondary.cgColor)
+        // Major ticks + labels — tertiary, not secondary: the ruler is
+        // reference chrome, and should sit behind the content in visual
+        // priority (the clips and playhead are what the eye needs).
+        ctx.setStrokeColor(Theme.NSColor.textTertiary.cgColor)
         ctx.setLineWidth(1)
         drawTicks(
             in: ctx,
@@ -144,8 +147,8 @@ public final class RulerLayer: CALayer, @unchecked Sendable {
     ) {
         guard intervalSeconds > 0 else { return }
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
-            .foregroundColor: Theme.NSColor.textSecondary
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium),
+            .foregroundColor: Theme.NSColor.textTertiary
         ]
         let firstIndex = Int(floor(firstSecond / intervalSeconds))
         let lastIndex = Int(ceil(lastSecond / intervalSeconds))
