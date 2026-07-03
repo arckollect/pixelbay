@@ -78,10 +78,14 @@ extension Theme {
         static let trackOverlay     = "#60A5FA"   // light blue
         static let trackEffects     = "#A78BFA"   // violet
 
-        // Effect-keyframe roles — indigo/violet family (distinct from clip lanes)
-        static let effectZoomAuto   = "#818CF8"
-        static let effectZoomManual = "#A78BFA"
-        static let effectTalkingHead = "#6366F1"
+        // Effect-keyframe roles — VIVID purple→fuchsia (the timeline's most
+        // saturated hues on purpose: zoom keyframes are small badges that
+        // should read as the liveliest thing on the effects lane, not recede
+        // like the translucent clip bodies). Auto = purple, manual = fuchsia
+        // so the two are unmistakable; both distinct from the blue video lane.
+        static let effectZoomAuto   = "#A855F7"   // vivid purple (auto)
+        static let effectZoomManual = "#E24BE0"   // vivid fuchsia (manual / hotkey)
+        static let effectTalkingHead = "#8B5CF6"  // violet
 
         // Timeline chrome
         static let timelineRuler    = "#101010"   // == bgDeep so the ruler fuses with the timeline well

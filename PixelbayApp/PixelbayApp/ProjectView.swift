@@ -225,8 +225,36 @@ struct ProjectView: View {
         .onChange(of: document.revision) { _, _ in
             reconcileSelections()
         }
+        // On-open auto-zoom pass — the OpenScreen "on-load auto-suggest"
+        // behaviour. Keyed on the bundle so it evaluates once per opened
+        // project; the internal gate makes it a true one-shot.
+        .task(id: document.bundleURL) {
+            await autoGenerateZoomsIfNeeded()
+        }
         .onDisappear {
             player.dispose()
+        }
+    }
+
+    /// Runs the dwell-based auto-zoom generator once, the first time a
+    /// freshly-captured project opens. Gated so it never disturbs a curated
+    /// project: it only fires when the project has never been auto-zoomed
+    /// AND currently has no zoom keyframes at all. The generation command
+    /// stamps `autoZoomGenerated`, so undoing the zooms won't bring them back
+    /// on reopen. Applied as one undoable edit + saved so the project opens
+    /// in a clean, already-zoomed state.
+    private func autoGenerateZoomsIfNeeded() async {
+        guard !document.project.autoZoomGenerated else { return }
+        let hasAnyZoom = document.project.effects.contains { $0.kind == .zoom }
+        guard !hasAnyZoom else { return }
+        let generator = AutoZoomGenerator(project: document.project, bundleURL: document.bundleURL)
+        guard generator.canGenerate else { return }
+        let result = await generator.buildPausesCommand()
+        guard let command = result.command else { return }
+        await document.apply(command)
+        await document.save()
+        if let first = result.firstZoomTime {
+            player.seek(to: CMTime(seconds: first, preferredTimescale: 600))
         }
     }
 

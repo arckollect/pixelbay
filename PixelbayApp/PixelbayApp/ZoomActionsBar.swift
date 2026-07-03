@@ -167,123 +167,43 @@ struct ZoomActionsBar: View {
 
     // MARK: - Generate auto-zoom
 
-    /// A `.display` MediaAsset paired with the screen clip(s) that reference
-    /// it AND its on-disk clicks sidecar. Iterating over the list lets us
-    /// aggregate clicks across every scene that recorded with click logging on.
-    private struct AutoZoomPair {
-        let asset: MediaAsset
-        let clips: [Clip]
-        let sidecarURL: URL
+    /// All sidecar-aggregation + generation logic lives in the shared
+    /// `AutoZoomGenerator` (also used by ProjectView's on-open auto pass);
+    /// this view just drives it and renders status.
+    private var generator: AutoZoomGenerator {
+        AutoZoomGenerator(project: project, bundleURL: bundleURL)
     }
 
-    /// Returns every screen recording in this project that has BOTH a
-    /// referencing clip AND a sidecar file on disk. Drives `canGenerate`
-    /// and the multi-asset generate paths.
-    private var availableAutoZoomPairs: [AutoZoomPair] {
-        let screenAssetsByID: [MediaAssetID: MediaAsset] = Dictionary(
-            project.assets
-                .filter { $0.kind == .display }
-                .map { ($0.id, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        var clipsByAsset: [MediaAssetID: [Clip]] = [:]
-        for track in project.tracks where track.kind == .screen {
-            for clip in track.clips where screenAssetsByID[clip.assetID] != nil {
-                clipsByAsset[clip.assetID, default: []].append(clip)
-            }
-        }
-        var pairs: [AutoZoomPair] = []
-        for (id, clips) in clipsByAsset {
-            guard let asset = screenAssetsByID[id] else { continue }
-            guard let url = AutoZoomService.clicksSidecarURL(
-                forScreenAsset: asset,
-                in: bundleURL
-            ) else { continue }
-            guard FileManager.default.fileExists(atPath: url.path) else { continue }
-            pairs.append(AutoZoomPair(asset: asset, clips: clips, sidecarURL: url))
-        }
-        return pairs
-    }
-
-    private var canGenerate: Bool { !availableAutoZoomPairs.isEmpty }
-
-    private var disabledReason: String? {
-        let hasScreenAsset = project.assets.contains(where: { $0.kind == .display })
-        if !hasScreenAsset { return "No screen recording in this project." }
-        let hasScreenClip = project.tracks
-            .filter { $0.kind == .screen }
-            .contains(where: { !$0.clips.isEmpty })
-        if !hasScreenClip { return "Screen recording is not on the timeline." }
-        if availableAutoZoomPairs.isEmpty {
-            return "No clicks sidecar found — record with click logging enabled."
-        }
-        return nil
-    }
+    private var canGenerate: Bool { generator.canGenerate }
+    private var disabledReason: String? { generator.disabledReason }
 
     private func generateAutoZoomFromPauses() async {
-        guard !availableAutoZoomPairs.isEmpty else { return }
+        guard canGenerate else { return }
         isGeneratingPauses = true
         lastError = nil
         lastSuccess = nil
         defer { isGeneratingPauses = false }
 
-        let aggregated = await aggregateAcrossPairs { sidecar, naturalSize -> ([AutoZoomClick], [MouseTrajectorySample]) in
-            (
-                [],
-                AutoZoomService.mouseTrajectory(from: sidecar, screenPixelSize: naturalSize)
-            )
-        }
-
-        if aggregated.trajectory.isEmpty {
-            lastError = aggregated.firstError
-                ?? "No cursor telemetry across this project's screen recordings."
+        let result = await generator.buildPausesCommand()
+        guard let command = result.command else {
+            lastError = result.error ?? "No cursor pauses long enough for auto-zoom."
             return
         }
-
-        let manualZoomRanges = project.effects
-            .filter { $0.kind == .zoom && $0.origin == .manualHotkey }
-            .map(\.timelineRange)
-        let duration = projectDuration ?? aggregated.trajectory.last?.timelineTime ?? 0
-        let defaultDuration = EffectKeyframe.defaultZoomEaseIn.seconds
-            + 1.8
-            + EffectKeyframe.defaultZoomEaseOut.seconds
-        let telemetry = aggregated.trajectory.map {
-            CursorTelemetryPoint(
-                timeMs: $0.timelineTime * 1000.0,
-                cx: $0.centerX,
-                cy: $0.centerY
-            )
-        }
-        let autoClicks = AutoZoomService.dwellAutoZoomClicks(
-            cursorTelemetry: telemetry,
-            totalDuration: duration,
-            existingRegions: manualZoomRanges,
-            defaultDuration: defaultDuration
-        )
-
-        if autoClicks.isEmpty {
-            lastError = "No cursor pauses long enough for auto-zoom."
-            return
-        }
-        onApply(GenerateAutoZoomFromClicksCommand(
-            clicks: autoClicks,
-            timelineDuration: duration,
-            mouseTrajectory: aggregated.trajectory.isEmpty ? nil : aggregated.trajectory
-        ))
-        lastSuccess = "Generated \(autoClicks.count) zoom keyframe\(autoClicks.count == 1 ? "" : "s")."
-        if let first = autoClicks.first {
-            onSeek(.seconds(first.timelineTime))
+        onApply(command)
+        lastSuccess = "Generated \(result.count) zoom keyframe\(result.count == 1 ? "" : "s")."
+        if let first = result.firstZoomTime {
+            onSeek(.seconds(first))
         }
     }
 
     private func generateZoomsFromGestures() async {
-        guard !availableAutoZoomPairs.isEmpty else { return }
+        guard generator.canGenerate else { return }
         isGeneratingGestures = true
         lastError = nil
         lastSuccess = nil
         defer { isGeneratingGestures = false }
 
-        let aggregated = await aggregateAcrossPairs { sidecar, naturalSize in
+        let aggregated = await generator.aggregate { sidecar, naturalSize in
             (
                 AutoZoomService.zoomMarks(from: sidecar, screenPixelSize: naturalSize),
                 AutoZoomService.mouseTrajectory(from: sidecar, screenPixelSize: naturalSize)
@@ -320,8 +240,8 @@ struct ZoomActionsBar: View {
         var anchorX = 0.5
         var anchorY = 0.5
         var didAnchorToCursor = false
-        if !availableAutoZoomPairs.isEmpty {
-            let aggregated = await aggregateAcrossPairs { sidecar, naturalSize -> ([AutoZoomClick], [MouseTrajectorySample]) in
+        if generator.canGenerate {
+            let aggregated = await generator.aggregate { sidecar, naturalSize -> ([AutoZoomClick], [MouseTrajectorySample]) in
                 ([], AutoZoomService.mouseTrajectory(from: sidecar, screenPixelSize: naturalSize))
             }
             if let sample = nearestTrajectorySample(in: aggregated.trajectory, at: playheadTime) {
@@ -331,7 +251,7 @@ struct ZoomActionsBar: View {
             }
         }
 
-        let timelineDuration = projectDuration
+        let timelineDuration = generator.projectDuration
         let command = AddZoomAtPlayheadCommand(
             timelineTime: playheadTime,
             centerX: anchorX,
@@ -358,14 +278,6 @@ struct ZoomActionsBar: View {
         onSeek(.seconds(max(0, playheadTime)))
     }
 
-    /// Total length of the project's timeline — `max(clip.timelineRange.end)`
-    /// across all clips. Used as the upper bound for inserting a zoom at the
-    /// playhead. Nil when the project is empty.
-    private var projectDuration: Double? {
-        let ends = project.tracks.flatMap(\.clips).map { $0.timelineRange.end.seconds }
-        return ends.max()
-    }
-
     /// Nearest trajectory sample to `time`. Linear scan — only runs on a user
     /// click (a handful of thousand samples max).
     private func nearestTrajectorySample(
@@ -383,114 +295,5 @@ struct ZoomActionsBar: View {
             }
         }
         return best
-    }
-
-    /// Walk every `AutoZoomPair`, run `extract` on each loaded sidecar, shift
-    /// the per-asset results onto the project timeline using each referencing
-    /// clip's source/timeline ranges, then aggregate. The trajectory is
-    /// returned sorted so EffectEvaluator's linear bracket scan picks the
-    /// right neighbours across scene boundaries.
-    private func aggregateAcrossPairs(
-        _ extract: (ClicksSidecar, CGSize) -> ([AutoZoomClick], [MouseTrajectorySample])
-    ) async -> AggregatedSidecarData {
-        var points: [AutoZoomClick] = []
-        var trajectory: [MouseTrajectorySample] = []
-        var firstError: String?
-        for pair in availableAutoZoomPairs {
-            do {
-                let (sidecar, naturalSize) = try await loadSidecarAndSize(
-                    asset: pair.asset,
-                    sidecarURL: pair.sidecarURL
-                )
-                let (perAssetPoints, perAssetTrajectory) = extract(sidecar, naturalSize)
-                for clip in pair.clips {
-                    points.append(contentsOf: shiftClicks(perAssetPoints, into: clip))
-                    trajectory.append(contentsOf: shiftTrajectory(perAssetTrajectory, into: clip))
-                }
-            } catch {
-                if firstError == nil {
-                    firstError = (error as? LocalizedError)?.errorDescription
-                        ?? error.localizedDescription
-                }
-                continue
-            }
-        }
-        trajectory.sort { $0.timelineTime < $1.timelineTime }
-        return AggregatedSidecarData(
-            points: points,
-            trajectory: trajectory,
-            firstError: firstError
-        )
-    }
-
-    private struct AggregatedSidecarData {
-        let points: [AutoZoomClick]
-        let trajectory: [MouseTrajectorySample]
-        let firstError: String?
-    }
-
-    /// Remap an `AutoZoomClick`'s recording-relative `timelineTime` onto the
-    /// project timeline by mapping progress through the clip's `sourceRange`
-    /// into its actual `timelineRange` (including speed changes). Lower-bound
-    /// filter keeps clicks before a user-trimmed in-point out; no upper-bound
-    /// filter (preserves single-shot parity with main — see the original
-    /// EffectsInspector note).
-    private func shiftClicks(_ clicks: [AutoZoomClick], into clip: Clip) -> [AutoZoomClick] {
-        return clicks.compactMap { click in
-            guard let timelineTime = timelineTime(forSourceTime: click.timelineTime, in: clip) else {
-                return nil
-            }
-            return AutoZoomClick(
-                timelineTime: timelineTime,
-                centerX: click.centerX,
-                centerY: click.centerY,
-                source: click.source
-            )
-        }
-    }
-
-    private func shiftTrajectory(
-        _ samples: [MouseTrajectorySample],
-        into clip: Clip
-    ) -> [MouseTrajectorySample] {
-        return samples.compactMap { sample in
-            guard let timelineTime = timelineTime(forSourceTime: sample.timelineTime, in: clip) else {
-                return nil
-            }
-            return MouseTrajectorySample(
-                timelineTime: timelineTime,
-                centerX: sample.centerX,
-                centerY: sample.centerY
-            )
-        }
-    }
-
-    private func timelineTime(forSourceTime sourceTime: Double, in clip: Clip) -> Double? {
-        let sourceStart = clip.sourceRange.start.seconds
-        guard sourceTime >= sourceStart else { return nil }
-        let sourceDuration = clip.sourceRange.duration.seconds
-        let timelineDuration = clip.timelineRange.duration.seconds
-        guard sourceDuration > 0, timelineDuration > 0 else { return nil }
-        let sourceProgress = (sourceTime - sourceStart) / sourceDuration
-        return clip.timelineRange.start.seconds + sourceProgress * timelineDuration
-    }
-
-    private func loadSidecarAndSize(
-        asset: MediaAsset,
-        sidecarURL: URL
-    ) async throws -> (ClicksSidecar, CGSize) {
-        let sidecar = try ClicksSidecarStore.read(from: sidecarURL)
-        let assetURL = try ProjectBundle(url: bundleURL).mediaURL(for: asset)
-        let avAsset = AVURLAsset(url: assetURL)
-        let videoTracks = try await avAsset.loadTracks(withMediaType: .video)
-        guard let firstTrack = videoTracks.first else {
-            throw NSError(
-                domain: "ZoomActionsBar",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Screen recording has no video track."]
-            )
-        }
-        let naturalSize = try await firstTrack.load(.naturalSize)
-        return (sidecar, naturalSize)
     }
 }

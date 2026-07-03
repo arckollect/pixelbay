@@ -725,6 +725,12 @@ public struct GenerateAutoZoomFromClicksCommand: EditCommand {
 
     @discardableResult
     public func apply(to project: inout Project) throws -> any EditCommand {
+        // Stamp the one-time auto-zoom marker so the on-open auto pass never
+        // re-runs for this project. Deliberately NOT restored by the inverse:
+        // if the user undoes the generated zooms because they don't want them,
+        // reopening the project must not silently regenerate them.
+        project.autoZoomGenerated = true
+
         // Replace-auto-on-regenerate: every existing `.auto` zoom keyframe
         // is removed before generating the new set, so clicking "Generate
         // Auto-Zoom" twice is idempotent. Manual `.manualHotkey` keyframes

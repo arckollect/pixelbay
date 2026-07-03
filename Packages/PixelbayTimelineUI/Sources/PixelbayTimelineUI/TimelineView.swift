@@ -665,26 +665,34 @@ public final class TimelineNSView: NSView {
         for keyframe in effectsLane.keyframes {
             let isSelected = keyframe.id == selectedEffectKeyframeID
             let role = baseColorForEffectKeyframe(keyframe)
-            let kfLayer = CALayer()
+            // Glossy vertical gradient (a lighter top edge → the full role
+            // colour) at near-full opacity, plus an always-on soft glow that
+            // intensifies on selection. Small badges, so they can afford to
+            // be the boldest, most saturated element on the timeline.
+            let topColor = role.blended(withFraction: 0.30, of: .white) ?? role
+            let kfLayer = CAGradientLayer()
             kfLayer.frame = keyframe.frame
             kfLayer.cornerRadius = 6
+            kfLayer.startPoint = CGPoint(x: 0.5, y: 0)
+            kfLayer.endPoint = CGPoint(x: 0.5, y: 1)
+            kfLayer.colors = [
+                topColor.withAlphaComponent(isSelected ? 1.0 : 0.98).cgColor,
+                role.withAlphaComponent(isSelected ? 1.0 : 0.90).cgColor
+            ]
             kfLayer.borderWidth = isSelected ? 2 : 1
             kfLayer.borderColor = isSelected
-                ? Theme.NSColor.textPrimary.withAlphaComponent(0.92).cgColor
-                : role.withAlphaComponent(0.42).cgColor
-            kfLayer.backgroundColor = role.withAlphaComponent(isSelected ? 0.42 : 0.24).cgColor
-            if isSelected {
-                kfLayer.shadowColor = role.cgColor
-                kfLayer.shadowOpacity = 0.5
-                kfLayer.shadowRadius = 8
-                kfLayer.shadowOffset = .zero
-                kfLayer.shadowPath = CGPath(
-                    roundedRect: CGRect(origin: .zero, size: keyframe.frame.size),
-                    cornerWidth: 6,
-                    cornerHeight: 6,
-                    transform: nil
-                )
-            }
+                ? Theme.NSColor.textPrimary.withAlphaComponent(0.95).cgColor
+                : topColor.withAlphaComponent(0.95).cgColor
+            kfLayer.shadowColor = role.cgColor
+            kfLayer.shadowOpacity = isSelected ? 0.75 : 0.4
+            kfLayer.shadowRadius = isSelected ? 9 : 5
+            kfLayer.shadowOffset = .zero
+            kfLayer.shadowPath = CGPath(
+                roundedRect: CGRect(origin: .zero, size: keyframe.frame.size),
+                cornerWidth: 6,
+                cornerHeight: 6,
+                transform: nil
+            )
             layer.addSublayer(kfLayer)
 
             // Small ⌘ glyph in the top-left for manual-hotkey keyframes so
