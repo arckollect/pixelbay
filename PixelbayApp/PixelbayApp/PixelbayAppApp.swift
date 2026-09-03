@@ -135,6 +135,9 @@ struct PixelbayAppApp: App {
         }
         .defaultSize(width: 1200, height: 800)
         .windowResizability(.contentSize)
+        // Same native unified titlebar toolbar as the editor: Add Scene /
+        // Sources / More render in the titlebar so the body is just the grid.
+        .windowToolbarStyle(.unified(showsTitle: true))
     }
 
     // SwiftUI's onChange needs Equatable. RecordingService.Phase is Equatable

@@ -4,3 +4,15 @@
 // DEVELOPMENT_TEAM from this file at build time so the signing identity
 // never lands in source control.
 DEVELOPMENT_TEAM = YOUR_TEAM_ID_HERE
+
+// Signing style lives here (not in the pbxproj) so a machine without a team
+// can point CODE_SIGN_IDENTITY at a self-signed local cert instead — see
+// HANDOFF §4 (stable identity keeps the Screen Recording grant across builds).
+CODE_SIGN_STYLE = Automatic
+
+// Hardened Runtime is a notarization requirement, so it's on by default. A
+// self-signed local cert has no Team ID, and Hardened Runtime's library
+// validation then refuses the app's own debug dylib / Sparkle ("different
+// Team IDs") — set this to NO in Local.xcconfig when using such a cert.
+// Scripts/release-v0.1.sh forces YES on the archive regardless.
+ENABLE_HARDENED_RUNTIME = YES

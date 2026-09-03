@@ -7,12 +7,15 @@ import SwiftUI
 
 private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "ScenesWindowView")
 
-// Phase 5 — top-level view inside the Scene Recording window. Three parts:
-//   - Top: defaults pickers (display / camera / mic / system-audio /
-//     log-clicks). Every newly added scene inherits these.
-//   - Middle: scrolling list of scene rows. Drag-to-reorder via .onMove.
-//   - Bottom: Add Scene (left) + Merge (right, disabled until at least one
-//     scene has a take).
+// Phase 5 — top-level view inside the Scene Recording window.
+//
+//   - Titlebar: native unified toolbar (same chrome as the editor). The title
+//     is the window's, the subtitle is a live "2 of 5 recorded · 1:24"
+//     summary, and the actions — Add Scene / Sources / ⋯ — live as toolbar
+//     items so the content area is just the scenes.
+//   - Body: (History, append mode only) + the scene grid.
+//   - Bottom bar: a one-line hint that tracks the session's state on the
+//     left, the Merge CTA on the right.
 //
 // The model is created async in `.task` because opening the persistent
 // .pixelbay bundle on disk takes a beat; until it lands we render a
@@ -29,6 +32,10 @@ struct ScenesWindowView: View {
     @State private var mergeConfirmationPresented: Bool = false
     @State private var mergeSkippedSceneCount: Int = 0
     @State private var showSourcesPopover: Bool = false
+    /// Flips once after the first grid appears so the cards can stagger in.
+    /// Stays true for the life of the (singleton) window, so reopens and
+    /// reloads don't replay the entrance.
+    @State private var gridDidAppear: Bool = false
     @State private var permissions = PermissionViewModel(
         coordinator: PermissionCoordinator(probe: .live)
     )
@@ -37,6 +44,16 @@ struct ScenesWindowView: View {
         case loading
         case ready(ScenesSessionModel)
         case failed(String)
+
+        /// Coarse key for the state crossfade — `ScenesSessionModel` isn't
+        /// Equatable, and only the case change should animate anyway.
+        var transitionKey: Int {
+            switch self {
+            case .loading: return 0
+            case .ready: return 1
+            case .failed: return 2
+            }
+        }
     }
 
     var body: some View {
@@ -45,13 +62,17 @@ struct ScenesWindowView: View {
             case .loading:
                 loadingView
                     .frame(minWidth: 760, minHeight: 640)
+                    .transition(.opacity)
             case .failed(let message):
                 failureView(message)
                     .frame(minWidth: 760, minHeight: 640)
+                    .transition(.opacity)
             case .ready(let model):
                 readyView(model: model)
+                    .transition(.opacity)
             }
         }
+        .animation(.easeOut(duration: 0.18), value: modelState.transitionKey)
         .task { await reloadSession(showLoading: true) }
         .onReceive(NotificationCenter.default.publisher(for: .pixelbayScenesWindowOpenRequested)) { _ in
             // The Scenes window is a singleton whose @State (this view + model)
@@ -138,7 +159,6 @@ struct ScenesWindowView: View {
 
     private func fullBody(model: ScenesSessionModel) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            header
             historySection(model: model)
             sceneGrid(model: model)
             bottomBar(model: model)
@@ -146,6 +166,8 @@ struct ScenesWindowView: View {
         .frame(minWidth: 760, minHeight: 640)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.Color.bgBase)
+        .navigationSubtitle(subtitle(for: model))
+        .toolbar { toolbarContent(model: model) }
         .alert(
             "Merge \(mergedSceneCount(in: model)) of \(model.session.scenes.count) scenes?",
             isPresented: $mergeConfirmationPresented
@@ -179,6 +201,58 @@ struct ScenesWindowView: View {
         }
     }
 
+    // MARK: - Toolbar
+
+    @ToolbarContentBuilder
+    private func toolbarContent(model: ScenesSessionModel) -> some ToolbarContent {
+        ToolbarItemGroup {
+            Button {
+                model.addScene()
+            } label: {
+                Label("Add Scene", systemImage: "plus")
+            }
+            .help("Add another scene")
+
+            Button {
+                showSourcesPopover = true
+            } label: {
+                Label("Sources", systemImage: "slider.horizontal.3")
+            }
+            .help("Default display, camera and microphone for every scene")
+            .popover(isPresented: $showSourcesPopover, arrowEdge: .bottom) {
+                DefaultsBlock(
+                    model: model,
+                    catalog: catalog,
+                    permissions: permissions,
+                    onApplied: { showSourcesPopover = false }
+                )
+                .tint(Theme.Color.accent)
+            }
+
+            Menu {
+                Button("Clean Up Unused Takes") {
+                    Task { await model.cleanupUnusedTakes() }
+                }
+                .disabled(!hasDiscardedTakes(model: model))
+            } label: {
+                Label("More", systemImage: "ellipsis.circle")
+            }
+            .help("More")
+        }
+    }
+
+    /// Titlebar subtitle: the one-glance state of the session.
+    private func subtitle(for model: ScenesSessionModel) -> String {
+        let total = model.session.scenes.count
+        let recorded = mergedSceneCount(in: model)
+        guard recorded > 0 else {
+            return "\(total) scene\(total == 1 ? "" : "s") · nothing recorded yet"
+        }
+        return "\(recorded) of \(total) recorded · \(durationLabel(totalDuration(in: model)))"
+    }
+
+    // MARK: - History (append mode)
+
     @ViewBuilder
     private func historySection(model: ScenesSessionModel) -> some View {
         // Only present in append mode (editor opened the scenes window with
@@ -205,62 +279,31 @@ struct ScenesWindowView: View {
                 .scrollContentBackground(.hidden)
                 .frame(maxHeight: 240)
             } label: {
-                HStack(spacing: Theme.Spacing.xs) {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .foregroundStyle(Theme.Color.textSecondary)
-                    Text("History (\(model.historyRows.count) merged \(model.historyRows.count == 1 ? "scene" : "scenes"))")
-                        .font(Theme.Font.cardTitle)
-                        .foregroundStyle(Theme.Color.textSecondary)
+                PBSectionHeader("Already in project", style: .caps) {
+                    Text("\(model.historyRows.count)")
+                        .font(Theme.Font.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.Color.textTertiary)
                 }
             }
-            .tint(Theme.Color.accent)
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
+            .tint(Theme.Color.textSecondary)
+            .padding(.horizontal, Theme.Spacing.xl)
+            .padding(.top, Theme.Spacing.lg)
         }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            HStack(spacing: Theme.Spacing.md) {
-                appMark
-                Text("Scene Recording")
-                    .font(Theme.Font.displayTitleHeavy)
-                    .foregroundStyle(Theme.Color.textPrimary)
-            }
-            Text("Record one scene at a time. Re-record to add another take. Merge stitches the active takes into a normal Pixelbay project.")
-                .font(.system(size: 14))
-                .foregroundStyle(Theme.Color.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, Theme.Spacing.xl)
-        .padding(.top, Theme.Spacing.xl)
-        .padding(.bottom, Theme.Spacing.md)
-        .background(Theme.Color.bgDeep)
-    }
-
-    // The app icon doubles as the brand mark in the header (no dedicated logo
-    // imageset ships today). Rounded + hairline border to match the Figma chip.
-    private var appMark: some View {
-        Image(nsImage: NSApp.applicationIconImage)
-            .resizable()
-            .frame(width: 40, height: 40)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                    .stroke(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
-            )
-    }
+    // MARK: - Grid
 
     private func sceneGrid(model: ScenesSessionModel) -> some View {
         // 3-up gallery that reflows to 2 / 1 columns as the window narrows.
-        // Drag a tile onto another to reorder (replaces the old List.onMove).
+        // Reordering (drag a card onto another) lives inside SceneTileView so
+        // the target card can show its own drop ring.
         GeometryReader { geo in
             let columns = columnCount(for: geo.size.width)
             let layout = Array(
-                // Top-align cells: real tiles now carry an action bar beneath
-                // them, so they're taller than the AddSceneTile — aligning to
-                // top keeps every tile's top edge on the same line.
+                // Top-align cells: real cards carry a footer, so they're
+                // taller than the AddSceneTile — aligning to top keeps every
+                // card's top edge on the same line.
                 repeating: GridItem(.flexible(), spacing: Theme.Spacing.xl, alignment: .top),
                 count: columns
             )
@@ -268,28 +311,20 @@ struct ScenesWindowView: View {
                 LazyVGrid(columns: layout, spacing: Theme.Spacing.xl) {
                     ForEach(model.session.scenes.indices, id: \.self) { idx in
                         SceneTileView(model: model, sceneIndex: idx, catalog: catalog)
-                            .draggable(String(idx)) {
-                                // Lightweight drag preview.
-                                RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
-                                    .fill(Theme.Color.bgElevated)
-                                    .frame(width: 160, height: 90)
-                            }
-                            .dropDestination(for: String.self) { items, _ in
-                                guard let first = items.first, let from = Int(first), from != idx
-                                else { return false }
-                                model.moveScene(from: from, to: from < idx ? idx + 1 : idx)
-                                return true
-                            }
+                            .staggeredEntrance(index: idx, appeared: gridDidAppear)
                     }
-                    // Trailing "ghost" tile — always the last cell, invites
-                    // adding another scene.
+                    // Trailing "ghost" cell — always last, invites adding
+                    // another scene.
                     AddSceneTile { model.addScene() }
+                        .staggeredEntrance(index: model.session.scenes.count, appeared: gridDidAppear)
                 }
-                // Even inset all round — 16:9 tiles are shorter than the old
-                // 3:2 ones, so match the vertical padding to the horizontal
-                // (was lg) to keep balanced gutters around the grid.
-                .padding(.horizontal, Theme.Spacing.xl)
-                .padding(.vertical, Theme.Spacing.xl)
+                .padding(Theme.Spacing.xl)
+            }
+            .onAppear {
+                // One frame later so the initial layout lands at opacity 0
+                // and the rise is actually visible.
+                guard !gridDidAppear else { return }
+                DispatchQueue.main.async { gridDidAppear = true }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -303,46 +338,15 @@ struct ScenesWindowView: View {
         return 1
     }
 
+    // MARK: - Bottom bar
+
     private func bottomBar(model: ScenesSessionModel) -> some View {
         HStack(spacing: Theme.Spacing.md) {
-            Button {
-                model.addScene()
-            } label: {
-                Label("Add Scene", systemImage: "plus")
-            }
-            .buttonStyle(.pbSecondary)
-
-            Button {
-                showSourcesPopover = true
-            } label: {
-                Label("Sources", systemImage: "slider.horizontal.3")
-            }
-            .buttonStyle(.pbSecondary)
-            .popover(isPresented: $showSourcesPopover, arrowEdge: .bottom) {
-                DefaultsBlock(
-                    model: model,
-                    catalog: catalog,
-                    permissions: permissions,
-                    onApplied: { showSourcesPopover = false }
-                )
-                .tint(Theme.Color.accent)
-                .padding(Theme.Spacing.lg)
-                .frame(width: 320)
-            }
-
-            Menu {
-                Button("Clean Up Unused Takes") {
-                    Task { await model.cleanupUnusedTakes() }
-                }
-                .disabled(!hasDiscardedTakes(model: model))
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .controlSize(.large)
-            .fixedSize()
-            .tint(Theme.Color.accent)
+            Text(hint(for: model))
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Color.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
 
             Spacer()
 
@@ -350,13 +354,43 @@ struct ScenesWindowView: View {
                 mergeSkippedSceneCount = model.session.scenes.count - mergedSceneCount(in: model)
                 mergeConfirmationPresented = true
             } label: {
-                Label("Merge", systemImage: "rectangle.stack.fill")
+                Label(mergeTitle(for: model), systemImage: "rectangle.stack.fill")
             }
             .buttonStyle(.pbPrimary)
             .disabled(!hasAnyRecordedTake(model: model))
+            .keyboardShortcut(.return, modifiers: .command)
+            .help(model.appendTarget != nil
+                  ? "Append the recorded scenes to the open project (⌘↩)"
+                  : "Stitch the recorded scenes into a new project (⌘↩)")
         }
-        .padding(20)
+        .padding(.horizontal, Theme.Spacing.xl)
+        .padding(.vertical, Theme.Spacing.lg)
         .background(Theme.Color.bgDeep)
+        .overlay(alignment: .top) { PBDivider() }
+    }
+
+    /// Bottom-left copy that changes with the session so the window teaches
+    /// itself: how to start, what merge does, what's left.
+    private func hint(for model: ScenesSessionModel) -> String {
+        let total = model.session.scenes.count
+        let recorded = mergedSceneCount(in: model)
+        if recorded == 0 {
+            return "Click a scene to record it. Reshoot for another take — Merge stitches the takes into one project."
+        }
+        if recorded == total {
+            return "Every scene is recorded. Merge when you're happy with the takes."
+        }
+        let remaining = total - recorded
+        return "\(remaining) scene\(remaining == 1 ? "" : "s") still empty — they're skipped when you merge."
+    }
+
+    private func mergeTitle(for model: ScenesSessionModel) -> String {
+        let recorded = mergedSceneCount(in: model)
+        let noun = "Scene\(recorded == 1 ? "" : "s")"
+        if model.appendTarget != nil {
+            return recorded > 0 ? "Add \(recorded) \(noun) to Project" : "Add to Project"
+        }
+        return recorded > 0 ? "Merge \(recorded) \(noun)" : "Merge"
     }
 
     private func hasDiscardedTakes(model: ScenesSessionModel) -> Bool {
@@ -469,6 +503,33 @@ struct ScenesWindowView: View {
     private func mergedSceneCount(in model: ScenesSessionModel) -> Int {
         model.session.scenes.filter { $0.activeTake != nil }.count
     }
+
+    private func totalDuration(in model: ScenesSessionModel) -> Double {
+        model.session.scenes.reduce(0) { $0 + ($1.activeTake?.durationSeconds ?? 0) }
+    }
+
+    private func durationLabel(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+// MARK: - Staggered entrance
+
+private extension View {
+    /// First-appearance rise for grid cells: each card fades in and lifts
+    /// 6pt, 35 ms after the one before it. Decorative and one-shot — once
+    /// `appeared` is true the modifier is inert, so reloads and reorders never
+    /// replay it.
+    func staggeredEntrance(index: Int, appeared: Bool) -> some View {
+        self
+            .opacity(appeared ? 1 : 0)
+            .offset(y: appeared ? 0 : 6)
+            .animation(
+                .easeOut(duration: 0.28).delay(Double(min(index, 11)) * 0.035),
+                value: appeared
+            )
+    }
 }
 
 // MARK: - Defaults block
@@ -501,19 +562,77 @@ private struct DefaultsBlock: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            Text("Scene sources")
-                .font(Theme.Font.cardTitle)
-                .foregroundStyle(Theme.Color.textSecondary)
-            displayPicker
-            cameraPicker
-            microphonePicker
-            Toggle("Capture system audio", isOn: $draft.includeSystemAudio)
-            clickLogToggle
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Default Sources")
+                    .font(Theme.Font.sectionTitle)
+                    .foregroundStyle(Theme.Color.textPrimary)
+                Text("Every scene records with these unless it has its own.")
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+
+            VStack(spacing: Theme.Spacing.sm) {
+                sourceRow("Display", symbol: "display") { displayPicker }
+                sourceRow("Camera", symbol: "web.camera") { cameraPicker }
+                sourceRow("Microphone", symbol: "mic") { microphonePicker }
+            }
+
+            VStack(spacing: Theme.Spacing.sm) {
+                toggleRow(
+                    "System audio",
+                    detail: "Capture what the Mac is playing.",
+                    isOn: $draft.includeSystemAudio
+                )
+                clickLogToggle
+            }
+
             PBDivider()
             applyButtons
         }
+        .padding(Theme.Spacing.lg)
+        .frame(width: 340)
         .onAppear { seedDraftIfMissing() }
+    }
+
+    // MARK: Rows
+
+    /// Label + picker on one inset row. The picker drops its own label so the
+    /// row's icon+title is the only caption.
+    private func sourceRow<Content: View>(
+        _ title: String,
+        symbol: String,
+        @ViewBuilder picker: () -> Content
+    ) -> some View {
+        HStack(spacing: Theme.Spacing.md) {
+            Label(title, systemImage: symbol)
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: 104, alignment: .leading)
+            picker()
+                .labelsHidden()
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .pbInsetRow()
+    }
+
+    private func toggleRow(_ title: String, detail: String, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: Theme.Spacing.md) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(Theme.Font.body)
+                    .foregroundStyle(Theme.Color.textPrimary)
+                Text(detail)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Toggle(title, isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+        }
+        .pbInsetRow()
     }
 
     private var applyButtons: some View {
@@ -554,6 +673,8 @@ private struct DefaultsBlock: View {
         }
     }
 
+    // MARK: Pickers
+
     private var displayPicker: some View {
         Picker("Display", selection: $draft.displayID) {
             if catalog.displays.isEmpty {
@@ -588,15 +709,14 @@ private struct DefaultsBlock: View {
 
     private var clickLogToggle: some View {
         let accessibilityGranted = permissions.statuses[.accessibility] == .granted
-        return VStack(alignment: .leading, spacing: 4) {
-            Toggle("Track cursor (zoom follow + auto-zoom)", isOn: $draft.logClicks)
-                .disabled(!accessibilityGranted)
-            if !accessibilityGranted {
-                Text("Requires Accessibility permission.")
-                    .font(Theme.Font.caption)
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-        }
+        return toggleRow(
+            "Track cursor",
+            detail: accessibilityGranted
+                ? "Powers zoom-follow and auto-zoom in the editor."
+                : "Requires Accessibility permission.",
+            isOn: $draft.logClicks
+        )
+        .disabled(!accessibilityGranted)
     }
 
     /// Fills nil source fields on the draft with sensible catalog picks so the
@@ -689,4 +809,3 @@ final class ScenesCloseInterceptor: NSObject, NSWindowDelegate {
         return false
     }
 }
-

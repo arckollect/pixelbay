@@ -122,7 +122,8 @@ ARCHIVE_CMD=(xcodebuild
   -destination "generic/platform=macOS"
   -archivePath "$ARCHIVE_PATH"
   archive
-  CODE_SIGN_STYLE=Manual)
+  CODE_SIGN_STYLE=Manual
+  ENABLE_HARDENED_RUNTIME=YES)   # notarization requires it; never inherit a local NO
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   ARCHIVE_CMD+=(CODE_SIGN_IDENTITY="$CODESIGN_IDENTITY")
 fi
