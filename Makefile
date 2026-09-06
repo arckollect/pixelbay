@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-DEVELOPER_DIR ?= /Applications/Xcode-26.4.0.app/Contents/Developer
+DEVELOPER_DIR ?= $(shell xcode-select -p)
 SWIFT_TEST := DEVELOPER_DIR="$(DEVELOPER_DIR)" xcrun swift test
 XCODEBUILD := DEVELOPER_DIR="$(DEVELOPER_DIR)" xcodebuild
 
@@ -9,7 +9,7 @@ PACKAGES := PixelbayCore PixelbayDesignSystem PixelbayPermissions PixelbayCaptur
 .PHONY: help test test-% build clean ci release-dryrun
 
 help:
-	@echo "Pixelbay developer Makefile (HANDOFF §6.8)"
+	@echo "Pixelbay developer Makefile"
 	@echo ""
 	@echo "  make test            Run all package test suites (10/10/29/12/8/9/7/51/42 = 178 tests)"
 	@echo "  make test-<package>  Run a single package's tests, e.g. make test-PixelbayCapture"
@@ -19,7 +19,7 @@ help:
 	@echo "  make clean           Remove .build/ caches in each package + DerivedData"
 	@echo ""
 	@echo "Override DEVELOPER_DIR if you use a different Xcode:"
-	@echo "  make test DEVELOPER_DIR=/Applications/Xcode-26.4.0.app/Contents/Developer"
+	@echo "  make test DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer"
 
 test:
 	@for pkg in $(PACKAGES); do \

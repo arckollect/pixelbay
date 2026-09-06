@@ -33,3 +33,9 @@ Package.resolved
 # Per-developer signing config (Team ID lives here, never in pbxproj).
 # Copy Local.xcconfig.template → Local.xcconfig and fill in your Team ID.
 Local.xcconfig
+
+# Local AI-assistant config
+.codex/
+
+# Keep the app workspace lockfile so builds are reproducible (package-level ones stay ignored)
+!Pixelbay.xcworkspace/xcshareddata/swiftpm/Package.resolved

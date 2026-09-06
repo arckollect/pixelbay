@@ -1,58 +1,76 @@
 # Pixelbay
 
-A native macOS screen recorder and non-linear video editor.
+A native macOS screen recorder and video editor, built with Swift, SwiftUI, and Metal.
 
-Status: **Phases 1–3 shipped; Phase 4 next.** See [`PLAN.md`](PLAN.md) for the full roadmap and [`HANDOFF.md`](HANDOFF.md) for the session-state cursor.
+Record your display, a window, or a region — with webcam, microphone, and system audio — then polish the result in a built-in editor with automatic zooms, a cursor-following camera, and styled backgrounds. Export to H.264 MP4.
+
+> **Status:** early and under active development. Expect rough edges and breaking changes to the project format.
+
+## Features
+
+- **Capture** — display, window, or area, driven by ScreenCaptureKit. Webcam, mic, and system audio recorded as separate tracks so they stay editable.
+- **Scenes** — record multiple takes into one project and compose them on the timeline.
+- **Auto-zoom** — zoom keyframes generated from clicks and cursor gestures, with a smoothed cursor-following camera and real temporal motion blur.
+- **Layouts & backgrounds** — picture-in-picture and split layouts, rounded corners and padding, mesh-gradient and image wallpapers, or a sample of your own desktop.
+- **Timeline editor** — trim, split, mute, and arrange video, audio, and effect rows; live preview rendered by the same Metal pipeline used for export.
+- **Export** — H.264 MP4 rendered through a single shared compositor, so what you preview is what you get.
 
 ## Requirements
 
-- macOS 14 Sonoma or later (target)
-- Xcode 15.4+ / Swift 6
-- Apple Silicon recommended (compositor performance)
+- macOS 14.6 or later
+- Xcode 26 (the `Makefile` uses whatever `xcode-select -p` points at; override with `DEVELOPER_DIR=…`)
+- Apple Silicon recommended for compositor performance
 
-## Layout
-
-```
-pixelbay/
-├── PixelbayApp/                 # Xcode app target (created in Xcode — see "Wiring Up the Workspace")
-│   └── PixelbayApp/
-│       ├── Info.plist           # Usage strings (NSCameraUsageDescription, etc.)
-│       └── Pixelbay.entitlements
-└── Packages/                    # Local SwiftPM library packages
-    ├── PixelbayCore/            # ProjectModel, schema, migrators, bundle I/O
-    ├── PixelbayCapture/         # SCStream + AVCaptureSession orchestration
-    ├── PixelbayRecording/       # AVAssetWriter pipeline
-    ├── PixelbayCompositor/      # Metal render graph (preview + export share this)
-    ├── PixelbayEditor/          # Pure model: timeline ops, non-destructive edits
-    ├── PixelbayPlayback/        # AVPlayer + AVMutableComposition glue
-    ├── PixelbayTimelineUI/      # SwiftUI chrome + AppKit-hosted timeline view
-    ├── PixelbayInputCapture/    # CGEventTap wrappers (clicks, keystrokes)
-    └── PixelbayPermissions/     # Permission state machine + onboarding
-```
-
-## Wiring Up the Workspace
-
-Pixelbay is structured as a set of local SwiftPM packages that an Xcode app target consumes. The `PixelbayApp.xcodeproj` is **not** committed yet — you create it on first checkout:
-
-1. Open Xcode → File → New → Project → macOS → App.
-2. Product Name: `PixelbayApp`. Interface: SwiftUI. Language: Swift. Save into `PixelbayApp/`.
-3. Replace the generated `Info.plist` and entitlements file with the ones already in `PixelbayApp/PixelbayApp/`.
-4. Set the deployment target to macOS 14.0.
-5. Disable "App Sandbox" capability (we ship direct-download, not Mac App Store).
-6. Enable the "Hardened Runtime" capability with `Camera` and `Audio Input` checked.
-7. File → Add Package Dependencies → Add Local → select each `Packages/<Name>` directory and add the corresponding library product to the app target.
-8. (Optional) File → New → Workspace, save as `Pixelbay.xcworkspace` at the repo root, drag in `PixelbayApp.xcodeproj` and the `Packages` folder.
-
-## Building and Testing the Core Module
-
-The core schema can be built and tested without Xcode:
+## Building
 
 ```bash
-cd Packages/PixelbayCore
-swift build
-swift test
+git clone https://github.com/arckollect/pixelbay.git
+cd pixelbay
+cp Local.xcconfig.template Local.xcconfig   # then set DEVELOPMENT_TEAM to your Apple Team ID
+open Pixelbay.xcworkspace                    # select the PixelbayApp scheme and run
 ```
 
-## Phase 1 Scope
+Signing config lives in `Local.xcconfig` (gitignored) so no Team ID is ever committed. See the template's comments if you want to build with a self-signed certificate instead.
 
-See [`PLAN.md`](PLAN.md). v0.1 records (display **or** window) + webcam + mic + system audio, plays back with a fixed default layout (cam bottom-right), and exports H.264 MP4 at one preset. No timeline editing yet.
+From the command line:
+
+```bash
+make build          # build the app via the workspace
+make test           # run every package's test suite
+make test-PixelbayCore
+```
+
+On first launch macOS will ask for **Screen Recording**, **Camera**, **Microphone**, and **Accessibility** (used for cursor tracking that powers auto-zoom). The app is not sandboxed — it ships as a notarized direct download, not through the Mac App Store.
+
+## Architecture
+
+The app target is thin; almost everything lives in local Swift packages under `Packages/`, each independently testable with `swift test`.
+
+```
+Packages/
+├── PixelbayCore/            Project model, schema + migrations, bundle I/O
+├── PixelbayCapture/         ScreenCaptureKit + AVCaptureSession orchestration
+├── PixelbayRecording/       AVAssetWriter pipeline
+├── PixelbayCompositor/      Metal render graph — preview and export share it
+├── PixelbayPlayback/        AVPlayer + AVMutableComposition glue
+├── PixelbayEditor/          Timeline operations, auto-zoom generation, undo
+├── PixelbayTimelineUI/      Timeline view (SwiftUI + AppKit)
+├── PixelbayInputCapture/    CGEventTap wrappers for cursor and click logging
+├── PixelbayPermissions/     Permission state machine + onboarding
+└── PixelbayDesignSystem/    Theme tokens, components, bundled wallpapers
+PixelbayApp/                 Xcode app target
+```
+
+Projects are saved as `.pixelbay` bundles: a `project.json` document plus the raw recorded media, so edits are non-destructive and the originals are never touched.
+
+## Contributing
+
+Issues and pull requests are welcome. Please run `make test` before opening a PR.
+
+## Acknowledgements
+
+The zoom-motion constants and auto-zoom heuristics are ported from [OpenScreen](https://github.com/siddharthvaddem/openscreen) (MIT). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details and dependency licenses.
+
+## License
+
+[MIT](LICENSE)

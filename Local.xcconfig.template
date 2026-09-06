@@ -6,8 +6,8 @@
 DEVELOPMENT_TEAM = YOUR_TEAM_ID_HERE
 
 // Signing style lives here (not in the pbxproj) so a machine without a team
-// can point CODE_SIGN_IDENTITY at a self-signed local cert instead — see
-// HANDOFF §4 (stable identity keeps the Screen Recording grant across builds).
+// can point CODE_SIGN_IDENTITY at a self-signed local cert instead
+// (a stable identity keeps the Screen Recording grant across builds).
 CODE_SIGN_STYLE = Automatic
 
 // Hardened Runtime is a notarization requirement, so it's on by default. A
