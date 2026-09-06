@@ -666,7 +666,7 @@ private struct MenuAnchorView: NSViewRepresentable {
 
 /// `NSMenuItem` that runs a closure when chosen, so menus can be built inline
 /// from the SwiftUI model without wiring a separate @objc target per item.
-private final class ClosureMenuItem: NSMenuItem {
+final class ClosureMenuItem: NSMenuItem {
     var onSelect: (() -> Void)?
     @objc func fire() { onSelect?() }
 }

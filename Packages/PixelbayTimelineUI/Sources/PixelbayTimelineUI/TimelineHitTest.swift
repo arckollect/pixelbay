@@ -36,6 +36,10 @@ public enum TimelineHit: Sendable, Equatable {
     /// Click landed in empty area of the effects lane. ⌥-click on this
     /// inserts a new keyframe at the click time via `AddEffectKeyframeCommand`.
     case emptyEffectsLane
+    /// Click landed on the timeline-tail "+" button (see
+    /// `TimelineLayout.appendButtonFrame`). The host offers to record
+    /// another video or add a video file at the tail.
+    case appendButton
     /// Click landed on a row's height-resize grab zone (the bottom edge
     /// of its header cell). Drag begins a per-row height resize;
     /// `currentHeight` is the row height at drag start.
@@ -52,9 +56,10 @@ public enum TimelineHitTest {
     public static let edgeZoneWidth: CGFloat = 6
 
     /// Returns what's at `point` (timeline-view coordinates) given a layout.
-    /// Order of precedence: ruler → row resize handle → track header →
-    /// clip edges → clip body → empty lane → effects-lane header → effect-
-    /// keyframe edges → effect-keyframe body → empty effects lane → nothing.
+    /// Order of precedence: ruler → row resize handle → tail "+" button →
+    /// track header → clip edges → clip body → empty lane → effects-lane
+    /// header → effect-keyframe edges → effect-keyframe body → empty
+    /// effects lane → nothing.
     public static func hit(at point: CGPoint, in layout: TimelineLayout) -> TimelineHit {
         // Ruler is the strip across the top.
         if point.y >= 0 && point.y < layout.rulerHeight {
@@ -67,6 +72,11 @@ public enum TimelineHitTest {
             if handle.hitFrame.contains(point) {
                 return .rowResizeHandle(rowID: handle.rowID, currentHeight: handle.currentHeight)
             }
+        }
+        // The tail "+" sits in the Video lane's empty area past the last
+        // clip — check it before the lane loop would swallow it as emptyLane.
+        if let button = layout.appendButtonFrame, button.contains(point) {
+            return .appendButton
         }
         // Each track contributes a header cell + a lane cell.
         for track in layout.tracks {

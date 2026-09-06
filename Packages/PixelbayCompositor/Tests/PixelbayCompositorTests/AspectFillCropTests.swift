@@ -66,3 +66,49 @@ final class AspectFillCropTests: XCTestCase {
         )
     }
 }
+
+// `LayoutCalculator.aspectFitRect` — the letterbox the render graph applies
+// to the screen layer so a clip whose shape differs from the layout's
+// screen rect (an imported video after a screen recording) is never
+// stretched.
+final class AspectFitRectTests: XCTestCase {
+
+    private let slot = LayerRect(origin: CGPoint(x: 100, y: 50), size: CGSize(width: 1600, height: 1000))  // 16:10
+
+    func test_matchingAspect_returnsSlotUnchanged() {
+        let fitted = LayoutCalculator.aspectFitRect(sourceSize: CGSize(width: 3200, height: 2000), in: slot)
+        XCTAssertEqual(fitted, slot)
+    }
+
+    func test_widerSource_letterboxes_fullWidthCentredVertically() {
+        // 16:9 imported video into the 16:10 slot → full width, 900 tall, 50pt bars.
+        let fitted = LayoutCalculator.aspectFitRect(sourceSize: CGSize(width: 1920, height: 1080), in: slot)
+        XCTAssertEqual(fitted.size.width, 1600, accuracy: 0.001)
+        XCTAssertEqual(fitted.size.height, 900, accuracy: 0.001)
+        XCTAssertEqual(fitted.origin.x, 100, accuracy: 0.001)
+        XCTAssertEqual(fitted.origin.y, 100, accuracy: 0.001, "50 + (1000 - 900) / 2")
+        XCTAssertEqual(fitted.midX, slot.midX, accuracy: 0.001)
+        XCTAssertEqual(fitted.midY, slot.midY, accuracy: 0.001)
+    }
+
+    func test_tallerSource_pillarboxes_fullHeightCentredHorizontally() {
+        // Portrait phone clip into the 16:10 slot → full height, narrow, centred.
+        let fitted = LayoutCalculator.aspectFitRect(sourceSize: CGSize(width: 1080, height: 1920), in: slot)
+        XCTAssertEqual(fitted.size.height, 1000, accuracy: 0.001)
+        XCTAssertEqual(fitted.size.width, 562.5, accuracy: 0.001)
+        XCTAssertEqual(fitted.midX, slot.midX, accuracy: 0.001)
+        XCTAssertEqual(fitted.midY, slot.midY, accuracy: 0.001)
+    }
+
+    func test_fittedRect_keepsSourceAspectExactly() {
+        let source = CGSize(width: 1280, height: 720)
+        let fitted = LayoutCalculator.aspectFitRect(sourceSize: source, in: slot)
+        XCTAssertEqual(fitted.size.width / fitted.size.height, source.width / source.height, accuracy: 1e-6)
+    }
+
+    func test_degenerateSizes_returnSlot() {
+        XCTAssertEqual(LayoutCalculator.aspectFitRect(sourceSize: .zero, in: slot), slot)
+        let emptySlot = LayerRect(origin: .zero, size: .zero)
+        XCTAssertEqual(LayoutCalculator.aspectFitRect(sourceSize: CGSize(width: 16, height: 9), in: emptySlot), emptySlot)
+    }
+}

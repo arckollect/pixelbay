@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import OSLog
 import Observation
@@ -183,7 +184,84 @@ final class ProjectDocument {
             if !appendedAssets.isEmpty {
                 try await applyOrThrow(_AppendAssetsCommand(assets: appendedAssets))
             }
+            try await insertAtTimelineTail(assets: appendedAssets)
+        } catch {
+            log.error("appendRecording: command sequence failed: \(String(describing: error), privacy: .public)")
+        }
+    }
 
+    /// Imports a video file from disk and appends it at the timeline tail
+    /// (the other action behind the timeline's tail "+", next to "record
+    /// another video"). Copies the file into the bundle's media directory
+    /// so the project stays self-contained, registers it as an `.imported`
+    /// asset on the Video row plus — when the file carries audio — a
+    /// `.systemAudio` asset pointing at the same file so its sound lands on
+    /// the Audio row. Everything after the copy goes through EditCommands,
+    /// so it's undoable like a recording append (the copied file is left in
+    /// place on undo; "Clean up unused takes" reclaims it).
+    func importVideoFile(at sourceURL: URL) async {
+        let bundle = ProjectBundle(url: bundleURL)
+        let fileManager = FileManager.default
+        let ext = sourceURL.pathExtension.isEmpty ? "mov" : sourceURL.pathExtension
+        let fileName = "imported-\(UUID().uuidString).\(ext)"
+        let destinationURL = bundle.mediaDirectoryURL.appendingPathComponent(fileName)
+        do {
+            try fileManager.createDirectory(at: bundle.mediaDirectoryURL, withIntermediateDirectories: true)
+            try fileManager.copyItem(at: sourceURL, to: destinationURL)
+        } catch {
+            log.error("importVideo: copy failed: \(String(describing: error), privacy: .public)")
+            status = .failed(message: "Couldn't copy the video into the project: \(error.localizedDescription)")
+            return
+        }
+
+        let avAsset = AVURLAsset(url: destinationURL)
+        let seconds: Double
+        let hasAudio: Bool
+        do {
+            let duration = try await avAsset.load(.duration)
+            let videoTracks = try await avAsset.loadTracks(withMediaType: .video)
+            guard !videoTracks.isEmpty else {
+                try? fileManager.removeItem(at: destinationURL)
+                status = .failed(message: "\(sourceURL.lastPathComponent) has no video track.")
+                return
+            }
+            hasAudio = try await !avAsset.loadTracks(withMediaType: .audio).isEmpty
+            seconds = CMTimeGetSeconds(duration)
+        } catch {
+            try? fileManager.removeItem(at: destinationURL)
+            log.error("importVideo: probe failed: \(String(describing: error), privacy: .public)")
+            status = .failed(message: "Couldn't read \(sourceURL.lastPathComponent): \(error.localizedDescription)")
+            return
+        }
+        guard seconds > 0 else {
+            try? fileManager.removeItem(at: destinationURL)
+            status = .failed(message: "\(sourceURL.lastPathComponent) is empty.")
+            return
+        }
+
+        let relativePath = "\(ProjectBundle.mediaDirectoryName)/\(fileName)"
+        var assets = [
+            MediaAsset(kind: .imported, relativePath: relativePath, nativeDuration: .seconds(seconds))
+        ]
+        if hasAudio {
+            assets.append(
+                MediaAsset(kind: .systemAudio, relativePath: relativePath, nativeDuration: .seconds(seconds))
+            )
+        }
+        do {
+            try await applyOrThrow(_AppendAssetsCommand(assets: assets))
+            try await insertAtTimelineTail(assets: assets)
+        } catch {
+            log.error("importVideo: command sequence failed: \(String(describing: error), privacy: .public)")
+            status = .failed(message: "Couldn't add the video to the timeline: \(error.localizedDescription)")
+        }
+    }
+
+    /// Inserts one clip per asset at the end of the current timeline, on
+    /// the track matching each asset's kind (created if the project lacks
+    /// one). Shared by the record-more and import-file append paths. Every
+    /// step is an EditCommand so the whole append undoes as a group.
+    private func insertAtTimelineTail(assets assetsForThisRecording: [MediaAsset]) async throws {
             // Compute timeline tail across non-effects/non-overlay tracks.
             var tailSeconds: Double = 0
             for track in project.tracks {
@@ -201,7 +279,6 @@ final class ProjectDocument {
             // screen asset's nativeDuration when present (the user-visible
             // length of the recording); fall back to the longest assertion in
             // the assets list (rare — audio-only or test fixtures).
-            let assetsForThisRecording = appendedAssets
             let screenAsset = assetsForThisRecording.first {
                 ScenesMerger.trackKind(for: $0.kind) == .screen
             }
@@ -209,7 +286,7 @@ final class ProjectDocument {
                 ?? assetsForThisRecording.map { $0.nativeDuration.seconds }.max()
                 ?? 0
             guard canonicalSeconds > 0 else {
-                log.info("appendRecording: zero canonical duration; nothing to insert")
+                log.info("insertAtTimelineTail: zero canonical duration; nothing to insert")
                 return
             }
 
@@ -259,9 +336,6 @@ final class ProjectDocument {
                 )
                 try await applyOrThrow(InsertClipCommand(trackID: trackID, clip: clip))
             }
-        } catch {
-            log.error("appendRecording: command sequence failed: \(String(describing: error), privacy: .public)")
-        }
     }
 
     // MARK: - Phase 5 — cleanup unused takes

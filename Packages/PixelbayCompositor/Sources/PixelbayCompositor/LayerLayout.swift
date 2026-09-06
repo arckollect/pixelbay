@@ -398,6 +398,40 @@ public enum LayoutCalculator {
         }
     }
 
+    /// The largest rect with `sourceSize`'s aspect that fits inside `slot`,
+    /// centred — **aspect-fit** (letterbox / pillarbox), the counterpart to
+    /// `aspectFillCropUV`. Returns `slot` unchanged when the aspects already
+    /// match or a size is degenerate.
+    ///
+    /// The screen layer is the consumer: the layout sizes `screen` (and the
+    /// whole output frame) from the FIRST screen clip's pixel size, so a
+    /// later clip of a different shape — an imported video appended to the
+    /// timeline — would otherwise be stretched into that rect. Footage
+    /// must never be cropped, so it shrinks to fit and the background shows
+    /// through the bars.
+    public static func aspectFitRect(sourceSize: CGSize, in slot: LayerRect) -> LayerRect {
+        guard sourceSize.width > 0, sourceSize.height > 0,
+              slot.size.width > 0, slot.size.height > 0 else { return slot }
+        let sourceAspect = sourceSize.width / sourceSize.height
+        let slotAspect = slot.size.width / slot.size.height
+        if abs(sourceAspect - slotAspect) < 1e-4 { return slot }
+        let fitted: CGSize
+        if sourceAspect > slotAspect {
+            // Source is wider: full width, reduced height (letterbox).
+            fitted = CGSize(width: slot.size.width, height: slot.size.width / sourceAspect)
+        } else {
+            // Source is taller: full height, reduced width (pillarbox).
+            fitted = CGSize(width: slot.size.height * sourceAspect, height: slot.size.height)
+        }
+        return LayerRect(
+            origin: CGPoint(
+                x: slot.origin.x + (slot.size.width - fitted.width) / 2,
+                y: slot.origin.y + (slot.size.height - fitted.height) / 2
+            ),
+            size: fitted
+        )
+    }
+
     public static func clampSplitFraction(_ fraction: Double) -> CGFloat {
         CGFloat(min(0.9, max(0.1, fraction)))
     }

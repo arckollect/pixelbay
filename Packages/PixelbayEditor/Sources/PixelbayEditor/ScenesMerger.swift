@@ -193,7 +193,9 @@ public enum ScenesMerger {
         case .voiceover:
             return .voiceover
         case .imported:
-            return nil
+            // A user-imported video is footage: it lives on the Video row
+            // alongside screen recordings (ProjectDocument.importVideoFile).
+            return .screen
         }
     }
 

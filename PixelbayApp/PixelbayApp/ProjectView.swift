@@ -7,6 +7,7 @@ import PixelbayEditor
 import PixelbayPlayback
 import PixelbayTimelineUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 // Phase 2 Inspector-style edit scene. No timeline UI here — that's the
 // PixelbayTimelineUI work, separate. This scene gives the user enough
@@ -78,6 +79,12 @@ struct ProjectView: View {
     /// invasive change off `TimelineView.swift` so the parallel Branch B
     /// can keep restructuring timeline row rendering without conflict.
     @State private var appendPopoverPresented: Bool = false
+    /// Timeline-tail "+" button. `tailAppendAnchor` is the button's rect in
+    /// the TimelineView's SwiftUI coordinate space (converted from the AppKit
+    /// timeline on click) so the record popover can point at it; the flag
+    /// presents that popover.
+    @State private var tailAppendAnchor: CGRect?
+    @State private var tailAppendPopoverPresented: Bool = false
     @State private var zoomFollowSafeZoneOverlayFraction: Double?
     /// Live Motion Tuning drag preview. The master cursor data is cached by
     /// the main reload task so each drag tick can re-solve the camera path +
@@ -537,6 +544,55 @@ struct ProjectView: View {
 
     // MARK: - Timeline pane
 
+    /// Tail "+" click: a native menu with the two ways to extend the video.
+    /// "Record" reuses the header Add button's popover (anchored at the "+"
+    /// instead); "Add file" runs an open panel then `importVideoFile`.
+    private func presentTailAppendMenu(from view: NSView, buttonRect: NSRect) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let record = ClosureMenuItem(title: "Record Another Video…", action: #selector(ClosureMenuItem.fire), keyEquivalent: "")
+        record.target = record
+        record.onSelect = {
+            // Convert the AppKit rect (flipped timeline view → its scroll view,
+            // which is SwiftUI's frame for TimelineView) into SwiftUI's
+            // top-left space, then present on the next runloop tick so the
+            // overlay anchor exists before the popover looks for it.
+            guard let scroll = view.enclosingScrollView else { return }
+            let inScroll = view.convert(buttonRect, to: scroll)
+            tailAppendAnchor = CGRect(
+                x: inScroll.minX,
+                y: scroll.bounds.height - inScroll.maxY,
+                width: inScroll.width,
+                height: inScroll.height
+            )
+            DispatchQueue.main.async { tailAppendPopoverPresented = true }
+        }
+        menu.addItem(record)
+        let file = ClosureMenuItem(title: "Add Video File…", action: #selector(ClosureMenuItem.fire), keyEquivalent: "")
+        file.target = file
+        file.onSelect = { Task { await pickAndImportVideo() } }
+        menu.addItem(file)
+        menu.popUp(positioning: nil, at: NSPoint(x: buttonRect.minX, y: buttonRect.maxY + 4), in: view)
+    }
+
+    /// Open panel scoped to movie files; the pick flows into
+    /// `ProjectDocument.importVideoFile`, which copies it into the bundle
+    /// and appends it at the timeline tail.
+    @MainActor
+    private func pickAndImportVideo() async {
+        let panel = NSOpenPanel()
+        panel.title = "Add Video"
+        panel.message = "Choose a video to append to the end of the timeline."
+        panel.allowedContentTypes = [.movie, .mpeg4Movie, .quickTimeMovie]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        let response = await withCheckedContinuation { continuation in
+            panel.begin { response in continuation.resume(returning: response) }
+        }
+        guard response == .OK, let url = panel.url else { return }
+        await document.importVideoFile(at: url)
+    }
+
     private func timelineGlyph(_ symbol: String, help: String) -> some View {
         Image(systemName: symbol)
             .font(.system(size: 11, weight: .medium))
@@ -596,8 +652,28 @@ struct ProjectView: View {
                     let cmTime = CMTime(value: time.value, timescale: time.timescale)
                     player.seek(to: cmTime)
                 },
-                onRowHeightsChange: { rowHeights = $0 }
+                onRowHeightsChange: { rowHeights = $0 },
+                onAppendRequested: { view, rect in presentTailAppendMenu(from: view, buttonRect: rect) }
             )
+            // Invisible anchor placed over the tail "+" so the record popover
+            // points at the button the user clicked (the AppKit timeline
+            // can't host a SwiftUI popover itself).
+            .overlay(alignment: .topLeading) {
+                if let anchor = tailAppendAnchor {
+                    Color.clear
+                        .frame(width: anchor.width, height: anchor.height)
+                        .offset(x: anchor.minX, y: anchor.minY)
+                        .allowsHitTesting(false)
+                        .popover(isPresented: $tailAppendPopoverPresented, arrowEdge: .bottom) {
+                            AppendRecordingPopover(
+                                bundle: ProjectBundle(url: document.bundleURL),
+                                onRecorded: { result in
+                                    Task { await document.appendRecordingToTimeline(result: result) }
+                                }
+                            )
+                        }
+                }
+            }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Theme.Color.bgDeep)
             // Fit-to-width zoom: capture the pane's live width, and re-fit
@@ -856,8 +932,12 @@ struct ProjectView: View {
     /// control of the zoom slider, after which their choice sticks.
     private func fitTimelineZoomIfNeeded() {
         guard !userAdjustedZoom else { return }
-        // Trailing margin keeps the project's tail off the hard right edge.
-        let laneWidth = timelineWidth - TimelineLayoutCalculator.trackHeaderWidth - 24
+        // Trailing margin keeps the project's tail off the hard right edge
+        // AND leaves the tail "+" button (gap + diameter) fully visible at
+        // fit-to-width — the same allowance the layout reserves in its
+        // content width, so the button never needs a scroll to find.
+        let laneWidth = timelineWidth - TimelineLayoutCalculator.trackHeaderWidth
+            - TimelineLayoutCalculator.appendTailAllowance
         guard laneWidth > 100 else { return }
         let totalSeconds = TimelineLayoutCalculator.totalSeconds(in: document.project)
         guard totalSeconds > 0.1 else { return }

@@ -115,18 +115,15 @@ struct PixelbayAppApp: App {
         WindowGroup("Project", id: WindowID.project, for: ProjectWindowID.self) { $bundleID in
             ProjectWindow(bundleID: bundleID)
                 .preferredColorScheme(.dark)
+                // The editor's append-recording popover (timeline "+" / header
+                // Add) reads RecordingService from the environment.
+                .environment(recording)
                 .environment(scenesAppendTarget)
-                // Finder double-click / `open` on a .pixelbay bundle. SwiftUI
-                // routes the file URL to this group as an external event and
-                // spawns a window with a nil value; claim it by assigning the
-                // binding so the window loads that bundle instead of showing
-                // "No project loaded". Windows that already have a value
-                // ignore the URL, so an open project is never hijacked.
-                .onOpenURL { url in
-                    guard url.pathExtension == "pixelbay", bundleID == nil else { return }
-                    bundleID = ProjectWindowID(bundleURL: url.standardizedFileURL)
-                }
         }
+        // Finder double-click / `open` on a .pixelbay bundle: SwiftUI routes
+        // the file URL to this group as an external event. ProjectWindow's
+        // onOpenURL turns it into openWindow(value:) — deduped per bundle —
+        // and the carrier window closes itself.
         .handlesExternalEvents(matching: ["pixelbay"])
         .defaultSize(width: 1200, height: 800)
         // Native unified titlebar toolbar: the editor's actions render in

@@ -72,9 +72,13 @@ extension Theme {
         // deliberately lifted.
         static let trackVideo       = "#3B82F6"   // blue (screen)
         static let trackWebcam      = "#F472B6"   // pink (person/camera)
-        static let trackMic         = "#34D399"   // emerald (voice)
-        static let trackSystemAudio = "#2DD4BF"   // teal (machine audio)
-        static let trackVoiceover   = "#FBBF24"   // amber (narration)
+        // Audio is ALWAYS blue (user decision 2026-09-06): the Audio row sits
+        // under the blue Video row and should read as the same family, not
+        // a green/teal/amber contrast. Three sky-blue steps keep the kinds
+        // distinguishable where they still surface individually.
+        static let trackMic         = "#38BDF8"   // sky (voice)
+        static let trackSystemAudio = "#0EA5E9"   // deeper sky (machine audio)
+        static let trackVoiceover   = "#7DD3FC"   // lighter sky (narration)
         static let trackOverlay     = "#60A5FA"   // light blue
         static let trackEffects     = "#A78BFA"   // violet
 

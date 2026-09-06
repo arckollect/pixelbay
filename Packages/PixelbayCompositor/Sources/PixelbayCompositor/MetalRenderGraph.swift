@@ -292,10 +292,23 @@ public final class MetalRenderGraph: @unchecked Sendable {
             drawBackground(encoder: encoder, background: layout.background, aspect: bgAspect)
         }
 
+        // The layout's `screen` rect (and the output frame) take their shape
+        // from the first screen clip; a clip of a different aspect — an
+        // imported video appended later — is letterboxed inside it rather
+        // than stretched. Identity when the aspects match, so recordings
+        // render exactly as before. The cursor overlay uses the same rect so
+        // it stays registered to the footage.
+        let screenRect = LayoutCalculator.aspectFitRect(
+            sourceSize: CGSize(
+                width: CVPixelBufferGetWidth(screen),
+                height: CVPixelBufferGetHeight(screen)
+            ),
+            in: layout.screen
+        )
         try drawLayer(
             encoder: encoder,
             source: screen,
-            destinationRect: layout.screen,
+            destinationRect: screenRect,
             outputSize: layout.outputSize,
             cornerRadiusPx: layout.screenCornerRadius,
             isCircle: false,
@@ -312,7 +325,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
                 encoder: encoder,
                 sprite: cursorSprite,
                 state: cursorState,
-                screen: layout.screen,
+                screen: screenRect,
                 outputSize: layout.outputSize,
                 contentCropUV: layout.zoomTargetsContent ? layout.screenCropUV : nil
             )

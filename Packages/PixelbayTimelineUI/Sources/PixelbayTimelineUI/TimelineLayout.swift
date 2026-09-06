@@ -40,6 +40,11 @@ public struct TimelineLayout: Sendable, Equatable {
     /// the row's bottom edge. Dragging it resizes just that row (per-row
     /// height override); the global track-height slider resets all rows.
     public var rowResizeHandles: [RowResizeHandle]
+    /// The timeline-tail "+" button: a small circle just past the end of
+    /// all content, vertically centred on the Video row. Clicking it offers
+    /// to record another video or add a video file, either appended at the
+    /// tail. nil when the project has no Video row to append to.
+    public var appendButtonFrame: CGRect?
 
     public init(
         totalContentWidth: CGFloat,
@@ -50,7 +55,8 @@ public struct TimelineLayout: Sendable, Equatable {
         trackHeaderWidth: CGFloat,
         displayRows: [TimelineDisplayRow] = [],
         groupedOverlapBadges: [GroupedLaneBadge] = [],
-        rowResizeHandles: [RowResizeHandle] = []
+        rowResizeHandles: [RowResizeHandle] = [],
+        appendButtonFrame: CGRect? = nil
     ) {
         self.totalContentWidth = totalContentWidth
         self.totalContentHeight = totalContentHeight
@@ -61,6 +67,7 @@ public struct TimelineLayout: Sendable, Equatable {
         self.displayRows = displayRows
         self.groupedOverlapBadges = groupedOverlapBadges
         self.rowResizeHandles = rowResizeHandles
+        self.appendButtonFrame = appendButtonFrame
     }
 }
 
@@ -290,6 +297,12 @@ public enum TimelineLayoutCalculator {
     /// track lane because each keyframe is a single rounded badge, not a
     /// scrubbable clip body with a waveform overlay.
     public static let effectsLaneHeight: CGFloat = 28
+    /// Timeline-tail "+" button geometry: diameter, gap after the last
+    /// clip, and the extra content width reserved so the button is always
+    /// reachable by scrolling even when the project fills the viewport.
+    public static let appendButtonSize: CGFloat = 22
+    public static let appendButtonGap: CGFloat = 14
+    public static let appendTailAllowance: CGFloat = 64
 
     /// Pure-function grouping pass: produces the row sequence the
     /// renderer iterates top-down. Each physical track folds into its
@@ -364,7 +377,11 @@ public enum TimelineLayoutCalculator {
         let pps = max(minPixelsPerSecond, min(maxPixelsPerSecond, viewport.pixelsPerSecond))
         let trackHeight = max(minTrackHeight, min(maxTrackHeight, viewport.trackHeight))
         let totalSeconds = self.totalSeconds(in: project)
-        let totalContentWidth = trackHeaderWidth + max(viewport.size.width - trackHeaderWidth, totalSeconds * pps)
+        // Reserve room past the last clip for the tail "+" button.
+        let totalContentWidth = trackHeaderWidth + max(
+            viewport.size.width - trackHeaderWidth,
+            totalSeconds * pps + appendTailAllowance
+        )
 
         // Y positions are driven by `displayRows` so grouped tracks share
         // a single row. Build a TrackID → row-Y map first; per-track
@@ -475,6 +492,22 @@ public enum TimelineLayoutCalculator {
             ))
         }
 
+        // Tail "+" button: just past the end of all content, centred on the
+        // Video row. Absent when there's no Video row (nothing to append to).
+        var appendButtonFrame: CGRect?
+        if let videoRow = displayRows.first(where: { $0.kind.isVideoGroup }),
+           case .groupedVideo(_, let primaryID) = videoRow.kind,
+           let rowY = trackToRowY[primaryID],
+           let rowH = trackToRowHeight[primaryID] {
+            let tailX = trackHeaderWidth + (totalSeconds - viewport.scrollX) * pps
+            appendButtonFrame = CGRect(
+                x: tailX + appendButtonGap,
+                y: rowY + (rowH - appendButtonSize) / 2,
+                width: appendButtonSize,
+                height: appendButtonSize
+            )
+        }
+
         let effectsHeader = CGRect(
             x: 0, y: effectsLaneY,
             width: trackHeaderWidth, height: effectsLaneHeight
@@ -573,7 +606,8 @@ public enum TimelineLayoutCalculator {
             trackHeaderWidth: trackHeaderWidth,
             displayRows: displayRows,
             groupedOverlapBadges: badges,
-            rowResizeHandles: resizeHandles
+            rowResizeHandles: resizeHandles,
+            appendButtonFrame: appendButtonFrame
         )
     }
 

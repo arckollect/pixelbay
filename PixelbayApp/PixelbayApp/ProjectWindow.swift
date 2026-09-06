@@ -16,16 +16,29 @@ private let log = Logger(subsystem: "com.pixelbay.PixelbayApp", category: "Proje
 //   • Installs an NSWindowDelegate that intercepts `windowShouldClose` to
 //     present the save-on-close NSAlert when the document is dirty
 //
-// The `bundleID` binding is optional because WindowGroup(for:) hands `nil`
-// when SwiftUI restores a window with no captured value — that case is
-// surfaced as a plain "no project loaded" placeholder; the user can close
-// the window or open another project.
+// The `bundleID` value is optional because WindowGroup(for:) hands `nil`
+// in two cases: (a) SwiftUI spawned the window to carry a file-open
+// external event (Finder double-click / `open foo.pixelbay`), and (b) it
+// restored a window that had no value at the last quit. Neither should be
+// a window the user sees: (a) routes the URL through `openWindow(value:)`
+// — which focuses an already-open window for that bundle instead of
+// duplicating it — and dismisses itself; (b) shows the placeholder for a
+// short grace period (in case an external event is about to arrive) and
+// then dismisses itself, so an empty window never survives to be restored
+// again. Without this, one stray empty "Project" window came back on
+// every launch beside the real one.
 struct ProjectWindow: View {
     let bundleID: ProjectWindowID?
 
     @State private var document: ProjectDocument?
     @State private var loadError: String?
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.openWindow) private var openWindow
+
+    /// How long a valueless window waits for a file-open event before
+    /// closing itself. External events land within a few ms of the window
+    /// appearing; the rest of this budget is just safety margin.
+    private static let emptyWindowGrace: Duration = .milliseconds(750)
 
     var body: some View {
         ZStack {
@@ -49,12 +62,28 @@ struct ProjectWindow: View {
         .task(id: bundleID) {
             await loadDocument()
         }
+        .onOpenURL { url in
+            guard url.pathExtension == "pixelbay" else { return }
+            // Dedupes by value: focuses the window already showing this
+            // bundle, or opens a new one. Every open project window may
+            // receive the same event; the repeated call is a no-op.
+            openWindow(value: ProjectWindowID(bundleURL: url.standardizedFileURL))
+            // This window only existed to carry the event.
+            if bundleID == nil { dismissWindow() }
+        }
     }
 
     private func loadDocument() async {
         guard let bundleID else {
             document = nil
             loadError = nil
+            // No bundle: wait briefly for a file-open event to arrive (see
+            // the type comment), then close rather than linger as an empty
+            // window that restoration would bring back next launch.
+            try? await Task.sleep(for: Self.emptyWindowGrace)
+            guard !Task.isCancelled else { return }
+            log.info("closing valueless project window after grace period")
+            dismissWindow()
             return
         }
         document = nil

@@ -713,6 +713,45 @@ final class TimelineLayoutTests: XCTestCase {
         return project
     }
 
+    // MARK: - Tail "+" append button
+
+    func test_appendButton_sitsAfterTimelineTail_centredOnVideoRow() {
+        let project = makeTwoTrackProject()   // content ends at 6s
+        let layout = TimelineLayoutCalculator.layout(
+            project: project,
+            viewport: TimelineViewport(size: CGSize(width: 800, height: 240), pixelsPerSecond: 80)
+        )
+        guard let frame = layout.appendButtonFrame else {
+            return XCTFail("expected a tail append button for a project with a Video row")
+        }
+        let tailX = TimelineLayoutCalculator.trackHeaderWidth + 6 * 80
+        XCTAssertEqual(frame.minX, tailX + TimelineLayoutCalculator.appendButtonGap, accuracy: 0.001)
+        XCTAssertEqual(frame.width, TimelineLayoutCalculator.appendButtonSize, accuracy: 0.001)
+        XCTAssertEqual(frame.midY, layout.tracks[0].headerFrame.midY, accuracy: 0.001,
+                       "vertically centred on the Video row")
+        XCTAssertLessThanOrEqual(frame.maxX, layout.totalContentWidth,
+                                 "content width leaves room to scroll the button into view")
+    }
+
+    func test_appendButton_absent_whenProjectHasNoTracks() {
+        let layout = TimelineLayoutCalculator.layout(
+            project: Project(name: "Empty"),
+            viewport: TimelineViewport(size: CGSize(width: 800, height: 240), pixelsPerSecond: 80)
+        )
+        XCTAssertNil(layout.appendButtonFrame)
+    }
+
+    func test_hitTest_onAppendButton_returnsAppendButton() {
+        let project = makeTwoTrackProject()
+        let layout = TimelineLayoutCalculator.layout(
+            project: project,
+            viewport: TimelineViewport(size: CGSize(width: 800, height: 240), pixelsPerSecond: 80)
+        )
+        guard let frame = layout.appendButtonFrame else { return XCTFail("no append button") }
+        let hit = TimelineHitTest.hit(at: CGPoint(x: frame.midX, y: frame.midY), in: layout)
+        XCTAssertEqual(hit, .appendButton, "the button wins over the empty Video lane behind it")
+    }
+
     // MARK: - Helpers
 
     private func makeSingleClipProject(durationSeconds: Double, startSeconds: Double = 0) -> Project {

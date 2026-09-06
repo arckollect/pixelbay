@@ -57,6 +57,10 @@ public struct TimelineView: NSViewRepresentable {
     /// map (existing overrides + the dragged row). The host stores it and
     /// passes it back via `rowHeightOverrides`.
     public var onRowHeightsChange: ([String: CGFloat]) -> Void
+    /// Fired when the user clicks the timeline-tail "+" button. Passes the
+    /// timeline NSView and the button's rect in that view's coordinates so
+    /// the host can anchor a menu / popover to it.
+    public var onAppendRequested: (NSView, NSRect) -> Void
     /// True while the host is mid-drag on a continuous geometry control
     /// (track-height / zoom slider). Suppresses thumbnail + waveform layers
     /// so per-tick rebuilds stay allocation-free; content returns on release.
@@ -78,7 +82,8 @@ public struct TimelineView: NSViewRepresentable {
         onSelectEffectKeyframe: @escaping (EffectKeyframeID?) -> Void = { _ in },
         onApplyCommand: @escaping (any EditCommand) -> Void = { _ in },
         onScrub: @escaping (RationalTime) -> Void = { _ in },
-        onRowHeightsChange: @escaping ([String: CGFloat]) -> Void = { _ in }
+        onRowHeightsChange: @escaping ([String: CGFloat]) -> Void = { _ in },
+        onAppendRequested: @escaping (NSView, NSRect) -> Void = { _, _ in }
     ) {
         self.project = project
         self.bundleURL = bundleURL
@@ -96,6 +101,7 @@ public struct TimelineView: NSViewRepresentable {
         self.onApplyCommand = onApplyCommand
         self.onScrub = onScrub
         self.onRowHeightsChange = onRowHeightsChange
+        self.onAppendRequested = onAppendRequested
     }
 
     // We wrap our NSView in an NSScrollView (not SwiftUI's ScrollView)
@@ -142,6 +148,7 @@ public struct TimelineView: NSViewRepresentable {
         timeline.onApplyCommand = onApplyCommand
         timeline.onScrub = onScrub
         timeline.onRowHeightsChange = onRowHeightsChange
+        timeline.onAppendRequested = onAppendRequested
         timeline.update(project: project, bundleURL: bundleURL, pixelsPerSecond: pixelsPerSecond, trackHeight: trackHeight, scrollX: scrollX, selectedClipID: selectedClipID, selectedEffectKeyframeID: selectedEffectKeyframeID, revision: revision, rowHeightOverrides: rowHeightOverrides, suppressContent: suppressContent)
         timeline.setPlayhead(time: playheadTime)
         scroll.documentView = timeline
@@ -174,6 +181,7 @@ public struct TimelineView: NSViewRepresentable {
         timeline.onApplyCommand = onApplyCommand
         timeline.onScrub = onScrub
         timeline.onRowHeightsChange = onRowHeightsChange
+        timeline.onAppendRequested = onAppendRequested
         timeline.update(project: project, bundleURL: bundleURL, pixelsPerSecond: pixelsPerSecond, trackHeight: trackHeight, scrollX: scrollX, selectedClipID: selectedClipID, selectedEffectKeyframeID: selectedEffectKeyframeID, revision: revision, rowHeightOverrides: rowHeightOverrides, suppressContent: suppressContent)
         timeline.setPlayhead(time: playheadTime)
         let rulerHost = context.coordinator.rulerHost
@@ -365,6 +373,7 @@ public final class TimelineNSView: NSView {
     public var onApplyCommand: ((any EditCommand) -> Void)?
     public var onScrub: ((RationalTime) -> Void)?
     public var onRowHeightsChange: (([String: CGFloat]) -> Void)?
+    public var onAppendRequested: ((NSView, NSRect) -> Void)?
 
     private var project: Project?
     private var bundleURL: URL?
@@ -616,6 +625,10 @@ public final class TimelineNSView: NSView {
             )
         }
 
+        if let appendFrame = layout.appendButtonFrame {
+            addAppendButton(appendFrame, in: layer)
+        }
+
         let effectsLane = layout.effectsLane
         // Effects header through the shared lane-header path so it matches the
         // name treatment of the track lanes above it.
@@ -806,6 +819,27 @@ public final class TimelineNSView: NSView {
             return selected ? 0.34 : 0.20
         }
         return selected ? 0.38 : 0.26
+    }
+
+    /// The timeline-tail "+" button: a raised circle with a plus glyph, just
+    /// past the last clip on the Video row. Click handling is in mouseDown
+    /// (`.appendButton`), which hands the frame to the host.
+    private func addAppendButton(_ frame: CGRect, in layer: CALayer) {
+        let circle = CALayer()
+        circle.frame = frame
+        circle.cornerRadius = frame.width / 2
+        circle.backgroundColor = Theme.NSColor.bgElevated.cgColor
+        circle.borderColor = Theme.NSColor.borderStrong.cgColor
+        circle.borderWidth = Theme.Stroke.hairline
+        layer.addSublayer(circle)
+        if let plus = tintedSymbol("plus", color: Theme.NSColor.textPrimary) {
+            let glyph = CALayer()
+            glyph.frame = frame.insetBy(dx: 6, dy: 6)
+            glyph.contents = plus
+            glyph.contentsGravity = .resizeAspect
+            glyph.contentsScale = window?.backingScaleFactor ?? 2
+            layer.addSublayer(glyph)
+        }
     }
 
     /// Adds a small icon-on-circle overlay anchored to the top-right of
@@ -1280,6 +1314,13 @@ public final class TimelineNSView: NSView {
             dragSession = nil
         case .effectsLaneHeader:
             onSelectEffectKeyframe?(nil)
+            dragSession = nil
+        case .appendButton:
+            onSelect?(nil)
+            onSelectEffectKeyframe?(nil)
+            if let frame = lastLayout.appendButtonFrame {
+                onAppendRequested?(self, frame)
+            }
             dragSession = nil
         case .rowResizeHandle(let rowID, let currentHeight):
             // Per-row height resize: vertical drag adjusts just this row.
