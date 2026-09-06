@@ -79,28 +79,24 @@ final class TimelineLayoutTests: XCTestCase {
                        accuracy: 0.001)
     }
 
-    func test_multipleTracks_areVerticallyStacked() {
-        var project = makeTwoTrackProject()
-        // Branch B (2026-05-27): with the smart-default collapsed seed,
-        // grouped tracks share a row. Force-expand the video group so
-        // this test still exercises the per-physical-track stacking math.
-        project.timelineLaneCollapse = [.video: false, .audio: false]
+    func test_groupedRows_areVerticallyStacked() {
+        // Video and Audio rows stack: the mic track (audio row) sits one
+        // row height + spacing below the screen track (video row).
+        let project = makeFourTrackProject()
         let layout = TimelineLayoutCalculator.layout(
             project: project,
             viewport: TimelineViewport(size: CGSize(width: 800, height: 240), pixelsPerSecond: 80)
         )
-        let track0 = layout.tracks[0]
-        let track1 = layout.tracks[1]
-        // Track 1's y should be track 0's y + trackHeight + spacing
+        let screen = layout.tracks[0]
+        let mic = layout.tracks[2]
         let expectedDelta = TimelineLayoutCalculator.defaultTrackHeight + TimelineLayoutCalculator.trackSpacing
-        XCTAssertEqual(track1.headerFrame.origin.y - track0.headerFrame.origin.y,
+        XCTAssertEqual(mic.headerFrame.origin.y - screen.headerFrame.origin.y,
                        expectedDelta, accuracy: 0.001)
     }
 
-    func test_multipleTracks_areCollapsedByDefault_shareSameRow() {
-        // Branch B (2026-05-27): the smart-default seed collapses both
-        // groups. Two video tracks (screen + cam) share the same Y when
-        // the project is fresh.
+    func test_groupedTracks_shareSameRow() {
+        // Two video tracks (screen + cam) fold into the single Video row
+        // and share the same Y.
         let project = makeTwoTrackProject()
         let layout = TimelineLayoutCalculator.layout(
             project: project,
@@ -109,25 +105,21 @@ final class TimelineLayoutTests: XCTestCase {
         XCTAssertEqual(layout.tracks[0].headerFrame.origin.y,
                        layout.tracks[1].headerFrame.origin.y,
                        accuracy: 0.001,
-                       "grouped collapsed tracks share a single row")
+                       "grouped tracks share a single row")
     }
 
-    func test_totalContentHeight_grows_withTrackCount() {
-        // Branch B: with grouped collapse, both the single-track project
-        // and the two-track project still emit the same row count (one
-        // video lane + effects). Force-expand the video lane on the
-        // two-track project so it actually emits two rows.
-        var twoTrack = makeTwoTrackProject()
-        twoTrack.timelineLaneCollapse = [.video: false]
-        let single = TimelineLayoutCalculator.layout(
+    func test_totalContentHeight_grows_withRowCount() {
+        // A video-only project emits video + effects rows; adding audio
+        // tracks adds the audio row, so the content grows by one row.
+        let videoOnly = TimelineLayoutCalculator.layout(
             project: makeSingleClipProject(durationSeconds: 1),
             viewport: TimelineViewport(size: CGSize(width: 400, height: 240), pixelsPerSecond: 80)
         )
-        let two = TimelineLayoutCalculator.layout(
-            project: twoTrack,
+        let videoAndAudio = TimelineLayoutCalculator.layout(
+            project: makeFourTrackProject(),
             viewport: TimelineViewport(size: CGSize(width: 400, height: 240), pixelsPerSecond: 80)
         )
-        XCTAssertGreaterThan(two.totalContentHeight, single.totalContentHeight)
+        XCTAssertGreaterThan(videoAndAudio.totalContentHeight, videoOnly.totalContentHeight)
     }
 
     func test_totalSeconds_isMaxOfClipEndsAcrossTracks() {
@@ -696,50 +688,6 @@ final class TimelineLayoutTests: XCTestCase {
         )
     }
 
-    // MARK: - Decouple-on-expand (laneBreakout, polish 2026-05-27)
-
-    func test_computeDisplayRows_brokenOutTrack_emitsStandaloneRow() {
-        // Two video tracks (screen + cam). Lane collapsed by default.
-        // Break out the webcam — expect: collapsed video group row
-        // (screen only) + standalone webcam row right after, then
-        // effects lane.
-        var project = makeTwoTrackProject()
-        project.timelineLaneCollapse = [.video: true]
-        if let idx = project.tracks.firstIndex(where: { $0.kind == .webcam }) {
-            project.tracks[idx].laneBreakout = true
-        }
-        let rows = TimelineLayoutCalculator.computeDisplayRows(project: project)
-        // Row 0: groupedVideo (collapsed, single member: screen only).
-        guard case .groupedVideo(let groupTracks, _) = rows[0].kind else {
-            return XCTFail("expected groupedVideo row first")
-        }
-        XCTAssertEqual(groupTracks.count, 1, "webcam excluded from group bucket")
-        // Row 1: singleTrack for the broken-out webcam.
-        guard case .singleTrack(_, let parentGroup) = rows[1].kind else {
-            return XCTFail("expected singleTrack row after group")
-        }
-        XCTAssertEqual(parentGroup, .video)
-        // Row 2: effectsLane (always last).
-        XCTAssertEqual(rows[2].kind, .effectsLane)
-    }
-
-    func test_computeDisplayRows_allMembersBrokenOut_skipsGroupRowEntirely() {
-        // Two video tracks both broken out — no group row at all,
-        // just two singleTrack rows + effects.
-        var project = makeTwoTrackProject()
-        project.timelineLaneCollapse = [.video: true]
-        for idx in project.tracks.indices where project.tracks[idx].kind.laneGroup == .video {
-            project.tracks[idx].laneBreakout = true
-        }
-        let rows = TimelineLayoutCalculator.computeDisplayRows(project: project)
-        for row in rows.prefix(2) {
-            if case .groupedVideo = row.kind {
-                XCTFail("no group row should be emitted when all members are broken out")
-            }
-        }
-        XCTAssertEqual(rows.last?.kind, .effectsLane)
-    }
-
     func test_moveEffectKeyframePreview_clampsAtTimelineStart() {
         let project = makeProjectWithKeyframe(start: 2, duration: 1)
         let kfID = project.effects[0].id
@@ -817,7 +765,7 @@ final class TimelineLayoutTests: XCTestCase {
         return project
     }
 
-    // MARK: - Branch B — computeDisplayRows (Slice B.2)
+    // MARK: - computeDisplayRows
 
     func test_computeDisplayRows_emptyProject_returnsOnlyEffectsLane() {
         let project = Project(name: "Empty")
@@ -828,15 +776,12 @@ final class TimelineLayoutTests: XCTestCase {
         }
     }
 
-    func test_computeDisplayRows_smartDefault_collapsedForFreshProject() {
-        // Fresh project with screen + cam + mic: smart-default seed is
-        // true, so both groups present and both collapsed.
+    func test_computeDisplayRows_fourTrackProject_emitsVideoAudioEffects() {
+        // Screen + cam + mic + sys: one video row, one audio row, effects.
         let project = makeFourTrackProject()
         let rows = TimelineLayoutCalculator.computeDisplayRows(project: project)
         XCTAssertEqual(rows.count, 3,
                        "expected 1 video grouped row + 1 audio grouped row + 1 effects row")
-        XCTAssertTrue(rows[0].isCollapsed)
-        XCTAssertTrue(rows[1].isCollapsed)
         guard case .groupedVideo = rows[0].kind else {
             return XCTFail("first row should be groupedVideo")
         }
@@ -848,9 +793,8 @@ final class TimelineLayoutTests: XCTestCase {
         }
     }
 
-    func test_computeDisplayRows_collapsed_groupsVideoAndAudio() {
-        var project = makeFourTrackProject()
-        project.timelineLaneCollapse = [.video: true, .audio: true]
+    func test_computeDisplayRows_groupsVideoAndAudio_withPrimaries() {
+        let project = makeFourTrackProject()
         let rows = TimelineLayoutCalculator.computeDisplayRows(project: project)
         XCTAssertEqual(rows.count, 3)
         guard case .groupedVideo(let videoTracks, let primaryVideo) = rows[0].kind else {
@@ -865,48 +809,6 @@ final class TimelineLayoutTests: XCTestCase {
         }
         XCTAssertEqual(audioTracks.count, 2, "mic + sysAudio → grouped audio")
         XCTAssertEqual(primaryAudio, project.tracks[2].id, "mic is primary")
-    }
-
-    func test_computeDisplayRows_expanded_returnsPerPhysicalTrack() {
-        var project = makeFourTrackProject()
-        project.timelineLaneCollapse = [.video: false, .audio: false]
-        let rows = TimelineLayoutCalculator.computeDisplayRows(project: project)
-        XCTAssertEqual(rows.count, 5, "4 single-track rows + effects")
-        // First two rows are video children (in physical track order).
-        for index in 0...1 {
-            guard case .singleTrack(let trackID, let parent) = rows[index].kind else {
-                return XCTFail("row \(index) should be singleTrack")
-            }
-            XCTAssertEqual(trackID, project.tracks[index].id)
-            XCTAssertEqual(parent, .video)
-            XCTAssertFalse(rows[index].isCollapsed)
-        }
-        // Next two are audio children.
-        for index in 2...3 {
-            guard case .singleTrack(_, let parent) = rows[index].kind else {
-                return XCTFail("row \(index) should be singleTrack")
-            }
-            XCTAssertEqual(parent, .audio)
-        }
-        guard case .effectsLane = rows[4].kind else {
-            return XCTFail("last row should be effectsLane")
-        }
-    }
-
-    func test_computeDisplayRows_mixedCollapsed_videoCollapsedAudioExpanded() {
-        var project = makeFourTrackProject()
-        project.timelineLaneCollapse = [.video: true, .audio: false]
-        let rows = TimelineLayoutCalculator.computeDisplayRows(project: project)
-        // Expect: groupedVideo (1 row), singleTrack(mic), singleTrack(sysAudio), effectsLane
-        XCTAssertEqual(rows.count, 4)
-        guard case .groupedVideo = rows[0].kind else {
-            return XCTFail("expected groupedVideo row first")
-        }
-        XCTAssertTrue(rows[0].isCollapsed)
-        guard case .singleTrack(_, .audio) = rows[1].kind,
-              case .singleTrack(_, .audio) = rows[2].kind else {
-            return XCTFail("expected audio singleTrack rows after video group")
-        }
     }
 
     func test_computeDisplayRows_videoOnlyProject_hasNoAudioGroup() {
@@ -949,12 +851,11 @@ final class TimelineLayoutTests: XCTestCase {
         XCTAssertEqual(primary, camTrack.id, "primary falls back to first track when no .screen kind present")
     }
 
-    // MARK: - Branch B — grouped-lane overlap badges (Slice B.3)
+    // MARK: - Grouped-lane overlap badges
 
     func test_groupedVideoBadge_appears_whenWebcamClipOverlapsScreenClip() {
-        // Fresh four-track project (collapsed by default). Screen clip
-        // and webcam clip both span 0..5s → they overlap → expect one
-        // video badge on the screen clip.
+        // Four-track project: screen clip and webcam clip both span
+        // 0..5s → they overlap → expect one video badge on the screen clip.
         let project = makeFourTrackProject()
         let layout = TimelineLayoutCalculator.layout(
             project: project,
@@ -978,17 +879,6 @@ final class TimelineLayoutTests: XCTestCase {
         XCTAssertEqual(audioBadges[0].primaryClipID,
                        project.tracks[2].clips[0].id,
                        "badge should anchor on the mic (primary) clip")
-    }
-
-    func test_groupedOverlapBadges_noneWhenExpanded() {
-        var project = makeFourTrackProject()
-        project.timelineLaneCollapse = [.video: false, .audio: false]
-        let layout = TimelineLayoutCalculator.layout(
-            project: project,
-            viewport: TimelineViewport(size: CGSize(width: 800, height: 240), pixelsPerSecond: 80)
-        )
-        XCTAssertTrue(layout.groupedOverlapBadges.isEmpty,
-                      "expanded rows render the secondary track directly — no badge needed")
     }
 
     func test_groupedOverlapBadges_oneBadgePerPrimaryClip() {
@@ -1036,48 +926,6 @@ final class TimelineLayoutTests: XCTestCase {
         XCTAssertTrue(badgedIDs.contains(screenClip2.id))
     }
 
-    // MARK: - Branch B — disclosure triangle hit-test (Slice B.4)
-
-    func test_laneDisclosure_emittedPerGroup_collapsed() {
-        let project = makeFourTrackProject()
-        let layout = TimelineLayoutCalculator.layout(
-            project: project,
-            viewport: TimelineViewport(size: CGSize(width: 800, height: 240), pixelsPerSecond: 80)
-        )
-        XCTAssertEqual(layout.laneDisclosures.count, 2, "video + audio groups")
-        XCTAssertTrue(layout.laneDisclosures.allSatisfy { $0.isCollapsed },
-                      "smart-default seed = collapsed → both chevrons render as right-pointing")
-    }
-
-    func test_laneDisclosure_oneChevronOnFirstChild_whenExpanded() {
-        var project = makeFourTrackProject()
-        project.timelineLaneCollapse = [.video: false]
-        let layout = TimelineLayoutCalculator.layout(
-            project: project,
-            viewport: TimelineViewport(size: CGSize(width: 800, height: 240), pixelsPerSecond: 80)
-        )
-        let videoDisclosure = layout.laneDisclosures.first(where: { $0.groupID == .video })
-        XCTAssertNotNil(videoDisclosure)
-        XCTAssertFalse(videoDisclosure?.isCollapsed ?? true,
-                       "expanded video group's chevron points down")
-    }
-
-    func test_hitTest_onLaneDisclosure_returnsDisclosureCase() {
-        let project = makeFourTrackProject()
-        let layout = TimelineLayoutCalculator.layout(
-            project: project,
-            viewport: TimelineViewport(size: CGSize(width: 800, height: 240), pixelsPerSecond: 80)
-        )
-        guard let videoChevron = layout.laneDisclosures.first(where: { $0.groupID == .video }) else {
-            return XCTFail("expected a video chevron in the layout")
-        }
-        let hit = TimelineHitTest.hit(
-            at: CGPoint(x: videoChevron.hitFrame.midX, y: videoChevron.hitFrame.midY),
-            in: layout
-        )
-        XCTAssertEqual(hit, .laneDisclosure(.video))
-    }
-
     func test_layout_returnsDisplayRows_alongsideTracks() {
         // Sanity-check that `layout()` now plumbs computeDisplayRows
         // through into the TimelineLayout struct.
@@ -1087,7 +935,7 @@ final class TimelineLayoutTests: XCTestCase {
             viewport: TimelineViewport(size: CGSize(width: 800, height: 240), pixelsPerSecond: 80)
         )
         XCTAssertEqual(layout.tracks.count, 4, "physical tracks still emitted in full for legacy code paths")
-        XCTAssertEqual(layout.displayRows.count, 3, "grouped rows: video + audio + effects (smart default = collapsed)")
+        XCTAssertEqual(layout.displayRows.count, 3, "grouped rows: video + audio + effects")
     }
 
     /// Four-track project (screen + cam + mic + sysAudio) covering all

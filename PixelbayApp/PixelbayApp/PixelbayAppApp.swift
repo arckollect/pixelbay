@@ -80,6 +80,9 @@ struct PixelbayAppApp: App {
         // onboarding / placeholder / post-capture carry their own minimum
         // frames. Without this the window would stay 920×640 behind the bar.
         .windowResizability(.contentSize)
+        // File-open URLs (Finder double-click, `open foo.pixelbay`) belong to
+        // the Project WindowGroup below, not the launcher.
+        .handlesExternalEvents(matching: [])
         .commands {
             // File menu: ⌘N hops back to the launcher and clears any
             // post-capture state so the user lands on the picker. ⌘O opens
@@ -113,7 +116,18 @@ struct PixelbayAppApp: App {
             ProjectWindow(bundleID: bundleID)
                 .preferredColorScheme(.dark)
                 .environment(scenesAppendTarget)
+                // Finder double-click / `open` on a .pixelbay bundle. SwiftUI
+                // routes the file URL to this group as an external event and
+                // spawns a window with a nil value; claim it by assigning the
+                // binding so the window loads that bundle instead of showing
+                // "No project loaded". Windows that already have a value
+                // ignore the URL, so an open project is never hijacked.
+                .onOpenURL { url in
+                    guard url.pathExtension == "pixelbay", bundleID == nil else { return }
+                    bundleID = ProjectWindowID(bundleURL: url.standardizedFileURL)
+                }
         }
+        .handlesExternalEvents(matching: ["pixelbay"])
         .defaultSize(width: 1200, height: 800)
         // Native unified titlebar toolbar: the editor's actions render in
         // the titlebar with system material + spacing (see ProjectView's

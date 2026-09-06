@@ -53,11 +53,9 @@ public final class RulerLayer: CALayer, @unchecked Sendable {
         let bounds = self.bounds
         guard bounds.width > 0, bounds.height > 0 else { return }
 
-        // Bottom hairline that visually separates the ruler from the lanes.
-        // Subtle — the redesigned lanes are soft row cards on a deep canvas,
-        // so a strong rule here would be the loudest line on screen.
-        ctx.setFillColor(Theme.NSColor.borderSubtle.cgColor)
-        ctx.fill(CGRect(x: 0, y: bounds.maxY - 0.5, width: bounds.width, height: 0.5))
+        // No separator under the ruler: the rows below are bare clips on the
+        // canvas, and the tick baseline already reads as the ruler's edge —
+        // a rule here would be the loudest line on screen.
 
         let intervals = TimelineLayoutCalculator.niceTickInterval(forPixelsPerSecond: pixelsPerSecond)
         let pps = max(TimelineLayoutCalculator.minPixelsPerSecond,

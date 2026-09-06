@@ -370,6 +370,34 @@ public enum LayoutCalculator {
         return LayerRect(origin: origin, size: camSize)
     }
 
+    /// Source-UV crop that makes a `sourceSize` frame **aspect-fill** (cover)
+    /// a `destinationSize` rect: the shorter-relative axis is kept whole and
+    /// the other is centre-cropped. Packed for the layer shaders' existing
+    /// `screenCropUV` slot — `srcUV = uv * result.xy + result.zw`. Identity
+    /// `(1,1,0,0)` when the aspects already match or a size is degenerate.
+    ///
+    /// The webcam is the consumer: its rect is whatever the layout hands it
+    /// (a 16:9 PiP slot, or the whole screen rect during a talking head),
+    /// while the camera frame keeps its native aspect — sampling the full
+    /// texture into a differently-shaped rect stretches the face.
+    public static func aspectFillCropUV(sourceSize: CGSize, destinationSize: CGSize) -> SIMD4<Float> {
+        let identity = ResolvedLayout.identityUVTransform
+        guard sourceSize.width > 0, sourceSize.height > 0,
+              destinationSize.width > 0, destinationSize.height > 0 else { return identity }
+        let sourceAspect = sourceSize.width / sourceSize.height
+        let destAspect = destinationSize.width / destinationSize.height
+        if abs(sourceAspect - destAspect) < 1e-4 { return identity }
+        if sourceAspect > destAspect {
+            // Source is wider than the slot: keep full height, crop the sides.
+            let scaleX = destAspect / sourceAspect
+            return SIMD4<Float>(Float(scaleX), 1, Float((1 - scaleX) / 2), 0)
+        } else {
+            // Source is taller than the slot: keep full width, crop top/bottom.
+            let scaleY = sourceAspect / destAspect
+            return SIMD4<Float>(1, Float(scaleY), 0, Float((1 - scaleY) / 2))
+        }
+    }
+
     public static func clampSplitFraction(_ fraction: Double) -> CGFloat {
         CGFloat(min(0.9, max(0.1, fraction)))
     }

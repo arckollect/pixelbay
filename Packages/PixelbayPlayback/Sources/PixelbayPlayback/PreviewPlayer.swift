@@ -222,17 +222,7 @@ public final class PreviewPlayer {
     /// `muted` — the audioMix inputs. `MediaAsset` isn't `Equatable`, so its
     /// render-affecting fields are compared by hand.
     private func sameStructure(_ a: Project, _ b: Project) -> Bool {
-        // `laneBreakout` is a timeline-UI grouping flag (see
-        // Track.laneBreakout) with NO effect on the rendered composition —
-        // it's not read anywhere in the playback or compositor render path.
-        // Normalize it out before comparing so toggling lane collapse/expand
-        // (SetAllLanesCollapsedCommand flips every grouped track's
-        // laneBreakout) reads as presentation-invariant and takes the
-        // videoComposition fast path below. Without this, a purely cosmetic
-        // timeline toggle forces a full reload — which flips status to
-        // .loading and blanks the preview (a visible flicker) for a change
-        // the viewer can't even see.
-        guard renderTracks(a.tracks) == renderTracks(b.tracks) else { return false }
+        guard a.tracks == b.tracks else { return false }
         guard a.assets.count == b.assets.count else { return false }
         for (x, y) in zip(a.assets, b.assets) {
             if x.id != y.id
@@ -243,17 +233,6 @@ public final class PreviewPlayer {
             }
         }
         return true
-    }
-
-    /// Copies of `tracks` with the render-irrelevant `laneBreakout` flag
-    /// cleared, so `sameStructure` compares only composition-affecting state.
-    private func renderTracks(_ tracks: [Track]) -> [Track] {
-        tracks.map { track in
-            guard track.laneBreakout else { return track }
-            var normalized = track
-            normalized.laneBreakout = false
-            return normalized
-        }
     }
 
     public func play() {

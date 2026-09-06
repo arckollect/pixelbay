@@ -35,6 +35,10 @@ public struct PermissionProbe: Sendable {
     public var openMicrophoneSettings: @Sendable () -> Void
 
     public var accessibilityTrusted: @Sendable () -> Bool
+    /// Asks macOS to add this process to the Accessibility list and show the
+    /// system "wants to control this computer" prompt. Returns the current
+    /// trust state (unchanged until the user flips the toggle in Settings).
+    public var requestAccessibility: @Sendable () -> Bool
     public var openAccessibilitySettings: @Sendable () -> Void
 
     public init(
@@ -48,6 +52,7 @@ public struct PermissionProbe: Sendable {
         requestMicrophone: @escaping @Sendable () async -> PermissionStatus,
         openMicrophoneSettings: @escaping @Sendable () -> Void,
         accessibilityTrusted: @escaping @Sendable () -> Bool,
+        requestAccessibility: @escaping @Sendable () -> Bool,
         openAccessibilitySettings: @escaping @Sendable () -> Void
     ) {
         self.screenRecordingPreflight = screenRecordingPreflight
@@ -60,6 +65,7 @@ public struct PermissionProbe: Sendable {
         self.requestMicrophone = requestMicrophone
         self.openMicrophoneSettings = openMicrophoneSettings
         self.accessibilityTrusted = accessibilityTrusted
+        self.requestAccessibility = requestAccessibility
         self.openAccessibilitySettings = openAccessibilitySettings
     }
 }
@@ -111,6 +117,22 @@ extension PermissionProbe {
         },
         accessibilityTrusted: {
             AXIsProcessTrusted()
+        },
+        requestAccessibility: {
+            // The prompt option is what REGISTERS this exact binary (by its
+            // code-signing requirement) in Privacy & Security → Accessibility
+            // and shows the system dialog with an "Open System Settings"
+            // button. Merely opening the pane leaves the user to find the
+            // .app by hand — and with several PixelbayApp.app builds on disk
+            // (other DerivedData folders, exported copies) they can easily
+            // toggle an entry that belongs to a different, possibly ad-hoc-
+            // signed binary. macOS then flips that toggle straight back off
+            // and the running app never becomes trusted.
+            // `kAXTrustedCheckOptionPrompt` is a global `var` in the SDK, which
+            // Swift 6 strict concurrency rejects inside a @Sendable closure;
+            // its value is the literal key below (ApplicationServices/AXUIElement.h).
+            let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+            return AXIsProcessTrustedWithOptions(options)
         },
         openAccessibilitySettings: {
             openSettings(pane: "Privacy_Accessibility")

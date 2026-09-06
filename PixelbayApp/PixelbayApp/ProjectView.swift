@@ -296,22 +296,6 @@ struct ProjectView: View {
                 .help(document.redoActionName.map { "Redo \($0)" } ?? "Redo")
             }
             Button {
-                let nowCollapsed = !allLanesCollapsed
-                Task {
-                    await document.apply(SetAllLanesCollapsedCommand(collapsed: nowCollapsed))
-                }
-            } label: {
-                Label(
-                    allLanesCollapsed ? "Expand All" : "Collapse All",
-                    systemImage: allLanesCollapsed
-                        ? "chevron.down.square"
-                        : "chevron.right.square"
-                )
-            }
-            .help(allLanesCollapsed
-                  ? "Expand every grouped lane to show underlying tracks"
-                  : "Collapse every grouped lane into Video / Audio bands")
-            Button {
                 NSWorkspace.shared.activateFileViewerSelecting([document.bundleURL])
             } label: {
                 Label("Reveal in Finder", systemImage: "folder")
@@ -327,20 +311,14 @@ struct ProjectView: View {
         }
     }
 
-    /// True when every known lane group is currently collapsed (per the
-    /// resolved state — explicit value falls back to the smart-default
-    /// seed). Drives the toolbar button's label + glyph.
-    private var allLanesCollapsed: Bool {
-        LaneGroupID.allCases.allSatisfy { document.project.isLaneCollapsed($0) }
-    }
-
     // MARK: - Preview pane
 
     @ViewBuilder
     private var previewPane: some View {
-        // The preview sits in a deep "canvas well" (bgDeep) so the footage
-        // card visually floats above the editor chrome — the depth ladder
-        // reads: canvas well < window chrome < raised controls.
+        // The preview sits directly on the deep "canvas well" (bgDeep). No
+        // card behind the footage: the video is aspect-fit inside the pane,
+        // so any distinct card fill / border / shadow showed as a lighter
+        // frame around the letterboxed video. The well IS the backdrop.
         switch player.status {
         case .idle, .loading:
             VStack(spacing: Theme.Spacing.md) {
@@ -412,29 +390,32 @@ struct ProjectView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.large))
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.large)
-                    .strokeBorder(Theme.Color.borderSubtle, lineWidth: Theme.Stroke.hairline)
-            )
-            // Two-layer shadow: a tight contact shadow plus a soft ambient
-            // falloff — the card reads as floating in the canvas well rather
-            // than painted on it. CRITICAL: the shadows live on this
-            // background shape, NOT on the card subtree itself. A `.shadow`
-            // around the AppKit-hosted PreviewPlayerView forces the live
-            // video layer through SwiftUI's shadow compositing, which
-            // re-rasterizes on every body invalidation (tab switch) and
-            // split-resize tick — visible as preview flicker.
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.large)
-                    .fill(Theme.Color.bgBase)
-                    .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
-                    .shadow(color: .black.opacity(0.45), radius: 22, y: 10)
-            )
+            // Size the container to the video's own aspect: the player layer
+            // is `.resizeAspect` (previewFill is a constant false), so this
+            // makes the container's bounds == the drawn video rect, and the
+            // small rounded clip below hugs the footage rather than a
+            // letterboxed pane. The overlays in the ZStack fit the video
+            // inside their bounds the same way, so they stay aligned. No
+            // fill / border / shadow behind it — see the note at the top of
+            // previewPane. (Never put `.shadow` on the AppKit-hosted
+            // PreviewPlayerView subtree: it forces the live video layer
+            // through SwiftUI's shadow compositing and flickers on every
+            // body invalidation.)
+            .aspectRatio(previewAspectRatio, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
             .padding(Theme.Spacing.lg)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Theme.Color.bgDeep)
         }
+    }
+
+    /// Aspect of the composited output, used to size the preview container
+    /// to the video rect. nil until the player has a composition (then the
+    /// container just fills the pane, as before).
+    private var previewAspectRatio: CGFloat? {
+        let size = player.outputSize
+        guard size.width > 0, size.height > 0 else { return nil }
+        return size.width / size.height
     }
 
     /// Centered playback cluster — the single most used control in the

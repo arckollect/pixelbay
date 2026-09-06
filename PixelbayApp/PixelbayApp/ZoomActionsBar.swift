@@ -11,11 +11,13 @@ import SwiftUI
 // implementation — the buttons, their busy state, the status line, and all the
 // sidecar-aggregation generation logic live here.
 //
-// Three actions:
-//   • Add Zoom at Playhead  — primary, always available (falls back to a
-//     centred 0.5/0.5 anchor when there's no screen recording).
-//   • From Pauses           — one zoom per cursor dwell (needs cursor telemetry).
-//   • From Gestures         — one zoom per recorded shake / circle / ⌃⌘Z mark.
+// Four actions:
+//   • Add Zoom at Playhead         — primary, always available (falls back to
+//     a centred 0.5/0.5 anchor when there's no screen recording).
+//   • Add Talking Head at Playhead — webcam full-frame for a few seconds
+//     (needs a webcam track; the timeline has no separate webcam row).
+//   • From Pauses                  — one zoom per cursor dwell (needs cursor telemetry).
+//   • From Gestures                — one zoom per recorded shake / circle / ⌃⌘Z mark.
 //
 // All generation glue (reading the clicks sidecar, loading the recording's
 // natural pixel size, shifting per-asset times onto the project timeline) is
@@ -43,6 +45,7 @@ struct ZoomActionsBar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             addZoomButton
+            addTalkingHeadButton
             HStack(spacing: Theme.Spacing.sm) {
                 generatorTile(
                     title: "From Pauses",
@@ -97,6 +100,41 @@ struct ZoomActionsBar: View {
         .disabled(anyGenerating)
         .opacity(isAddingZoom ? 0.7 : 1)
         .help("Insert one zoom keyframe at the current playhead position.")
+    }
+
+    /// Second full-width action, violet like its timeline keyframe. Greys
+    /// out — with the reason in its tooltip — when there's no webcam to swap
+    /// in, too little timeline left, or the playhead is already inside a
+    /// talking head. The same `insertionConflict` gates `apply`, so the
+    /// button can never offer an insert the command would reject.
+    private var addTalkingHeadButton: some View {
+        let conflict = talkingHeadCommand.insertionConflict(in: project)
+        let disabled = anyGenerating || conflict != nil
+        let tint = Theme.Color.effectTalkingHead
+        return Button {
+            addTalkingHeadAtPlayhead()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "person.crop.rectangle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Add Talking Head at Playhead")
+            }
+            .font(Theme.Font.bodyEmphasized)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: 34)
+            .foregroundStyle(disabled ? Theme.Color.textTertiary : tint)
+            .background(disabled ? Theme.Color.bgElevated : tint.opacity(0.14))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                    .strokeBorder(disabled ? Theme.Color.borderSubtle : tint.opacity(0.32),
+                                  lineWidth: Theme.Stroke.hairline)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(conflict.map { "Can't add a talking head: \($0)." }
+              ?? "Show the webcam full-frame for a few seconds from the playhead. Drag its edges on the Effects row to set the length.")
     }
 
     /// Square-ish secondary tile: icon over a short label. Tinted icon ties
@@ -275,6 +313,29 @@ struct ZoomActionsBar: View {
         lastSuccess = didAnchorToCursor
             ? "Added zoom at playhead — follows cursor."
             : "Added zoom at playhead (centered). Record with cursor tracking on to follow the cursor."
+        onSeek(.seconds(max(0, playheadTime)))
+    }
+
+    // MARK: - Talking head
+
+    private var talkingHeadCommand: AddTalkingHeadAtPlayheadCommand {
+        AddTalkingHeadAtPlayheadCommand(
+            timelineTime: playheadTime,
+            timelineDuration: generator.projectDuration
+        )
+    }
+
+    /// Synchronous — no sidecar work; the keyframe has no anchor to seed.
+    private func addTalkingHeadAtPlayhead() {
+        lastError = nil
+        lastSuccess = nil
+        let command = talkingHeadCommand
+        if let reason = command.insertionConflict(in: project) {
+            lastError = reason
+            return
+        }
+        onApply(command)
+        lastSuccess = "Added talking head at playhead — drag its edges on the Effects row to set the length."
         onSeek(.seconds(max(0, playheadTime)))
     }
 

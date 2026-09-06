@@ -143,7 +143,9 @@ struct ContentView: View {
                 model: precaptureModel,
                 accessibilityGranted: permissions.statuses[.accessibility] == .granted,
                 onRequestAccessibility: {
-                    Task { await permissions.openSettings(for: .accessibility) }
+                    // Prompt (registers this binary in the Accessibility list)
+                    // rather than just opening the pane — see PermissionProbe.
+                    Task { await permissions.request(.accessibility) }
                 },
                 onRecord: {
                     Task {

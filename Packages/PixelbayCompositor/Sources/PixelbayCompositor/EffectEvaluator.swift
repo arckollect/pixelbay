@@ -13,7 +13,9 @@ import PixelbayCore
 //     keyframe's cursor focus, zoom factor, and animated progress. The
 //     compositor then spring-smooths that per-frame camera target.
 //   - For .talkingHeadSwap: the webcam rect is reparented onto the screen
-//     rect with `webcamOpacity = s`, so the webcam crossfades in on top of
+//     rect (the render graph aspect-fills the camera frame into it, so a
+//     16:9 / 4:3 cam is centre-cropped to the screen's shape, never
+//     stretched) with `webcamOpacity = s`, so the webcam crossfades in on top of
 //     the still-rendered screen layer as the keyframe's strength ramps
 //     0 → 1. The original PiP webcam slot vanishes the moment the keyframe
 //     becomes active; at s = 1 the webcam fully obscures the screen. If

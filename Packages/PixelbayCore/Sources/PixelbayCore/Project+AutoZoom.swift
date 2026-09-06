@@ -7,7 +7,7 @@ import Foundation
 // generated zooms, reopening won't re-add them.
 //
 // Stored in `Project.extras` as a JSON bool (no schema bump), the same typed-
-// accessor pattern as `Track.laneBreakout`. Missing key reads as `false`, so
+// accessor pattern as `MediaAsset.cursorRenderedSynthetically`. Missing key reads as `false`, so
 // every pre-existing project is treated as "not yet auto-zoomed" — but the
 // editor also gates the pass on the project having no zoom effects yet, so
 // curated older projects are left untouched.

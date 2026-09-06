@@ -26,24 +26,15 @@ public struct TimelineLayout: Sendable, Equatable {
     public var effectsLane: EffectsLaneLayout
     public var rulerHeight: CGFloat
     public var trackHeaderWidth: CGFloat
-    /// Branch B (2026-05-27) — Grouped timeline display rows. The renderer
-    /// in `TimelineView` (slice B.3) consumes this to decide whether each
-    /// row paints as a grouped band (Video/Audio super-lane) or as the
-    /// underlying physical track. `tracks` and `effectsLane` are still
-    /// emitted in full so legacy code paths and the per-physical-track
-    /// hit-test continue to work during the migration.
+    /// Grouped timeline display rows — Video, Audio, Effects — in top-down
+    /// order. `tracks` and `effectsLane` are still emitted in full so the
+    /// per-physical-track hit-test and clip rendering keep working.
     public var displayRows: [TimelineDisplayRow]
-    /// Branch B — one entry per collapsed grouped row whose primary clip
-    /// overlaps a secondary track's clip. The renderer paints a small
-    /// camera/speaker badge on the primary clip's top-right corner to
-    /// signal that the lane has hidden content. Empty when no group is
-    /// collapsed OR when no secondary overlap exists.
+    /// One entry per grouped row whose primary clip overlaps a secondary
+    /// track's clip. The renderer paints a small camera/speaker badge on
+    /// the primary clip's top-right corner to signal that the row carries
+    /// a second source there. Empty when no secondary overlap exists.
     public var groupedOverlapBadges: [GroupedLaneBadge]
-    /// Branch B — disclosure-triangle hit zones for each grouped lane
-    /// present in the project. Clicking inside `hitFrame` fires
-    /// `SetLaneCollapsedCommand` to flip the lane's collapse state.
-    /// Empty when the project has no tracks at all.
-    public var laneDisclosures: [LaneDisclosure]
     /// One per resizable display row (everything except the fixed-height
     /// effects lane): a horizontal grab zone spanning the header column at
     /// the row's bottom edge. Dragging it resizes just that row (per-row
@@ -59,7 +50,6 @@ public struct TimelineLayout: Sendable, Equatable {
         trackHeaderWidth: CGFloat,
         displayRows: [TimelineDisplayRow] = [],
         groupedOverlapBadges: [GroupedLaneBadge] = [],
-        laneDisclosures: [LaneDisclosure] = [],
         rowResizeHandles: [RowResizeHandle] = []
     ) {
         self.totalContentWidth = totalContentWidth
@@ -70,13 +60,12 @@ public struct TimelineLayout: Sendable, Equatable {
         self.trackHeaderWidth = trackHeaderWidth
         self.displayRows = displayRows
         self.groupedOverlapBadges = groupedOverlapBadges
-        self.laneDisclosures = laneDisclosures
         self.rowResizeHandles = rowResizeHandles
     }
 }
 
 /// A per-row height-resize grab zone. `rowID` matches
-/// `TimelineDisplayRow.id` ("group:video", "track:<uuid>"); `hitFrame`
+/// `TimelineDisplayRow.id` ("group:video", "group:audio"); `hitFrame`
 /// spans the header column at the row's bottom boundary; `currentHeight`
 /// is the row's height at layout time (the drag's starting value).
 public struct RowResizeHandle: Sendable, Equatable {
@@ -90,29 +79,22 @@ public struct RowResizeHandle: Sendable, Equatable {
     }
 }
 
-/// One visible row in the timeline. The renderer iterates `displayRows`
-/// top-down to lay out the actual screen output; the hit-test maps a
-/// click point back to one of these rows. A grouped row holds multiple
-/// physical tracks under one band; an expanded grouped row emits one
-/// `singleTrack` row per underlying physical track immediately after a
-/// `groupedHeader` marker (B.4 wires the disclosure triangle).
+/// One row the renderer draws. The layout emits exactly one Video row
+/// (when any video track exists), one Audio row (when any audio track
+/// exists), and the Effects row — every physical track folds into its
+/// group's row and the primary track's clips form the visible band.
 public struct TimelineDisplayRow: Sendable, Equatable, Identifiable {
     public enum Kind: Sendable, Equatable {
-        /// A collapsed `LaneGroupID.video` lane. `physicalTracks` lists
+        /// The `LaneGroupID.video` row. `physicalTracks` lists
         /// every screen / webcam / overlay track that maps into the
         /// group, in project-order. `primaryTrackID` is the screen
         /// track (or the first physical track if no screen-kind track
         /// is present — handles future overlay-only projects).
         case groupedVideo(physicalTracks: [TrackID], primaryTrackID: TrackID)
-        /// A collapsed `LaneGroupID.audio` lane. `primaryTrackID` is
+        /// The `LaneGroupID.audio` row. `primaryTrackID` is
         /// the microphone (or first physical track if no mic is
         /// present — voiceover-only projects).
         case groupedAudio(physicalTracks: [TrackID], primaryTrackID: TrackID)
-        /// An expanded physical track — renders the same way the
-        /// pre-Branch-B code path did. Carries the `LaneGroupID` so
-        /// the renderer can indent and label the row as a child of
-        /// its expanded parent.
-        case singleTrack(trackID: TrackID, parentGroup: LaneGroupID?)
         /// The dedicated effects lane (read-only badges).
         case effectsLane
     }
@@ -122,21 +104,17 @@ public struct TimelineDisplayRow: Sendable, Equatable, Identifiable {
     /// rawValues, and the fixed `effects` token.
     public let id: String
     public let kind: Kind
-    public let isCollapsed: Bool
     public let height: CGFloat
 
-    public init(id: String, kind: Kind, isCollapsed: Bool, height: CGFloat) {
+    public init(id: String, kind: Kind, height: CGFloat) {
         self.id = id
         self.kind = kind
-        self.isCollapsed = isCollapsed
         self.height = height
     }
 }
 
 extension TimelineDisplayRow.Kind {
-    /// True iff this row represents the Video grouped lane (collapsed or
-    /// not — the layout uses the same row Kind for the collapsed case
-    /// only; expanded children are `singleTrack`). Used by the renderer
+    /// True iff this row is the Video grouped lane. Used by the renderer
     /// to pick the camera-vs-speaker badge glyph.
     public var isVideoGroup: Bool {
         if case .groupedVideo = self { return true }
@@ -144,12 +122,12 @@ extension TimelineDisplayRow.Kind {
     }
 }
 
-/// A "there's also content on a hidden track here" indicator. The
+/// A "there's also content on a secondary track here" indicator. The
 /// renderer paints a small icon-on-circle (camera for video group,
 /// speaker for audio group) anchored to the top-right of `anchorFrame`
-/// to signal that the user could expand the lane to see the underlying
-/// secondary clips. Per-primary-clip de-duplicated — at most one badge
-/// per primary clip even when multiple secondary tracks overlap it.
+/// to signal that a webcam / system-audio clip underlies this span of
+/// the row. Per-primary-clip de-duplicated — at most one badge per
+/// primary clip even when multiple secondary tracks overlap it.
 public struct GroupedLaneBadge: Sendable, Equatable {
     public enum Kind: Sendable, Equatable { case video; case audio }
     public let kind: Kind
@@ -166,23 +144,6 @@ public struct GroupedLaneBadge: Sendable, Equatable {
     }
 }
 
-/// One disclosure-triangle hit zone per grouped lane (Slice B.4).
-/// Clicking inside `hitFrame` fires `SetLaneCollapsedCommand`. The
-/// renderer paints a chevron at the same frame; right-pointing when
-/// `isCollapsed`, down-pointing when expanded.
-public struct LaneDisclosure: Sendable, Equatable {
-    public let groupID: LaneGroupID
-    public let isCollapsed: Bool
-    /// Rect to draw the chevron + accept clicks (in viewport coords,
-    /// origin top-left). Sized just shy of `trackHeaderWidth` so it
-    /// reads as part of the lane header.
-    public let hitFrame: CGRect
-    public init(groupID: LaneGroupID, isCollapsed: Bool, hitFrame: CGRect) {
-        self.groupID = groupID
-        self.isCollapsed = isCollapsed
-        self.hitFrame = hitFrame
-    }
-}
 
 public struct EffectsLaneLayout: Sendable, Equatable {
     public var headerFrame: CGRect
@@ -331,20 +292,15 @@ public enum TimelineLayoutCalculator {
     public static let effectsLaneHeight: CGFloat = 28
 
     /// Pure-function grouping pass: produces the row sequence the
-    /// renderer iterates top-down. Branch B's central transform — each
-    /// physical track is either folded into a grouped lane (when that
-    /// lane is collapsed) or emitted as a `singleTrack` row (when the
-    /// containing lane is expanded). The `.effects` track is always
-    /// folded into the dedicated `effectsLane` row regardless of
-    /// collapse state (it has its own dedicated row).
+    /// renderer iterates top-down. Each physical track folds into its
+    /// `TrackKind.laneGroup` row (Video or Audio); the `.effects` track
+    /// folds into the dedicated `effectsLane` row.
     ///
     /// Stable ordering rules:
     ///   • Video group appears before Audio group when both are
-    ///     present, matching the user-visible default (video on top).
-    ///   • Within an expanded group, physical tracks render in their
-    ///     `project.tracks` array order — preserves any user reorder.
-    ///   • `effectsLane` always sits at the bottom (matches the
-    ///     pre-Branch-B layout's behaviour).
+    ///     present (video on top).
+    ///   • Within a group, `physicalTracks` keeps `project.tracks` order.
+    ///   • `effectsLane` always sits at the bottom.
     public static func computeDisplayRows(
         project: Project,
         trackHeight: CGFloat = defaultTrackHeight,
@@ -358,27 +314,12 @@ public enum TimelineLayoutCalculator {
             return max(minTrackHeight, min(maxTrackHeight, override))
         }
         // Bucket physical tracks by their lane group, preserving the
-        // project's track ordering inside each bucket. Tracks whose
-        // `laneBreakout == true` are NOT bucketed into a group —
-        // they're collected per-group separately and rendered as
-        // standalone singleTrack rows immediately after the group's
-        // own row(s), so the user can still tell what they were
-        // broken out of.
+        // project's track ordering inside each bucket.
         var videoIDs: [TrackID] = []
         var audioIDs: [TrackID] = []
-        var brokenVideo: [TrackID] = []
-        var brokenAudio: [TrackID] = []
         var primaryVideo: TrackID?    // prefer screen, fall back to first video track
         var primaryAudio: TrackID?    // prefer microphone, fall back to first audio track
         for track in project.tracks {
-            if track.laneBreakout && track.kind.laneGroup != nil {
-                if track.kind.laneGroup == .video {
-                    brokenVideo.append(track.id)
-                } else {
-                    brokenAudio.append(track.id)
-                }
-                continue
-            }
             switch track.kind.laneGroup {
             case .video:
                 videoIDs.append(track.id)
@@ -401,56 +342,17 @@ public enum TimelineLayoutCalculator {
         var rows: [TimelineDisplayRow] = []
         let appendGroup: (LaneGroupID, [TrackID], TrackID?) -> Void = { group, ids, primary in
             guard !ids.isEmpty, let primary else { return }
-            let collapsed = project.isLaneCollapsed(group)
-            if collapsed {
-                let kind: TimelineDisplayRow.Kind = (group == .video)
-                    ? .groupedVideo(physicalTracks: ids, primaryTrackID: primary)
-                    : .groupedAudio(physicalTracks: ids, primaryTrackID: primary)
-                let id = "group:\(group.rawValue)"
-                rows.append(TimelineDisplayRow(
-                    id: id,
-                    kind: kind,
-                    isCollapsed: true,
-                    height: rowHeight(forID: id)
-                ))
-            } else {
-                // Expanded: emit one row per physical track in order.
-                for trackID in ids {
-                    let id = "track:\(trackID.rawValue)"
-                    rows.append(TimelineDisplayRow(
-                        id: id,
-                        kind: .singleTrack(trackID: trackID, parentGroup: group),
-                        isCollapsed: false,
-                        height: rowHeight(forID: id)
-                    ))
-                }
-            }
-        }
-        let appendBrokenOut: (LaneGroupID, [TrackID]) -> Void = { group, ids in
-            for trackID in ids {
-                let id = "track:\(trackID.rawValue)"
-                rows.append(TimelineDisplayRow(
-                    id: id,
-                    kind: .singleTrack(trackID: trackID, parentGroup: group),
-                    isCollapsed: false,
-                    height: rowHeight(forID: id)
-                ))
-            }
+            let kind: TimelineDisplayRow.Kind = (group == .video)
+                ? .groupedVideo(physicalTracks: ids, primaryTrackID: primary)
+                : .groupedAudio(physicalTracks: ids, primaryTrackID: primary)
+            let id = "group:\(group.rawValue)"
+            rows.append(TimelineDisplayRow(id: id, kind: kind, height: rowHeight(forID: id)))
         }
         appendGroup(.video, videoIDs, primaryVideo)
-        appendBrokenOut(.video, brokenVideo)
         appendGroup(.audio, audioIDs, primaryAudio)
-        appendBrokenOut(.audio, brokenAudio)
 
-        // Effects lane is always last, always present. Height matches
-        // the existing dedicated lane height; isCollapsed is meaningless
-        // for it (always false).
-        rows.append(TimelineDisplayRow(
-            id: "effects",
-            kind: .effectsLane,
-            isCollapsed: false,
-            height: effectsLaneHeight
-        ))
+        // Effects lane is always last, always present, fixed height.
+        rows.append(TimelineDisplayRow(id: "effects", kind: .effectsLane, height: effectsLaneHeight))
         return rows
     }
 
@@ -464,10 +366,9 @@ public enum TimelineLayoutCalculator {
         let totalSeconds = self.totalSeconds(in: project)
         let totalContentWidth = trackHeaderWidth + max(viewport.size.width - trackHeaderWidth, totalSeconds * pps)
 
-        // Branch B: Y positions are driven by `displayRows` so collapsed
-        // grouped tracks share a single row. Build a TrackID → row-Y map
-        // first; per-track frames are projected onto that map below so
-        // grouped-collapse tracks land at the group's Y origin.
+        // Y positions are driven by `displayRows` so grouped tracks share
+        // a single row. Build a TrackID → row-Y map first; per-track
+        // frames are projected onto that map below.
         let displayRows = computeDisplayRows(
             project: project,
             trackHeight: trackHeight,
@@ -487,9 +388,6 @@ public enum TimelineLayoutCalculator {
                     trackToRowY[trackID] = cumulativeY
                     trackToRowHeight[trackID] = row.height
                 }
-            case .singleTrack(let trackID, _):
-                trackToRowY[trackID] = cumulativeY
-                trackToRowHeight[trackID] = row.height
             case .effectsLane:
                 effectsLaneY = cumulativeY
             }
@@ -516,9 +414,8 @@ public enum TimelineLayoutCalculator {
 
         var tracks: [TrackLayout] = []
         for track in project.tracks {
-            // `.effects` tracks don't appear in displayRows as singleTrack
-            // — they fold into the dedicated effects lane. Skip them
-            // here so they don't get drawn twice.
+            // `.effects` tracks fold into the dedicated effects lane —
+            // skip them here so they don't get drawn twice.
             if track.kind == .effects { continue }
             guard let yOrigin = trackToRowY[track.id] else { continue }
             let rowHeight = trackToRowHeight[track.id] ?? trackHeight
@@ -628,65 +525,15 @@ public enum TimelineLayoutCalculator {
             keyframes: keyframeLayouts
         )
 
-        // Branch B (Slice B.4) — compute disclosure-triangle frames. One
-        // per grouped lane present in the project. Anchors against the
-        // row's header rect (collapsed → grouped row; expanded → first
-        // physical-track child). 14pt-square frame inset from the left
-        // edge of the header so the chevron reads as a chevron, not a
-        // header tap zone.
-        let disclosureSize: CGFloat = 14
-        let disclosureInset: CGFloat = 4
-        var disclosures: [LaneDisclosure] = []
-        for row in displayRows {
-            switch row.kind {
-            case .groupedVideo(_, let primaryID),
-                 .groupedAudio(_, let primaryID):
-                guard let yOrigin = trackToRowY[primaryID],
-                      let rowHeight = trackToRowHeight[primaryID] else { continue }
-                let group: LaneGroupID = row.kind.isVideoGroup ? .video : .audio
-                let frame = CGRect(
-                    x: disclosureInset,
-                    y: yOrigin + (rowHeight - disclosureSize) / 2,
-                    width: disclosureSize,
-                    height: disclosureSize
-                )
-                disclosures.append(LaneDisclosure(
-                    groupID: group, isCollapsed: true, hitFrame: frame
-                ))
-            case .singleTrack(let trackID, let parentGroup):
-                guard let parentGroup,
-                      let yOrigin = trackToRowY[trackID],
-                      let rowHeight = trackToRowHeight[trackID] else { continue }
-                // Only the FIRST physical track of the expanded group
-                // gets the chevron — the others read as children of
-                // it. Detect "first child" by checking if a disclosure
-                // for this group is already in the list.
-                guard !disclosures.contains(where: { $0.groupID == parentGroup }) else { continue }
-                let frame = CGRect(
-                    x: disclosureInset,
-                    y: yOrigin + (rowHeight - disclosureSize) / 2,
-                    width: disclosureSize,
-                    height: disclosureSize
-                )
-                disclosures.append(LaneDisclosure(
-                    groupID: parentGroup, isCollapsed: false, hitFrame: frame
-                ))
-            case .effectsLane:
-                continue
-            }
-        }
-
-        // Branch B (Slice B.3) — compute one badge per primary clip that
-        // overlaps any secondary track's clip in a collapsed grouped
-        // row. Pure-function so tests can drive it directly without
-        // touching the NSView.
+        // One badge per primary clip that overlaps any secondary track's
+        // clip in a grouped row. Pure-function so tests can drive it
+        // directly without touching the NSView.
         let tracksByID = Dictionary(
             tracks.map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first }
         )
         var badges: [GroupedLaneBadge] = []
         for row in displayRows {
-            guard row.isCollapsed else { continue }
             let physicalTracks: [TrackID]
             let primaryID: TrackID
             let badgeKind: GroupedLaneBadge.Kind
@@ -726,7 +573,6 @@ public enum TimelineLayoutCalculator {
             trackHeaderWidth: trackHeaderWidth,
             displayRows: displayRows,
             groupedOverlapBadges: badges,
-            laneDisclosures: disclosures,
             rowResizeHandles: resizeHandles
         )
     }

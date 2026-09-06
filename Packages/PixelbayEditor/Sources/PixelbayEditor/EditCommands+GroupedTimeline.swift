@@ -1,215 +1,22 @@
 import Foundation
 import PixelbayCore
 
-// Branch B (Grouped Timeline) — commands live in this dedicated file
-// instead of `EditCommands.swift` so the merge surface against the
-// concurrent `feature/scenes-flow` branch (Branch A) stays minimal.
-// Branch A is doing the same with its own `EditCommands+ScenesFlow.swift`.
+// Grouped-timeline commands. The timeline shows one Video row and one
+// Audio row (plus Effects); each row's visible band is its primary track
+// (screen / microphone). When the user trims / moves / removes that
+// primary clip, the edit must propagate to every overlapping clip on the
+// row's other physical tracks so screen + webcam (or mic + system audio)
+// stay in sync. These commands take a `[ClipID]` instead of one ID and
+// apply the same delta / new-start / removal to every member atomically
+// (single undo entry per group edit).
 //
-// Slice B.4 ships the lane-collapse toggles (single + bulk). Slice B.5
-// adds the group-variant trim/move/remove commands used when the user
-// edits a collapsed lane's primary clip and the change needs to
-// propagate to the underlying physical tracks.
+// The TimelineNSView mouseUp handler asks
+// `Project.clipsOnLaneOverlapping(_:)` for the member set, then picks the
+// single- or group-variant command by count. That helper lives at the
+// bottom of this file as a Project extension so tests can drive it
+// without touching the NSView.
 
-// MARK: - SetLaneCollapsed (Slice B.4)
-
-/// Toggles a single grouped lane's collapse state. When `collapsed:
-/// false` (expanding), also sets `track.laneBreakout = true` on every
-/// member track of the group — the user's "expand permanently
-/// decouples these tracks" intent (polish 2026-05-27): once expanded
-/// the tracks render as standalone rows and edits don't propagate.
-/// Inverse restores the previous collapse value AND the previous
-/// breakout flags so undo brings back the exact prior state.
-public struct SetLaneCollapsedCommand: EditCommand {
-    public let displayName = "Toggle Lane"
-    public let groupID: LaneGroupID
-    public let collapsed: Bool
-
-    public init(groupID: LaneGroupID, collapsed: Bool) {
-        self.groupID = groupID
-        self.collapsed = collapsed
-    }
-
-    @discardableResult
-    public func apply(to project: inout Project) throws -> any EditCommand {
-        let previousCollapse = project.timelineLaneCollapse[groupID]
-        // Capture the previous breakout state for every track that
-        // belongs to this group by kind (membership is TrackKind-driven
-        // even if some are currently broken out).
-        var previousBreakouts: [TrackID: Bool] = [:]
-        for track in project.tracks where track.kind.laneGroup == groupID {
-            previousBreakouts[track.id] = track.laneBreakout
-        }
-
-        var map = project.timelineLaneCollapse
-        map[groupID] = collapsed
-        project.timelineLaneCollapse = map
-
-        // Expand = break out: every member track becomes standalone.
-        // Collapse = re-group: clear the breakout flag so any standalone
-        // members rejoin the grouped lane. (No-op for already-correct
-        // flags.)
-        let targetBreakout = !collapsed
-        for idx in project.tracks.indices where project.tracks[idx].kind.laneGroup == groupID {
-            if project.tracks[idx].laneBreakout != targetBreakout {
-                project.tracks[idx].laneBreakout = targetBreakout
-            }
-        }
-
-        return _RestoreLaneCollapsedCommand(
-            groupID: groupID,
-            previousCollapse: previousCollapse,
-            previousBreakouts: previousBreakouts
-        )
-    }
-}
-
-/// Internal inverse for SetLaneCollapsedCommand. Restores either the
-/// previous explicit value OR removes the entry entirely so the
-/// smart-default seed re-applies on next read. Also restores every
-/// member track's `laneBreakout` flag to its pre-apply value. Not
-/// exposed as a user-facing command because the regular toggle command
-/// always sets an explicit value.
-struct _RestoreLaneCollapsedCommand: EditCommand {
-    let displayName = "Restore Lane"
-    let groupID: LaneGroupID
-    let previousCollapse: Bool?
-    let previousBreakouts: [TrackID: Bool]
-
-    @discardableResult
-    func apply(to project: inout Project) throws -> any EditCommand {
-        let currentCollapseBeforeRestore = project.timelineLaneCollapse[groupID]
-        var currentBreakoutsBeforeRestore: [TrackID: Bool] = [:]
-        for track in project.tracks where track.kind.laneGroup == groupID {
-            currentBreakoutsBeforeRestore[track.id] = track.laneBreakout
-        }
-
-        var map = project.timelineLaneCollapse
-        if let previous = previousCollapse {
-            map[groupID] = previous
-        } else {
-            map.removeValue(forKey: groupID)
-        }
-        project.timelineLaneCollapse = map
-
-        for idx in project.tracks.indices {
-            let trackID = project.tracks[idx].id
-            if let prior = previousBreakouts[trackID],
-               project.tracks[idx].laneBreakout != prior {
-                project.tracks[idx].laneBreakout = prior
-            }
-        }
-
-        return _RestoreLaneCollapsedCommand(
-            groupID: groupID,
-            previousCollapse: currentCollapseBeforeRestore,
-            previousBreakouts: currentBreakoutsBeforeRestore
-        )
-    }
-}
-
-// MARK: - SetAllLanesCollapsed (Slice B.4)
-
-/// Bulk toggle every lane group plus the smart-default seed. Used by
-/// the editor toolbar's "Expand/Collapse all" button. Stores the full
-/// pre-state map, default seed, AND every track's previous laneBreakout
-/// flag so the inverse restores exactly.
-///
-/// "Collapse all" (collapsed=true) clears every track's laneBreakout
-/// flag so previously broken-out tracks rejoin their group. "Expand
-/// all" (collapsed=false) sets laneBreakout=true on every groupable
-/// track so they all render as standalone rows. Matches the user
-/// intent (polish 2026-05-27): expand = decouple, collapse = regroup.
-public struct SetAllLanesCollapsedCommand: EditCommand {
-    public let displayName = "Toggle All Lanes"
-    public let collapsed: Bool
-
-    public init(collapsed: Bool) {
-        self.collapsed = collapsed
-    }
-
-    @discardableResult
-    public func apply(to project: inout Project) throws -> any EditCommand {
-        let previousMap = project.timelineLaneCollapse
-        let previousDefault = project.timelineLaneCollapseDefault
-        var previousBreakouts: [TrackID: Bool] = [:]
-        for track in project.tracks where track.kind.laneGroup != nil {
-            previousBreakouts[track.id] = track.laneBreakout
-        }
-
-        var newMap: [LaneGroupID: Bool] = [:]
-        for group in LaneGroupID.allCases {
-            newMap[group] = collapsed
-        }
-        project.timelineLaneCollapse = newMap
-        project.timelineLaneCollapseDefault = collapsed
-
-        let targetBreakout = !collapsed
-        for idx in project.tracks.indices where project.tracks[idx].kind.laneGroup != nil {
-            if project.tracks[idx].laneBreakout != targetBreakout {
-                project.tracks[idx].laneBreakout = targetBreakout
-            }
-        }
-
-        return _RestoreAllLanesCollapsedCommand(
-            previousMap: previousMap,
-            previousDefault: previousDefault,
-            previousBreakouts: previousBreakouts
-        )
-    }
-}
-
-/// Internal inverse for SetAllLanesCollapsedCommand. Restores the full
-/// pre-state (including any custom per-lane values, the smart-default
-/// seed, and every track's laneBreakout flag) so the user's prior
-/// configuration comes back exactly.
-struct _RestoreAllLanesCollapsedCommand: EditCommand {
-    let displayName = "Restore All Lanes"
-    let previousMap: [LaneGroupID: Bool]
-    let previousDefault: Bool
-    let previousBreakouts: [TrackID: Bool]
-
-    @discardableResult
-    func apply(to project: inout Project) throws -> any EditCommand {
-        let currentMap = project.timelineLaneCollapse
-        let currentDefault = project.timelineLaneCollapseDefault
-        var currentBreakouts: [TrackID: Bool] = [:]
-        for track in project.tracks where track.kind.laneGroup != nil {
-            currentBreakouts[track.id] = track.laneBreakout
-        }
-
-        project.timelineLaneCollapse = previousMap
-        project.timelineLaneCollapseDefault = previousDefault
-        for idx in project.tracks.indices {
-            let trackID = project.tracks[idx].id
-            if let prior = previousBreakouts[trackID],
-               project.tracks[idx].laneBreakout != prior {
-                project.tracks[idx].laneBreakout = prior
-            }
-        }
-
-        return _RestoreAllLanesCollapsedCommand(
-            previousMap: currentMap,
-            previousDefault: currentDefault,
-            previousBreakouts: currentBreakouts
-        )
-    }
-}
-
-// MARK: - Group-variant trim/move/remove commands (Slice B.5)
-//
-// When a lane is collapsed and the user trims / moves / removes the
-// primary clip, the edit must propagate to every overlapping clip on
-// the lane's underlying physical tracks. These commands take a
-// `[ClipID]` instead of one ID and apply the same delta / new-start /
-// removal to every member atomically (single undo entry per group
-// edit).
-//
-// The TimelineNSView mouseUp handler decides single vs. group by
-// inspecting the project's lane-collapse state at the affected clip's
-// track, then asks `Project.clipsOnCollapsedLaneOverlapping(_:)` for
-// the full member set. That helper lives below as a Project extension
-// so tests can drive it without touching the NSView.
+// MARK: - Group-variant trim/move/remove commands
 
 /// Group variant of `TrimClipInCommand`. Trims (or expands) the
 /// IN-point of every clip in `clipIDs` by `delta`. Per-clip apply
@@ -383,36 +190,25 @@ struct _ReinsertClipsGroupCommand: EditCommand {
 // MARK: - Grouped-lane clip resolution helpers
 
 public extension Project {
-    /// For Slice B.5: returns every clip on the same collapsed grouped
-    /// lane as `leadClipID` whose timeline range intersects the lead
-    /// clip's range. Used by `TimelineNSView.mouseUp` to decide which
-    /// clips a collapsed-lane drag should propagate to. Returns just
-    /// `[leadClipID]` if the lead clip's lane is NOT collapsed (no
-    /// propagation needed — the single-clip command applies as
-    /// before).
+    /// Returns every clip on the same grouped lane as `leadClipID` whose
+    /// timeline range intersects the lead clip's range. Used by
+    /// `TimelineNSView.mouseUp` to decide which clips a grouped-row drag
+    /// should propagate to. Returns just `[leadClipID]` when the lead
+    /// track has no lane group (`.effects`) or nothing overlaps.
     ///
     /// The lead clip itself is always included as the first element.
-    /// `effects` tracks never participate in lane grouping so they're
-    /// excluded regardless.
-    func clipsOnCollapsedLaneOverlapping(_ leadClipID: ClipID) -> [ClipID] {
+    func clipsOnLaneOverlapping(_ leadClipID: ClipID) -> [ClipID] {
         guard let (leadTrackIdx, leadClipIdx) = locateClip(leadClipID) else {
             return []
         }
         let leadTrack = tracks[leadTrackIdx]
         let leadClip = leadTrack.clips[leadClipIdx]
-        // If the lead track is broken out, it's standalone — no
-        // propagation. Same return as the expanded-lane case below.
-        if leadTrack.laneBreakout { return [leadClipID] }
         guard let group = leadTrack.kind.laneGroup else { return [leadClipID] }
-        guard isLaneCollapsed(group) else { return [leadClipID] }
 
         let leadRange = leadClip.timelineRange
         var result: [ClipID] = [leadClipID]
         for track in tracks where track.id != leadTrack.id {
             guard track.kind.laneGroup == group else { continue }
-            // Broken-out group members are independent — don't pull
-            // them along when the rest of the lane is collapsed.
-            if track.laneBreakout { continue }
             for clip in track.clips where clip.id != leadClipID {
                 if clip.timelineRange.overlaps(leadRange) {
                     result.append(clip.id)

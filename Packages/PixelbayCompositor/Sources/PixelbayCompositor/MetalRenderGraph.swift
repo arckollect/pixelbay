@@ -326,6 +326,18 @@ public final class MetalRenderGraph: @unchecked Sendable {
             } else {
                 radius = layout.webcamCornerRadius
             }
+            // The camera frame keeps its native aspect; the slot it's drawn
+            // into does not (16:9 PiP, or the whole screen rect during a
+            // talking head). Centre-crop the source to the slot's aspect so
+            // the face is never stretched — reuses the shaders' content-zoom
+            // crop slot, which is identity for the webcam otherwise.
+            let webcamCrop = LayoutCalculator.aspectFillCropUV(
+                sourceSize: CGSize(
+                    width: CVPixelBufferGetWidth(webcam),
+                    height: CVPixelBufferGetHeight(webcam)
+                ),
+                destinationSize: webcamRect.size
+            )
             try drawLayer(
                 encoder: encoder,
                 source: webcam,
@@ -334,6 +346,7 @@ public final class MetalRenderGraph: @unchecked Sendable {
                 cornerRadiusPx: radius,
                 isCircle: isCircle,
                 opacity: layout.webcamOpacity,
+                screenCropUV: webcamCrop,
                 cvTextureRefs: &cvTextureRefs
             )
         }

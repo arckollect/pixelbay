@@ -63,8 +63,10 @@ public actor PermissionCoordinator {
     //     fresh user account, then opens System Settings on subsequent calls.
     //     Caller should follow up by polling refresh() while the onboarding
     //     view is visible.
-    //   * accessibility — no API to programmatically prompt; opens System
-    //     Settings directly.
+    //   * accessibility — AXIsProcessTrustedWithOptions(prompt) registers the
+    //     app in the Accessibility list and shows the system dialog; the user
+    //     still flips the toggle in Settings, and refresh() polling picks it
+    //     up (AXIsProcessTrusted reflects the change live, no relaunch).
     //
     // Returns the post-request status for the requested kind. The full status
     // map is also refreshed as a side effect.
@@ -83,7 +85,7 @@ public actor PermissionCoordinator {
             statuses[.microphone] = result
             return result
         case .accessibility:
-            probe.openAccessibilitySettings()
+            _ = probe.requestAccessibility()
             return refresh()[.accessibility] ?? .notDetermined
         }
     }

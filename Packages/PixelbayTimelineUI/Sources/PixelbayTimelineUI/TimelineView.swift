@@ -583,12 +583,10 @@ public final class TimelineNSView: NSView {
         // it's the standard sticky-header trade-off (top of lane 1 sits
         // briefly under the floating ruler as it scrolls past).
 
-        // Branch B (2026-05-27): render iterates `displayRows`. For a
-        // grouped row, draw the primary track's band only. For a
-        // singleTrack row, draw the physical track's clips as before.
-        // PiP/audio badges (`layout.groupedOverlapBadges`) are painted
-        // in a separate pass below so the badge always lands on top of
-        // the primary clip.
+        // Render iterates `displayRows`: each grouped row draws its
+        // primary track's clips as the visible band. PiP/audio badges
+        // (`layout.groupedOverlapBadges`) are painted in a separate pass
+        // below so the badge always lands on top of the primary clip.
         let tracksByID = Dictionary(
             layout.tracks.map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first }
@@ -597,9 +595,6 @@ public final class TimelineNSView: NSView {
             switch row.kind {
             case .effectsLane:
                 continue   // drawn in the dedicated effects pass below
-            case .singleTrack(let trackID, _):
-                guard let track = tracksByID[trackID] else { continue }
-                drawSingleTrackRow(track, in: layer)
             case .groupedVideo(_, let primaryTrackID),
                  .groupedAudio(_, let primaryTrackID):
                 drawGroupedRow(
@@ -621,22 +616,13 @@ public final class TimelineNSView: NSView {
             )
         }
 
-        // Disclosure chevrons for each grouped lane (Slice B.4).
-        for disclosure in layout.laneDisclosures {
-            addDisclosureChevron(disclosure, in: layer)
-        }
-
         let effectsLane = layout.effectsLane
-        drawRowCard(headerFrame: effectsLane.headerFrame, laneFrame: effectsLane.laneFrame, in: layer)
         // Effects header through the shared lane-header path so it matches the
-        // icon+name treatment of the track lanes above it.
+        // name treatment of the track lanes above it.
         drawLaneHeader(
             frame: effectsLane.headerFrame,
             title: "Effects",
-            symbolName: "plus.magnifyingglass",
-            tint: Theme.NSColor.trackEffects,
             emphasized: false,
-            muted: false,
             in: layer
         )
 
@@ -749,28 +735,8 @@ public final class TimelineNSView: NSView {
         }
     }
 
-    /// Draws one physical-track row: row card + header + clips + optional
-    /// waveform overlay. Used for `singleTrack` display rows (expanded
-    /// grouped child OR a track outside any group).
-    private func drawSingleTrackRow(_ track: TrackLayout, in layer: CALayer) {
-        let muted = project?.tracks.first(where: { $0.id == track.id })?.muted ?? false
-        drawRowCard(headerFrame: track.headerFrame, laneFrame: track.laneFrame, in: layer)
-        drawLaneHeader(
-            frame: track.headerFrame,
-            title: track.name,
-            symbolName: laneSymbol(for: track.kind),
-            tint: baseColor(for: track.kind),
-            emphasized: false,
-            muted: muted,
-            in: layer
-        )
-        for clip in track.clips {
-            addClipLayer(clip, kind: track.kind, in: layer)
-        }
-    }
-
-    /// Draws a grouped (collapsed) row: the primary physical track's
-    /// clips become the lane's band. The secondary-track-overlap badges
+    /// Draws a grouped row: the primary physical track's clips become
+    /// the lane's band. The secondary-track-overlap badges
     /// are painted in a separate pass from the precomputed
     /// `layout.groupedOverlapBadges` so they sit on top of the clip
     /// layers and the layout-vs-renderer split stays clean.
@@ -782,17 +748,12 @@ public final class TimelineNSView: NSView {
     ) {
         guard let primary = tracksByID[primaryTrackID] else { return }
 
-        drawRowCard(headerFrame: primary.headerFrame, laneFrame: primary.laneFrame, in: layer)
-        // Header label uses the group's friendly name. No mute indicator on
-        // grouped rows — the band aggregates multiple physical tracks whose
-        // mute states can differ; mute lives on the expanded child rows.
+        // Header label uses the group's friendly name. Mute is a per-track
+        // state that lives in the Audio inspector, not on the row header.
         drawLaneHeader(
             frame: primary.headerFrame,
             title: isVideoGroup ? "Video" : "Audio",
-            symbolName: isVideoGroup ? "video.fill" : "speaker.wave.2.fill",
-            tint: baseColor(for: primary.kind),
             emphasized: true,
-            muted: false,
             in: layer
         )
 
@@ -800,35 +761,6 @@ public final class TimelineNSView: NSView {
         for clip in primary.clips {
             addClipLayer(clip, kind: primary.kind, in: layer)
         }
-    }
-
-    /// One soft rounded "row card" spanning a display row's header + lane,
-    /// with a hairline seam where the header column meets the lane. Replaces
-    /// the old opaque header box + flat lane wash so each row reads as a
-    /// single continuous surface floating on the deep canvas — the lane's
-    /// identity comes from its tinted icon and clips, not from chrome.
-    private func drawRowCard(headerFrame: CGRect, laneFrame: CGRect, in layer: CALayer) {
-        let cardInset: CGFloat = 6
-        let card = CALayer()
-        card.frame = CGRect(
-            x: headerFrame.minX + cardInset,
-            y: headerFrame.minY,
-            width: max(0, laneFrame.maxX - headerFrame.minX - cardInset * 2),
-            height: headerFrame.height
-        )
-        card.backgroundColor = NSColor.white.withAlphaComponent(0.035).cgColor
-        card.cornerRadius = 7
-        layer.addSublayer(card)
-
-        let seam = CALayer()
-        seam.frame = CGRect(
-            x: laneFrame.minX,
-            y: headerFrame.minY + 6,
-            width: Theme.Stroke.hairline,
-            height: max(0, headerFrame.height - 12)
-        )
-        seam.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
-        layer.addSublayer(seam)
     }
 
     /// Shared clip rendering: a soft role-tinted "glass" body with a quiet
@@ -876,21 +808,6 @@ public final class TimelineNSView: NSView {
         return selected ? 0.38 : 0.26
     }
 
-    /// Renders the disclosure chevron for one grouped lane. SF Symbol
-    /// "chevron.right" when collapsed (points to the band), "chevron.down"
-    /// when expanded (points at the first child row). Drawn as a plain
-    /// CALayer with `NSImage` contents — same pattern as the PiP badge.
-    private func addDisclosureChevron(_ disclosure: LaneDisclosure, in layer: CALayer) {
-        let symbolName = disclosure.isCollapsed ? "chevron.right" : "chevron.down"
-        guard let symbol = tintedSymbol(symbolName, color: Theme.NSColor.textTertiary) else { return }
-        let chevron = CALayer()
-        chevron.frame = disclosure.hitFrame
-        chevron.contents = symbol
-        chevron.contentsGravity = .resizeAspect
-        chevron.contentsScale = window?.backingScaleFactor ?? 2
-        layer.addSublayer(chevron)
-    }
-
     /// Adds a small icon-on-circle overlay anchored to the top-right of
     /// `clipFrame`. Used to signal "there's a non-primary track clip
     /// underlying this part of the grouped lane" — a video group shows
@@ -925,65 +842,21 @@ public final class TimelineNSView: NSView {
         }
     }
 
-    /// Draws a lane header cell: a per-kind glyph tinted to the lane's ROLE
-    /// colour at the left (this — not a filled box — is what identifies the
-    /// lane), the (vertically centred, truncating) track name, and — when
-    /// `muted` — a danger-tinted speaker.slash on the right. The mute glyph
-    /// is a status indicator only; toggling mute lives in the Audio
-    /// inspector tab (no CALayer hit-testing here). The header background is
-    /// transparent: the shared row card behind it provides the surface.
+    /// Draws a lane header cell: just the (vertically centred, truncating)
+    /// row name. No glyph and no header surface — the lane's identity comes
+    /// from its clips, so the header column is a label on the bare canvas.
     private func drawLaneHeader(
         frame: CGRect,
         title: String,
-        symbolName: String,
-        tint: NSColor,
         emphasized: Bool,
-        muted: Bool,
         in layer: CALayer
     ) {
         let scale = window?.backingScaleFactor ?? 2
+        let textColor: NSColor = emphasized ? Theme.NSColor.textPrimary : Theme.NSColor.textSecondary
 
-        let textColor: NSColor = muted
-            ? Theme.NSColor.textTertiary
-            : (emphasized ? Theme.NSColor.textPrimary : Theme.NSColor.textSecondary)
-        let iconColor: NSColor = muted ? Theme.NSColor.textTertiary : tint
-
-        let leftPad: CGFloat = 14
-        let gap: CGFloat = 6
-        let iconSize: CGFloat = 13
-        var textMinX = frame.minX + leftPad
-        var textMaxX = frame.maxX - leftPad
-
-        if let icon = tintedSymbol(symbolName, color: iconColor) {
-            let iconLayer = CALayer()
-            iconLayer.frame = CGRect(
-                x: frame.minX + leftPad,
-                y: frame.midY - iconSize / 2,
-                width: iconSize,
-                height: iconSize
-            )
-            iconLayer.contents = icon
-            iconLayer.contentsGravity = .resizeAspect
-            iconLayer.contentsScale = scale
-            layer.addSublayer(iconLayer)
-            textMinX += iconSize + gap
-        }
-
-        if muted, let mutedIcon = tintedSymbol("speaker.slash.fill", color: Theme.NSColor.danger) {
-            let mutedSize: CGFloat = 12
-            let mutedLayer = CALayer()
-            mutedLayer.frame = CGRect(
-                x: frame.maxX - leftPad - mutedSize,
-                y: frame.midY - mutedSize / 2,
-                width: mutedSize,
-                height: mutedSize
-            )
-            mutedLayer.contents = mutedIcon
-            mutedLayer.contentsGravity = .resizeAspect
-            mutedLayer.contentsScale = scale
-            layer.addSublayer(mutedLayer)
-            textMaxX -= mutedSize + gap
-        }
+        let horizontalPad: CGFloat = 14
+        let textMinX = frame.minX + horizontalPad
+        let textMaxX = frame.maxX - horizontalPad
 
         let text = CATextLayer()
         let textHeight: CGFloat = 14
@@ -1003,21 +876,6 @@ public final class TimelineNSView: NSView {
         text.foregroundColor = textColor.cgColor
         text.backgroundColor = NSColor.clear.cgColor
         layer.addSublayer(text)
-    }
-
-    /// SF Symbol per track kind for the lane headers. Mirrors the app's
-    /// `TrackKind.inspectorSymbol` (the TimelineUI package can't see app
-    /// code) so iconography stays consistent across the editor.
-    private func laneSymbol(for kind: TrackKind) -> String {
-        switch kind {
-        case .screen:        return "display"
-        case .webcam:        return "video.fill"
-        case .microphone:    return "mic.fill"
-        case .systemAudio:   return "speaker.wave.2.fill"
-        case .voiceover:     return "waveform"
-        case .overlay:       return "rectangle.on.rectangle"
-        case .effects:       return "plus.magnifyingglass"
-        }
     }
 
     /// Renders an SF Symbol tinted to `color` as an NSImage suitable for a
@@ -1423,21 +1281,6 @@ public final class TimelineNSView: NSView {
         case .effectsLaneHeader:
             onSelectEffectKeyframe?(nil)
             dragSession = nil
-        case .laneDisclosure(let groupID):
-            // Branch B (Slice B.4): chevron click toggles the lane's
-            // collapse state. Reads the current value through
-            // `isLaneCollapsed` (which honours the smart-default seed
-            // for lanes the user hasn't touched yet) and flips it.
-            guard let project else {
-                dragSession = nil
-                return
-            }
-            let nowCollapsed = !project.isLaneCollapsed(groupID)
-            onApplyCommand?(SetLaneCollapsedCommand(
-                groupID: groupID,
-                collapsed: nowCollapsed
-            ))
-            dragSession = nil
         case .rowResizeHandle(let rowID, let currentHeight):
             // Per-row height resize: vertical drag adjusts just this row.
             // No selection change — the user is manipulating chrome.
@@ -1568,11 +1411,10 @@ public final class TimelineNSView: NSView {
             guard let clip = project?.clip(clipID) else { return }
             let proposedStart = seconds(clip.timelineRange.start) + deltaSeconds
             let newStart = RationalTime.seconds(max(0, proposedStart))
-            // Branch B (Slice B.5): if the lead clip's lane is
-            // collapsed, propagate the move to every overlapping clip
-            // on the lane's underlying physical tracks. Otherwise the
-            // single-clip command applies as before.
-            let groupIDs = project?.clipsOnCollapsedLaneOverlapping(clipID) ?? [clipID]
+            // Propagate the move to every overlapping clip on the lane's
+            // other physical tracks (screen + webcam stay in sync). A
+            // lone clip falls through to the single-clip command.
+            let groupIDs = project?.clipsOnLaneOverlapping(clipID) ?? [clipID]
             if groupIDs.count > 1 {
                 onApplyCommand?(MoveClipsGroupCommand(
                     clipIDs: groupIDs,
@@ -1584,7 +1426,7 @@ public final class TimelineNSView: NSView {
             }
         case .trimIn:
             guard let clipID = session.clipID else { return }
-            let groupIDs = project?.clipsOnCollapsedLaneOverlapping(clipID) ?? [clipID]
+            let groupIDs = project?.clipsOnLaneOverlapping(clipID) ?? [clipID]
             if groupIDs.count > 1 {
                 onApplyCommand?(TrimClipsGroupCommand(clipIDs: groupIDs, delta: delta))
             } else {
@@ -1592,7 +1434,7 @@ public final class TimelineNSView: NSView {
             }
         case .trimOut:
             guard let clipID = session.clipID else { return }
-            let groupIDs = project?.clipsOnCollapsedLaneOverlapping(clipID) ?? [clipID]
+            let groupIDs = project?.clipsOnLaneOverlapping(clipID) ?? [clipID]
             if groupIDs.count > 1 {
                 onApplyCommand?(TrimClipsOutGroupCommand(clipIDs: groupIDs, delta: delta))
             } else {

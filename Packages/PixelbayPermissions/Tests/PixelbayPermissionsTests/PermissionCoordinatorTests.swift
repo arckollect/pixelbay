@@ -83,6 +83,20 @@ final class PermissionCoordinatorTests: XCTestCase {
         XCTAssertEqual(result, .denied)
     }
 
+    func test_accessibility_requestInvokesSystemPrompt_notJustSettings() async {
+        // Grant must go through AXIsProcessTrustedWithOptions(prompt) so macOS
+        // registers THIS binary in the Accessibility list. Opening the pane
+        // alone left users toggling stale entries for other builds.
+        let prompted = MutableState(false)
+        let probe = PermissionProbe.testFake(
+            requestAccessibility: { prompted.value = true; return false }
+        )
+        let coordinator = PermissionCoordinator(probe: probe)
+        let status = await coordinator.request(.accessibility)
+        XCTAssertTrue(prompted.value, "request(.accessibility) should call the prompting hook")
+        XCTAssertEqual(status, .notDetermined, "still untrusted until the user flips the toggle")
+    }
+
     func test_accessibility_trustedFlipsToGrantedOnRefresh() async {
         let trusted = MutableState(false)
         let coord = PermissionCoordinator(probe: .testFake(
@@ -175,7 +189,8 @@ extension PermissionProbe {
         requestCamera: @escaping @Sendable () async -> PermissionStatus = { .denied },
         microphoneStatus: @escaping @Sendable () -> PermissionStatus = { .notDetermined },
         requestMicrophone: @escaping @Sendable () async -> PermissionStatus = { .denied },
-        accessibilityTrusted: @escaping @Sendable () -> Bool = { false }
+        accessibilityTrusted: @escaping @Sendable () -> Bool = { false },
+        requestAccessibility: @escaping @Sendable () -> Bool = { false }
     ) -> PermissionProbe {
         PermissionProbe(
             screenRecordingPreflight: screenRecordingPreflight,
@@ -188,6 +203,7 @@ extension PermissionProbe {
             requestMicrophone: requestMicrophone,
             openMicrophoneSettings: {},
             accessibilityTrusted: accessibilityTrusted,
+            requestAccessibility: requestAccessibility,
             openAccessibilitySettings: {}
         )
     }
